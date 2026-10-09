@@ -1,0 +1,37 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+*.local
+.DS_Store
+
+# O banco local do aplicativo fica no diretório de dados do usuário, nunca no
+# repositório. Se alguém gerar um cópia ao lado do código, ela não entra.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Segredos §4/§8: nenhum arquivo de chave, credencial ou ambiente vai para o
+# histórico do Git.
+.env
+.env.*
+*.env
+*.pem
+*.key
+*.pfx
+*.p12
+id_rsa
+id_ed25519
+known_hosts
+credentials
+
+# Editores e sistema
+.vscode/
+.idea/
+Thumbs.db
+
+# Rascunhos de arte para os ícones; os ícones finais versionados ficam em
+# src-tauri/icons.
+vibe_images/

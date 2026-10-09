@@ -1,0 +1,240 @@
+import { useCallback, useEffect, useState } from "react";
+import { api } from "../lib/api";
+import type { GitEditor, ToolVersions } from "../types";
+import { useApp } from "../store/AppContext";
+import { CheckIcon, ExternalLinkIcon, RefreshIcon, XIcon } from "../components/Icons";
+import { Badge, Button, Card, Checkbox, Field, Select, SectionTitle, Spinner, Textarea } from "../components/ui";
+
+const EDITORS: GitEditor[] = ["system", "vscode", "cursor"];
+
+export function SettingsView() {
+  const { settings, setSetting, pushToast } = useApp();
+  const [tools, setTools] = useState<ToolVersions | null>(null);
+  const [toolsLoading, setToolsLoading] = useState(false);
+  const [dataDir, setDataDir] = useState<string | null>(null);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+
+  const loadTools = useCallback(async () => {
+    setToolsLoading(true);
+    try {
+      setTools(await api.getToolVersions());
+      setDataDir(await api.getAppDataDir());
+    } catch (e) {
+      pushToast("error", `Falha ao detectar ferramentas: ${String(e)}`);
+    } finally {
+      setToolsLoading(false);
+    }
+  }, [pushToast]);
+
+  useEffect(() => {
+    void loadTools();
+  }, [loadTools]);
+
+  const toggle = async (key: string, value: boolean) => {
+    setBusyKey(key);
+    try {
+      await setSetting(key, value ? "true" : "false");
+    } catch (e) {
+      pushToast("error", `Falha ao salvar preferência: ${String(e)}`);
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  // Regras extras do verificador de segredos (§8). `null` = nada digitado ainda,
+  // então o campo mostra o valor salvo no banco.
+  const [patterns, setPatterns] = useState<string | null>(null);
+  const patternsValue = patterns ?? settings.secret_patterns ?? "";
+  const patternsDirty = patterns !== null && patterns !== (settings.secret_patterns ?? "");
+
+  const savePatterns = async () => {
+    setBusyKey("secret_patterns");
+    try {
+      await setSetting("secret_patterns", patternsValue);
+      setPatterns(null);
+      pushToast("info", "Regras extras aplicáveis à próxima verificação.");
+    } catch (e) {
+      pushToast("error", `Falha ao salvar as regras: ${String(e)}`);
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const theme = settings.theme === "light" ? "light" : "dark";
+  const confirmDestructive = settings.confirm_destructive !== "false";
+  const prodWarnings = settings.prod_warnings !== "false";
+  const historyEnabled = settings.terminal_history_enabled !== "false";
+  const editor: GitEditor = EDITORS.includes(settings.git_editor as GitEditor)
+    ? (settings.git_editor as GitEditor)
+    : "system";
+
+  return (
+    <div className="max-w-3xl space-y-4">
+      <Card className="p-5">
+        <SectionTitle>Aparência</SectionTitle>
+        <Field label="Tema da interface">
+          <Select className="max-w-xs" value={theme} onChange={(e) => void setSetting("theme", e.target.value)}>
+            <option value="dark">Escuro</option>
+            <option value="light">Claro</option>
+          </Select>
+        </Field>
+      </Card>
+
+      <Card className="p-5">
+        <SectionTitle>Segurança e confirmações</SectionTitle>
+        <div className="space-y-3">
+          <Checkbox
+            checked={confirmDestructive}
+            onChange={(v) => void toggle("confirm_destructive", v)}
+            label={
+              <span>
+                Confirmar antes de operações potencialmente destrutivas
+                {busyKey === "confirm_destructive" ? <Spinner className="ml-1 inline size-3.5" /> : null}
+              </span>
+            }
+          />
+          <Checkbox
+            checked={prodWarnings}
+            onChange={(v) => void toggle("prod_warnings", v)}
+            label={
+              <span>
+                Aviso reforçado para operações em servidores de produção
+                {busyKey === "prod_warnings" ? <Spinner className="ml-1 inline size-3.5" /> : null}
+              </span>
+            }
+          />
+          <Checkbox
+            checked={historyEnabled}
+            onChange={(v) => void toggle("terminal_history_enabled", v)}
+            label={
+              <span>
+                Manter histórico local dos comandos executados no terminal
+                {busyKey === "terminal_history_enabled" ? <Spinner className="ml-1 inline size-3.5" /> : null}
+              </span>
+            }
+          />
+        </div>
+        <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-400">
+          Estas preferências são lidas pelo backend em todas as etapas futuras (transferências, deploys e Git). Senhas, tokens e
+          chaves privadas nunca são armazenados no banco de dados — a autenticação usa o SSH Agent e as chaves existentes. O
+          histórico de comandos é gravado já sem segredos detectáveis.
+        </p>
+      </Card>
+
+      <Card className="p-5">
+        <SectionTitle>Git</SectionTitle>
+        <Field label="Editor usado para abrir repositórios e arquivos">
+          <Select
+            className="max-w-xs"
+            value={editor}
+            onChange={(e) => void setSetting("git_editor", e.target.value)}
+          >
+            <option value="system">Editor padrão do Windows</option>
+            <option value="vscode">Visual Studio Code</option>
+            <option value="cursor">Cursor</option>
+          </Select>
+        </Field>
+        <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+          O botão “Abrir no editor” das seções de Git usa esta escolha. Com o editor padrão do Windows o caminho é entregue
+          ao sistema; com VS Code ou Cursor o app abre direto no arquivo do repositório.
+        </p>
+      </Card>
+
+      <Card className="p-5">
+        <SectionTitle>Proteção de segredos</SectionTitle>
+        <Field
+          label="Regras extras do verificador (um padrão por linha, comparado no nome do arquivo)"
+          hint="Some às regras fixas: .env e variantes, chaves privadas, certificados, arquivos de credencial, tokens com prefixo conhecido e atribuições de senha. Usado no commit, no push, no deploy e na varredura da seção Git."
+        >
+          <Textarea
+            className="mt-1 font-mono text-xs"
+            rows={4}
+            value={patternsValue}
+            placeholder={"token-prod\nfirefly-secret"}
+            onChange={(e) => setPatterns(e.target.value)}
+          />
+        </Field>
+        <div className="mt-2 flex items-center gap-2">
+          <Button size="sm" variant="primary" disabled={!patternsDirty || busyKey === "secret_patterns"} onClick={() => void savePatterns()}>
+            Salvar regras
+          </Button>
+          {patternsDirty ? <Badge tone="warning">ainda não salvo</Badge> : null}
+        </div>
+        <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+          O verificador bloqueia commit e push enquanto houver candidato a segredo no conteúdo que seria publicado, e o
+          deploy recusa o envio dos mesmos arquivos. Em todos os casos a autorização é explícita, feita por você na
+          janela do aviso. Estar no <span className="font-mono">.gitignore</span> não tira um arquivo do índice nem do
+          histórico; a aplicação oferece a remoção do índice sem apagar a cópia local, mas nunca reescreve histórico
+          remoto por conta própria.
+        </p>
+      </Card>
+
+      <Card className="p-5">
+        <div className="flex items-center justify-between">
+          <SectionTitle>Ferramentas do sistema</SectionTitle>
+          <Button size="sm" loading={toolsLoading} onClick={() => void loadTools()}>
+            <RefreshIcon className="size-3.5" /> Verificar novamente
+          </Button>
+        </div>
+        {tools === null ? (
+          <p className="text-sm text-zinc-500">Detectando…</p>
+        ) : (
+          <ul className="divide-y divide-zinc-100 text-sm dark:divide-zinc-800">
+            <ToolRow label="Cliente SSH (OpenSSH)" value={tools.ssh} />
+            <ToolRow label="ssh-add (SSH Agent)" value={tools.sshAdd} extra={tools.agentRunning === null ? null : tools.agentRunning ? "agente em execução" : "agente parado"} />
+            <ToolRow label="Git" value={tools.git} />
+          </ul>
+        )}
+        <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-400">
+          A aplicação depende do OpenSSH e do Git nativos do computador para preservar a compatibilidade com as suas
+          configurações, chaves e agentes existentes.
+        </p>
+      </Card>
+
+      <Card className="p-5">
+        <SectionTitle>Dados locais</SectionTitle>
+        <p className="text-sm">Diretório de dados da aplicação:</p>
+        <p className="mt-1 break-all rounded-lg bg-zinc-100 px-3 py-2 font-mono text-xs dark:bg-zinc-800">{dataDir ?? "—"}</p>
+        <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+          O banco SQLite (servidores, projetos, preferências e histórico de auditoria) fica neste diretório. Nenhum dado sai
+          deste computador.
+        </p>
+      </Card>
+
+      <Card className="p-5">
+        <SectionTitle>Sobre</SectionTitle>
+        <p className="text-sm font-medium">DevOps Desktop</p>
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          Central de SSH, Git e Deploy · versão 0.1.0 · Rust + Tauri 2 + React
+        </p>
+        <p className="mt-2 flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+          Código-fonte e documentação
+          <ExternalLinkIcon className="size-3.5" />
+          disponíveis no repositório público do projeto.
+        </p>
+      </Card>
+    </div>
+  );
+}
+
+function ToolRow({ label, value, extra }: { label: string; value: string | null; extra?: string | null }) {
+  return (
+    <li className="flex items-center gap-3 py-2">
+      <span>{label}</span>
+      <span className="ml-auto flex items-center gap-2">
+        {extra ? <Badge tone={extra.includes("execução") ? "success" : "warning"}>{extra}</Badge> : null}
+        {value ? (
+          <>
+            <span className="font-mono text-xs text-zinc-500 dark:text-zinc-400">{value}</span>
+            <CheckIcon className="size-4 text-emerald-500" />
+          </>
+        ) : (
+          <>
+            <span className="text-xs text-red-500">não encontrado</span>
+            <XIcon className="size-4 text-red-500" />
+          </>
+        )}
+      </span>
+    </li>
+  );
+}
