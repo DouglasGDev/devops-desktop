@@ -27,6 +27,7 @@ import type {
   RemoteEntry,
   RemoteInfo,
   RepoStatus,
+  ResetMode,
   Routine,
   RoutineInput,
   SearchResults,
@@ -279,6 +280,10 @@ export const api = {
     invoke<GitActionOutcome>("git_continue_rebase", { projectId }),
   gitResolveConflict: (projectId: number, path: string, side: "ours" | "theirs") =>
     invoke<RepoStatus>("git_resolve_conflict", { projectId, path, side }),
+  gitRevert: (projectId: number, commit: string, mainline?: number | null) =>
+    invoke<GitActionOutcome>("git_revert", { projectId, commit, mainline: mainline ?? null }),
+  gitReset: (projectId: number, mode: ResetMode, target: string) =>
+    invoke<GitActionOutcome>("git_reset", { projectId, mode, target }),
   gitFetch: (projectId: number, remote?: string | null) =>
     invoke<GitActionOutcome>("git_fetch", { projectId, remote: remote ?? null }),
   gitPull: (projectId: number, strategy: PullStrategy) =>

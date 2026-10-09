@@ -1,6 +1,5 @@
 use std::{
     path::{Path, PathBuf},
-    process::Command,
 };
 
 /// Detecta se a pasta contém um repositório Git e coleta branch/remote com o
@@ -24,7 +23,7 @@ pub fn probe(path: &Path) -> GitProbe {
 }
 
 fn git_line(path: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
+    let output = crate::proc::command("git")
         .arg("-C")
         .arg(path)
         .args(args)

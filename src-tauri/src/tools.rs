@@ -1,9 +1,7 @@
-use std::process::Command;
-
 use crate::models::ToolVersions;
 
 fn run_capture(program: &str, args: &[&str]) -> Option<(String, String, Option<i32>)> {
-    let output = Command::new(program).args(args).output().ok()?;
+    let output = crate::proc::command(program).args(args).output().ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     Some((stdout, stderr, output.status.code()))

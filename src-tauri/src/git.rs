@@ -143,7 +143,7 @@ pub struct CommitDetail {
 // ---------- execução ----------
 
 fn base_cmd(dir: &Path) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::proc::command("git");
     cmd.arg("-C")
         .arg(dir)
         .arg("-c")
@@ -1054,6 +1054,65 @@ pub fn resolve_conflict(dir: &Path, path: &str, side: &str) -> Result<(), String
     Ok(())
 }
 
+// ---------- reversão ----------
+
+/// Quantos pais um commit tem: 1 no caso comum, 2+ quando é um merge.
+fn parent_count(dir: &Path, id: &str) -> usize {
+    run(dir, &["rev-list", "--parents", "-n", "1", id])
+        .map(|line| line.split_whitespace().count().saturating_sub(1))
+        .unwrap_or(1)
+}
+
+/// Desfaz um commit gravando um commit novo com as mudanças invertidas. O
+/// histórico existente não é reescrito, então isto funciona mesmo em ramo que
+/// já foi publicado — o `push` posterior propaga a reversão.
+pub fn revert(dir: &Path, id: &str, mainline: Option<i64>) -> Result<String, String> {
+    validate_id(id)?;
+    let parents = parent_count(dir, id);
+    if parents > 1 && mainline.is_none() {
+        return Err(format!(
+            "este commit é um merge com {parents} pais; escolha qual deles continua (o pai 1 é o ramo que recebeu o merge)"
+        ));
+    }
+    let mut args: Vec<String> = vec!["revert".into(), "--no-edit".into()];
+    if let Some(main) = mainline {
+        if main < 1 || main as usize > parents {
+            return Err(format!("pai inválido: este commit tem {parents} pais"));
+        }
+        args.push("-m".into());
+        args.push(main.to_string());
+    }
+    args.push(id.to_string());
+    run(dir, &args)
+}
+
+/// Move a cabeça do ramo para outro commit. `soft` e `mixed` só mexem no
+/// histórico e no índice; `hard` também apaga o conteúdo em trabalho, por isso
+/// a interface só chama depois de confirmação explícita.
+pub fn reset(dir: &Path, mode: &str, target: &str) -> Result<String, String> {
+    let flag = match mode {
+        "soft" => "--soft",
+        "mixed" => "--mixed",
+        "hard" => "--hard",
+        other => return Err(format!("modo de reversão desconhecido: {other}")),
+    };
+    validate_id(target)?;
+    let antes = short_head(dir);
+    let saida = run(dir, &["reset", flag, target])?;
+    Ok(format!(
+        "{}\ncabeça agora em {} (antes: {})",
+        saida.trim(),
+        short_head(dir),
+        antes
+    ))
+}
+
+fn short_head(dir: &Path) -> String {
+    run(dir, &["rev-parse", "--short", "HEAD"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "desconhecida".to_string())
+}
+
 // ---------- sincronização ----------
 
 pub fn fetch(dir: &Path, remote: Option<&str>) -> Result<String, String> {
@@ -1636,6 +1695,125 @@ mod tests {
         // push sem remoto configurado falha com mensagem útil
         let err = push(&dir, None, None, false).unwrap_err();
         assert!(!err.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reversão real, sem nenhum servidor envolvido: `revert` grava o commit
+    /// inverso e um merge só é revertido com o pai escolhido.
+    #[test]
+    fn revert_cria_commit_inverso_e_exige_pai_no_merge() {
+        let dir = temp_repo("reverter");
+        write(&dir, "a.txt", "um\n");
+        stage(&dir, &["a.txt".into()]).unwrap();
+        commit(&dir, "primeiro", false).unwrap();
+
+        write(&dir, "a.txt", "dois\n");
+        stage(&dir, &["a.txt".into()]).unwrap();
+        let segundo = commit(&dir, "segundo", false).unwrap();
+
+        revert(&dir, &segundo, None).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "um\n");
+        let linhas = graph(&dir, 10, false).unwrap();
+        assert!(
+            linhas[0].commit.subject.contains("segundo"),
+            "o topo do histórico deveria ser a reversão de segundo: {:?}",
+            linhas[0].commit.subject
+        );
+        assert_eq!(parent_count(&dir, &linhas[0].commit.id), 1);
+        assert!(
+            linhas.iter().any(|r| r.commit.subject == "segundo"),
+            "revert não apaga o histórico"
+        );
+
+        // merge: dois pais, então a reversão precisa dizer qual deles continua.
+        checkout(&dir, "paralelo", true, None).unwrap();
+        write(&dir, "c.txt", "c\n");
+        stage(&dir, &["c.txt".into()]).unwrap();
+        commit(&dir, "no paralelo", false).unwrap();
+        checkout(&dir, "main", false, None).unwrap();
+        write(&dir, "d.txt", "d\n");
+        stage(&dir, &["d.txt".into()]).unwrap();
+        commit(&dir, "no main", false).unwrap();
+        merge(&dir, "paralelo").unwrap();
+
+        let cabeca = run(&dir, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        assert_eq!(parent_count(&dir, &cabeca), 2, "o merge deve ter dois pais");
+        let erro = revert(&dir, &cabeca, None).unwrap_err();
+        assert!(erro.contains("merge com 2 pais"), "mensagem útil: {erro}");
+        assert!(revert(&dir, &cabeca, Some(3)).is_err(), "pai inexistente é recusado");
+        revert(&dir, &cabeca, Some(1)).unwrap();
+        assert!(!dir.join("c.txt").exists(), "revert do merge tira o que o paralelo trouxe");
+        assert!(dir.join("d.txt").exists(), "o trabalho do ramo principal permanece");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Os três modos de `reset` têm efeitos distintos e isto é verificado no
+    /// sistema de arquivos de verdade — inclusive que `hard` descarta trabalho.
+    #[test]
+    fn reset_soft_mixed_e_hard_mudem_cada_um_do_seu_modo() {
+        let dir = temp_repo("resetar");
+        write(&dir, "a.txt", "um\n");
+        stage(&dir, &["a.txt".into()]).unwrap();
+        let primeiro = commit(&dir, "primeiro", false).unwrap();
+        write(&dir, "a.txt", "dois\n");
+        stage(&dir, &["a.txt".into()]).unwrap();
+        commit(&dir, "segundo", false).unwrap();
+
+        write(&dir, "b.txt", "novo\n");
+        stage(&dir, &["b.txt".into()]).unwrap();
+
+        let saida = reset(&dir, "soft", &primeiro).unwrap();
+        assert!(saida.contains("cabeça agora em"), "a saída diz onde a cabeça ficou: {saida}");
+        let status = read_status(&dir).unwrap();
+        assert_eq!(status.files.iter().filter(|f| f.path == "b.txt" && f.staged).count(), 1,
+            "soft mantém o índice");
+
+        reset(&dir, "mixed", &primeiro).unwrap();
+        let status = read_status(&dir).unwrap();
+        assert!(
+            status.files.iter().any(|f| f.path == "b.txt" && !f.staged),
+            "mixed solta o índice mas mantém o arquivo em trabalho"
+        );
+        assert!(dir.join("b.txt").exists(), "mixed não apaga nada do disco");
+
+        write(&dir, "a.txt", "sujo\n");
+        reset(&dir, "hard", &primeiro).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "um\n",
+            "hard descarta o conteúdo em trabalho");
+        assert!(dir.join("b.txt").exists(), "hard não apaga arquivo que o git não rastreia");
+
+        assert!(reset(&dir, "esquisito", &primeiro).is_err(), "modo fora da lista é recusado");
+        assert!(reset(&dir, "soft", "-hard").is_err(), "referência começando com '-' é recusada");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nome explícito do que a verificação acima também cobre: `reset --soft`
+    /// move só a cabeça — o índice continua preparado, arquivo por arquivo.
+    #[test]
+    fn reset_soft_preserva_o_indice() {
+        let dir = temp_repo("reset-soft");
+        write(&dir, "a.txt", "um\n");
+        stage(&dir, &["a.txt".into()]).unwrap();
+        let primeiro = commit(&dir, "primeiro", false).unwrap();
+        write(&dir, "a.txt", "dois\n");
+        stage(&dir, &["a.txt".into()]).unwrap();
+        let segundo = commit(&dir, "segundo", false).unwrap();
+        write(&dir, "b.txt", "novo\n");
+        stage(&dir, &["b.txt".into()]).unwrap();
+
+        reset(&dir, "soft", &primeiro).unwrap();
+
+        // a cabeça voltou, mas o índice é exatamente o do commit "segundo" + b.txt
+        assert_eq!(run(&dir, &["rev-parse", "HEAD"]).unwrap().trim(), primeiro);
+        assert_eq!(
+            staged_files(&dir).unwrap(),
+            vec!["a.txt".to_string(), "b.txt".to_string()],
+            "o índice sobrevive ao reset --soft"
+        );
+        assert_ne!(segundo, primeiro, "são commits diferentes");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

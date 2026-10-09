@@ -251,6 +251,14 @@ no histórico local (opcional) para reutilização e auditoria. Fechar a janela 
 - **Alterações**: arquivos staged/unstaged/untracked, diff lado a lado por linha, stage por trecho.
 - **Commit**: mensagem livre, `amend` com aviso de reescrita de histórico (nunca feito automaticamente).
 - **Histórico**: gráfico de commits com branches e tags, detalhe do commit, diff entre dois commits/branches.
+- **Reversão**: no detalhe de um commit há duas ações distintas. *Reverter este commit* grava um commit novo com as
+  mudanças invertidas (`git revert --no-edit`) — o histórico não é reescrito, então funciona até em ramo já publicado,
+  e um merge exige dizer qual pai continua. *Voltar para este commit* move a cabeça do ramo (`git reset`) e a confirmação
+  mostra os três modos com o efeito real de cada um: `soft` mantém o índice como está, `mixed` solta o índice e preserva
+  os arquivos, `hard` substitui o conteúdo em trabalho — por isso o botão de `hard` é o de operação destrutiva, e a
+  contagem de alterações em andamento aparece no aviso. Nenhuma dessas duas ações toca o remoto: se voltar a cabeça criar
+  divergência com o branch acompanhado, o próprio Git recusa o envio comum, e reescrever histórico remoto é algo que a
+  aplicação não faz sozinha.
 - **Branches**: criar, alternar, renomear, excluir (com confirmação), remotas visíveis.
 - **Merge/Rebase**: executados com saída do Git tratada; conflito abre a escolha de lado por arquivo.
 - **Remotos**: listar, adicionar, mudar URL, remover; fetch/pull (merge ou rebase)/push com rastreio de branch.
@@ -335,6 +343,7 @@ Resumo do que é garantido pelo código, não só pela interface:
         ├── commands.rs      # todos os #[tauri::command] registrados
         ├── db.rs            # SQLite, migrações por user_version, repositório local
         ├── models.rs        # entidades persistidas
+        ├── proc.rs          # processos filhos sem janela de console (CREATE_NO_WINDOW)
         ├── ssh_config.rs    # leitura não destrutiva de ~/.ssh/config
         ├── ssh_test.rs      # teste de conexão com classificação de falha
         ├── sshexec.rs       # execução remota por stdin, timeout, cancelamento
@@ -363,11 +372,16 @@ cd src-tauri
 cargo test --lib
 ```
 
-Cobertura atual do backend (132 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
+Cobertura atual do backend (137 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
 timeout e cancelamento, sessões PTY, ciclo completo de Git em repositório temporário (status, stage por hunk, commit,
-log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), guarda de segredos lendo o
-índice e o `HEAD`, varredura de árvore, regras extras, migrações e repositório SQLite, parser das métricas reais e o
-script de leitura (que não escreve nada nem presume ferramenta), além da integração GitHub: validação de Client ID
+log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), reversão de commit — o
+commit inverso criado por `revert`, a exigência de escolher o pai em um merge, e os três modos de `reset` verificados no
+sistema de arquivos (`soft` mantém o índice preparado, `mixed` solta o índice sem apagar o disco, `hard` substitui o
+conteúdo rastreado e deixa o arquivo não rastreado); `reset_soft_preserva_o_indice` confere, arquivo por arquivo, que o
+índice sobrevive ao `--soft` —, guarda de segredos lendo o índice e o `HEAD`, varredura de árvore,
+regras extras, migrações e repositório SQLite, o helper que monta os processos filhos sem janela de console (argv
+preservado), parser das métricas reais e o script de leitura (que não escreve nada nem presume ferramenta), além da
+integração GitHub: validação de Client ID
 (recusando token colado no campo), validação de `dono/nome` e de nome de repositório, codificação de URL, parsing da
 resposta de repositórios, mensagem de erro por status HTTP e o fato de que nenhum token aparece na resposta para a
 interface. Nenhum teste de rede é feito: as rotas que falam com o GitHub são exercitadas só na máquina, com dados de

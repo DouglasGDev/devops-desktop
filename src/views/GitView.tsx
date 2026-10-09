@@ -3,7 +3,7 @@ import { api } from "../lib/api";
 import { useGitRepo } from "../lib/useGitRepo";
 import { formatRelative, formatTimestamp } from "../lib/format";
 import { useApp } from "../store/AppContext";
-import type { CommitDetail, FileDiff, GitEditor, PullStrategy, SecretFinding, ViewId } from "../types";
+import type { CommitDetail, FileDiff, GitEditor, PullStrategy, ResetMode, SecretFinding, ViewId } from "../types";
 import {
   AlertTriangleIcon,
   CloudIcon,
@@ -13,6 +13,7 @@ import {
   GitBranchIcon,
   PlusIcon,
   RefreshIcon,
+  UndoIcon,
   UploadIcon,
   XIcon,
 } from "../components/Icons";
@@ -20,6 +21,7 @@ import {
   Badge,
   Button,
   Card,
+  Confirm,
   EmptyState,
   Field,
   Input,
@@ -38,6 +40,21 @@ import { SecretsPanel } from "../components/git/SecretsPanel";
 import { TagsPanel } from "../components/git/TagsPanel";
 
 type Tab = "changes" | "history" | "branches" | "tags" | "remotes" | "secrets";
+
+/** O que cada modo de `git reset` faz, do jeito que os testes do backend
+ * verificam: soft preserva o índice, mixed solta o índice, hard substitui o
+ * conteúdo em trabalho. */
+const RESET_LABELS: Record<ResetMode, string> = {
+  soft: "soft — mantém as alterações preparadas",
+  mixed: "mixed — solta o índice, mantém os arquivos",
+  hard: "hard — descarta o conteúdo em trabalho",
+};
+
+const RESET_HINTS: Record<ResetMode, string> = {
+  soft: "A cabeça do ramo volta para o commit e o índice continua igual: o que estava preparado permanece preparado.",
+  mixed: "A cabeça volta e o índice é refeito a partir do commit escolhido. Os arquivos ficam no disco como estavam, só deixam de estar preparados.",
+  hard: "A cabeça volta e os arquivos rastreados são substituídos pelo conteúdo do commit. O que não estiver em um commit é perdido — arquivos não rastreados continuam no disco.",
+};
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "changes", label: "Alterações" },
@@ -80,6 +97,8 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
   const [compareFrom, setCompareFrom] = useState("");
   const [compareTo, setCompareTo] = useState("");
   const [pushBlock, setPushBlock] = useState<SecretFinding[] | null>(null);
+  const [revertAsk, setRevertAsk] = useState<CommitDetail | null>(null);
+  const [resetAsk, setResetAsk] = useState<{ commit: string; subject: string; mode: ResetMode } | null>(null);
 
   const git = useGitRepo(projectId, pushToast);
   const status = git.status;
@@ -164,6 +183,20 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
     setTarget({ kind: "compare", from, to });
     setCompareOpen(false);
     setTab("history");
+  };
+
+  const doRevert = async (detail: CommitDetail) => {
+    setRevertAsk(null);
+    // merge tem dois pais: o git exige dizer qual deles continua.
+    const mainline = detail.commit.parents.length > 1 ? 1 : null;
+    await git.revert(detail.commit.id, mainline);
+  };
+
+  const doReset = async (ask: { commit: string; mode: ResetMode }) => {
+    setResetAsk(null);
+    const feito = await git.reset(ask.mode, ask.commit);
+    // o commit escolhido pode ter saído do alcance; fechar o diff evita leitura velha
+    if (feito) setTarget(null);
   };
 
   // §8: antes de publicar, o conteúdo do HEAD é verificado. Se houver candidato
@@ -437,6 +470,25 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
                   </li>
                 ))}
               </ul>
+              <div className="mt-3 flex flex-wrap gap-2 border-t border-zinc-200 pt-3 dark:border-zinc-800">
+                <Button
+                  size="sm"
+                  disabled={git.busy !== null}
+                  onClick={() => setRevertAsk(detail)}
+                  title="git revert — cria um commit novo que desfaz este"
+                >
+                  <UndoIcon className="size-3.5" /> Reverter este commit
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={git.busy !== null}
+                  onClick={() => setResetAsk({ commit: detail.commit.id, subject: detail.commit.subject, mode: "mixed" })}
+                  title="git reset — move a cabeça do ramo de volta para este commit"
+                >
+                  Voltar para este commit
+                </Button>
+              </div>
             </Card>
           ) : null}
 
@@ -465,6 +517,63 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
       </div>
 
       <CloneDialog open={cloning} onClose={() => setCloning(false)} />
+
+      <Confirm
+        open={revertAsk !== null}
+        title="Reverter este commit"
+        message={
+          revertAsk
+            ? `Será criado um commit novo que desfaz as mudanças de “${revertAsk.commit.subject}” (${revertAsk.commit.shortId}). ` +
+              `O histórico não é reescrito: o commit original continua no gráfico e a reversão vai por cima dele.` +
+              (revertAsk.commit.parents.length > 1
+                ? ` Como é um merge, a reversão segue o pai 1 — o ramo que recebeu a mesclagem.`
+                : ``) +
+              (dirty > 0
+                ? ` Este repositório tem ${dirty} alteração(ões) em andamento; se elas se sobrepuserem ao que a reversão toca, o git recusa e nada é gravado.`
+                : ``)
+            : ""
+        }
+        confirmLabel="Criar a reversão"
+        busy={git.busy !== null}
+        onConfirm={() => revertAsk && void doRevert(revertAsk)}
+        onClose={() => setRevertAsk(null)}
+      />
+
+      <Confirm
+        open={resetAsk !== null}
+        title="Voltar a cabeça do ramo"
+        message={
+          resetAsk
+            ? `A cabeça do ramo ${branch ?? "(ramo sem nome)"} está em ${git.history[0]?.commit.shortId ?? "?"} e passaria para “${resetAsk.subject}” (${resetAsk.commit.slice(0, 9)}). ` +
+              RESET_HINTS[resetAsk.mode] +
+              (resetAsk.mode === "hard" && dirty > 0
+                ? ` ATENÇÃO: ${dirty} alteração(ões) em andamento seriam descartadas.`
+                : ``) +
+              (status?.upstream
+                ? ` O ramo tem remoto acompanhante (${status.upstream}): voltar a cabeça para trás cria divergência, e o envio normal seria recusado pelo git. Reescrever o remoto não é algo que esta aplicação faça.`
+                : ``)
+            : ""
+        }
+        confirmLabel={resetAsk?.mode === "hard" ? "Voltar e descartar" : "Voltar"}
+        busy={git.busy !== null}
+        onConfirm={() => resetAsk && void doReset(resetAsk)}
+        onClose={() => setResetAsk(null)}
+      >
+        {resetAsk ? (
+          <Field label="Modo" hint="O que acontece com o que está preparado e com o que está em trabalho.">
+            <Select
+              value={resetAsk.mode}
+              onChange={(e) => setResetAsk({ ...resetAsk, mode: e.target.value as ResetMode })}
+            >
+              {(Object.keys(RESET_LABELS) as ResetMode[]).map((m) => (
+                <option key={m} value={m}>
+                  {RESET_LABELS[m]}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        ) : null}
+      </Confirm>
 
       <Modal open={compareOpen} onClose={() => setCompareOpen(false)} title="Comparar dois pontos do histórico">
         <div className="grid gap-3">

@@ -2,7 +2,6 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use crate::models::{AgentInfo, AgentKey, KeyFile, KnownHostsInfo, SshDiscoveryReport, SshHostCandidate};
@@ -359,7 +358,7 @@ fn read_known_hosts(ssh_dir: &Path) -> Option<KnownHostsInfo> {
 }
 
 fn read_agent() -> AgentInfo {
-    let output = Command::new("ssh-add").arg("-l").output();
+    let output = crate::proc::command("ssh-add").arg("-l").output();
     match output {
         Err(_) => AgentInfo {
             available: false,

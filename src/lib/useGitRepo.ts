@@ -8,6 +8,7 @@ import type {
   PullStrategy,
   RemoteInfo,
   RepoStatus,
+  ResetMode,
   SecretFinding,
   TagInfo,
 } from "../types";
@@ -45,6 +46,8 @@ export interface GitRepo {
   abort: (kind: "merge" | "rebase") => Promise<RepoStatus | null>;
   continueRebase: () => Promise<GitActionOutcome | null>;
   resolveConflict: (path: string, side: "ours" | "theirs") => Promise<RepoStatus | null>;
+  revert: (commitId: string, mainline?: number | null) => Promise<GitActionOutcome | null>;
+  reset: (mode: ResetMode, target: string) => Promise<GitActionOutcome | null>;
   fetch: (remote?: string | null) => Promise<GitActionOutcome | null>;
   pull: (strategy: PullStrategy) => Promise<GitActionOutcome | null>;
   push: (params: {
@@ -325,6 +328,21 @@ export function useGitRepo(projectId: number | null, notify: GitNotify): GitRepo
     [statusAction],
   );
 
+  /** Desfaz um commit gravando outro no lugar — nada do histórico é reescrito. */
+  const revert = useCallback(
+    (commitId: string, mainline?: number | null) =>
+      reloadAfter(`Revertendo ${commitId.slice(0, 9)}`, (id) => api.gitRevert(id, commitId, mainline ?? null)),
+    [reloadAfter],
+  );
+
+  /** Move a cabeça do ramo. `hard` descarta trabalho, por isso chega aqui só
+   * depois da confirmação da interface. */
+  const reset = useCallback(
+    (mode: ResetMode, target: string) =>
+      reloadAfter(`Movendo a cabeça do ramo (--${mode})`, (id) => api.gitReset(id, mode, target)),
+    [reloadAfter],
+  );
+
   const fetch = useCallback(
     (remote?: string | null) =>
       reloadAfter(remote ? `Buscando de ${remote}` : "Buscando de todos os remotos", (id) =>
@@ -423,6 +441,8 @@ export function useGitRepo(projectId: number | null, notify: GitNotify): GitRepo
     abort,
     continueRebase,
     resolveConflict,
+    revert,
+    reset,
     fetch,
     pull,
     push,

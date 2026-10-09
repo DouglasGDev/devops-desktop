@@ -69,7 +69,7 @@ fn ssh_base(server: &Server, askpass: Option<&AskPass>) -> Result<Command, Strin
             server.name
         ));
     }
-    let mut cmd = Command::new("ssh");
+    let mut cmd = crate::proc::command("ssh");
     match askpass {
         Some(pass) => {
             pass.apply(&mut cmd);
@@ -212,7 +212,7 @@ pub fn run_local(
         return Err("comando vazio".to_string());
     }
     let (program, flag) = if cfg!(windows) { ("cmd", "/C") } else { ("sh", "-c") };
-    let mut cmd = Command::new(program);
+    let mut cmd = crate::proc::command(program);
     cmd.arg(flag)
         .arg(command)
         .current_dir(cwd)

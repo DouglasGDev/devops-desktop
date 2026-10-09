@@ -1325,6 +1325,44 @@ async fn git_resolve_conflict(
 }
 
 #[tauri::command]
+async fn git_revert(
+    state: State<'_, AppState>,
+    project_id: i64,
+    commit: String,
+    mainline: Option<i64>,
+) -> Result<GitActionOutcome, String> {
+    let db = state.db.clone();
+    let detail = format!(
+        "reversão do commit {commit}{}",
+        mainline.map(|m| format!(" (pai {m} do merge)")).unwrap_or_default()
+    );
+    git_write(db, project_id, "git_revert", detail, move |dir| {
+        git::revert(dir, &commit, mainline).map(outcome)
+    })
+    .await
+}
+
+/// Mover a cabeça do ramo pode desfazer trabalho local; o modo `hard` vem da
+/// interface só depois de confirmação explícita e fica registrado na auditoria.
+#[tauri::command]
+async fn git_reset(
+    state: State<'_, AppState>,
+    project_id: i64,
+    mode: String,
+    target: String,
+) -> Result<GitActionOutcome, String> {
+    if !matches!(mode.as_str(), "soft" | "mixed" | "hard") {
+        return Err("modo de reversão inválido".into());
+    }
+    let db = state.db.clone();
+    let detail = format!("cabeça movida para {target} (--{mode})");
+    git_write(db, project_id, "git_reset", detail, move |dir| {
+        git::reset(dir, &mode, &target).map(outcome)
+    })
+    .await
+}
+
+#[tauri::command]
 async fn git_fetch(
     state: State<'_, AppState>,
     project_id: i64,
@@ -2356,6 +2394,8 @@ pub fn register_all(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri
         git_abort,
         git_continue_rebase,
         git_resolve_conflict,
+        git_revert,
+        git_reset,
         git_fetch,
         git_pull,
         git_push,

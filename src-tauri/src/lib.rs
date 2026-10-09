@@ -10,6 +10,7 @@ mod git_probe;
 mod github;
 mod infra;
 mod models;
+mod proc;
 mod ssh_config;
 mod ssh_test;
 mod sshexec;

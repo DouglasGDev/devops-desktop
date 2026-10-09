@@ -1,6 +1,6 @@
 use std::{
     io::Read,
-    process::{Command, Stdio},
+    process::Stdio,
     thread,
     time::{Duration, Instant},
 };
@@ -29,7 +29,7 @@ pub fn test(
     askpass: Option<&AskPass>,
 ) -> ConnectionTestResult {
     let start = Instant::now();
-    let mut cmd = Command::new("ssh");
+    let mut cmd = crate::proc::command("ssh");
     match askpass {
         Some(pass) => {
             pass.apply(&mut cmd);

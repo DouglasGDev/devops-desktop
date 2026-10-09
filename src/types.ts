@@ -333,6 +333,9 @@ export interface GitActionOutcome {
 
 export type GitEditor = "system" | "vscode" | "cursor";
 
+/// Modos de reversão do Git. `hard` é o único que descarta conteúdo em trabalho.
+export type ResetMode = "soft" | "mixed" | "hard";
+
 export type DeployStrategy = "sftp" | "git" | "artifacts" | "script" | "docker";
 
 export type DeployProfile = {

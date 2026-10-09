@@ -55,7 +55,7 @@ pub(crate) fn sftp_cmd(
     if server.host.trim().is_empty() && server.ssh_alias.as_deref().unwrap_or("").trim().is_empty() {
         return Err("servidor sem host ou alias — cadastre um destino válido".into());
     }
-    let mut cmd = Command::new("sftp");
+    let mut cmd = crate::proc::command("sftp");
     match askpass {
         Some(pass) => {
             pass.apply(&mut cmd);
