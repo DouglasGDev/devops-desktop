@@ -138,6 +138,7 @@ export const CATEGORY_LABELS: Record<string, string> = {
   project: "Projeto",
   settings: "Configurações",
   git: "Git",
+  github: "GitHub",
   deploy: "Deploy",
   files: "Arquivos",
   transfer: "Transferência",

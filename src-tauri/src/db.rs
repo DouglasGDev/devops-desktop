@@ -184,7 +184,7 @@ pub fn init(app: &tauri::AppHandle) -> Result<Connection, String> {
     Ok(conn)
 }
 
-fn migrate(conn: &Connection) -> Result<(), String> {
+pub(crate) fn migrate(conn: &Connection) -> Result<(), String> {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(|e| format!("falha ao ler versão do esquema: {e}"))?;

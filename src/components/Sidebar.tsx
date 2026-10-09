@@ -1,5 +1,5 @@
 import type { ViewId } from "../types";
-import { CommitIcon, DashboardIcon, FolderIcon, GitBranchIcon, HistoryIcon, RocketIcon, ServerIcon, SettingsIcon, TerminalIcon } from "./Icons";
+import { CloudIcon, CommitIcon, DashboardIcon, FolderIcon, GitBranchIcon, HistoryIcon, RocketIcon, ServerIcon, SettingsIcon, TerminalIcon } from "./Icons";
 
 const NAV = [
   { id: "dashboard" as ViewId, label: "Dashboard", icon: DashboardIcon },
@@ -7,6 +7,7 @@ const NAV = [
   { id: "terminal" as ViewId, label: "Terminal", icon: TerminalIcon },
   { id: "files" as ViewId, label: "Arquivos remotos", icon: FolderIcon },
   { id: "git" as ViewId, label: "Git", icon: CommitIcon },
+  { id: "github" as ViewId, label: "GitHub", icon: CloudIcon },
   { id: "projects" as ViewId, label: "Projetos", icon: GitBranchIcon },
   { id: "deploy" as ViewId, label: "Deploy", icon: RocketIcon },
   { id: "history" as ViewId, label: "Histórico", icon: HistoryIcon },
@@ -19,6 +20,7 @@ export const VIEW_TITLES: Record<ViewId, string> = {
   terminal: "Terminal SSH",
   files: "Arquivos remotos (SFTP)",
   git: "Gerenciador Git",
+  github: "GitHub",
   projects: "Projetos",
   deploy: "Deploy",
   history: "Histórico e auditoria",
@@ -57,7 +59,7 @@ export function Sidebar({ view, onNavigate }: { view: ViewId; onNavigate: (v: Vi
         })}
       </nav>
       <div className="px-4 py-3 text-[10px] leading-relaxed text-zinc-400 dark:text-zinc-500">
-        v0.1.0 · dados 100% locais (SQLite)
+        v0.1.0 · inventário local em SQLite · GitHub só quando você conecta
       </div>
     </aside>
   );

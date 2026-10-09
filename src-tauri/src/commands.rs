@@ -16,7 +16,7 @@ use crate::{
     deploy,
     files,
     files_transfer::{self, TransferInfo, TransferState},
-    git, git_probe, infra,
+    git, git_probe, github, infra,
     models::{
         AuditEntry, ConnectionTestResult, DeployProfile, DeployProfileInput, DeployRun, ImportSshHost,
         Project, RemoteEntry, Routine,
@@ -2184,6 +2184,130 @@ async fn transfers_list(transfers: State<'_, TransferState>) -> Result<Vec<Trans
     Ok(files_transfer::list_active(&transfers))
 }
 
+/// Executa o trabalho fora da runtime async: as chamadas ao GitHub são
+/// bloqueantes e podem levar segundos.
+async fn spawn<T, F>(context: &'static str, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("falha interna ({context}): {e}"))?
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubClientIdInput {
+    client_id: String,
+}
+
+#[tauri::command]
+async fn github_status(
+    state: State<'_, AppState>,
+    gh: State<'_, github::GitHubState>,
+) -> Result<github::GitHubStatus, String> {
+    let db = state.db.clone();
+    let gh = (*gh).clone();
+    spawn("github_status", move || {
+        let conn = lock_db(&db)?;
+        github::status(&conn, &gh)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn github_set_client_id(
+    state: State<'_, AppState>,
+    gh: State<'_, github::GitHubState>,
+    input: GitHubClientIdInput,
+) -> Result<github::GitHubStatus, String> {
+    let db = state.db.clone();
+    let gh = (*gh).clone();
+    let client_id = input.client_id;
+    spawn("github_set_client_id", move || {
+        let conn = lock_db(&db)?;
+        github::store_client_id(&conn, &client_id)?;
+        github::status(&conn, &gh)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn github_connect_start(
+    state: State<'_, AppState>,
+    gh: State<'_, github::GitHubState>,
+) -> Result<github::DeviceFlow, String> {
+    let db = state.db.clone();
+    let gh = (*gh).clone();
+    spawn("github_connect_start", move || {
+        let conn = lock_db(&db)?;
+        github::connect_start(&conn, &gh)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn github_connect_poll(
+    state: State<'_, AppState>,
+    gh: State<'_, github::GitHubState>,
+) -> Result<github::ConnectResult, String> {
+    let db = state.db.clone();
+    let gh = (*gh).clone();
+    spawn("github_connect_poll", move || {
+        let conn = lock_db(&db)?;
+        github::connect_poll(&conn, &gh)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn github_disconnect(
+    state: State<'_, AppState>,
+    gh: State<'_, github::GitHubState>,
+) -> Result<github::GitHubStatus, String> {
+    let db = state.db.clone();
+    let gh = (*gh).clone();
+    spawn("github_disconnect", move || {
+        let conn = lock_db(&db)?;
+        github::disconnect(&conn, &gh)?;
+        github::status(&conn, &gh)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn github_repos(
+    gh: State<'_, github::GitHubState>,
+) -> Result<Vec<github::GitHubRepo>, String> {
+    let gh = (*gh).clone();
+    spawn("github_repos", move || github::repos(&gh)).await
+}
+
+#[tauri::command]
+async fn github_pulls(
+    gh: State<'_, github::GitHubState>,
+    repo: String,
+) -> Result<Vec<github::GitHubPull>, String> {
+    let gh = (*gh).clone();
+    spawn("github_pulls", move || github::pulls(&gh, &repo)).await
+}
+
+#[tauri::command]
+async fn github_create_repo(
+    state: State<'_, AppState>,
+    gh: State<'_, github::GitHubState>,
+    input: github::CreateRepoInput,
+) -> Result<github::GitHubRepo, String> {
+    let db = state.db.clone();
+    let gh = (*gh).clone();
+    spawn("github_create_repo", move || {
+        let conn = lock_db(&db)?;
+        github::create_repo(&conn, &gh, &input.name, input.private, input.description.as_deref())
+    })
+    .await
+}
+
 
 pub fn register_all(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
     builder.invoke_handler(tauri::generate_handler![
@@ -2275,6 +2399,14 @@ pub fn register_all(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri
         deploy_active,
         deploy_runs,
         deploy_run,
+        github_status,
+        github_set_client_id,
+        github_connect_start,
+        github_connect_poll,
+        github_disconnect,
+        github_repos,
+        github_pulls,
+        github_create_repo,
     ])
 }
 #[cfg(test)]

@@ -17,6 +17,7 @@ import { InfraPanel } from "../components/InfraPanel";
 import {
   AlertTriangleIcon,
   CheckIcon,
+  CloudIcon,
   DownloadIcon,
   FolderIcon,
   GitBranchIcon,
@@ -498,6 +499,9 @@ export function DashboardView({ onNavigate }: { onNavigate: (v: ViewId) => void 
           </Button>
           <Button onClick={() => onNavigate("git")}>
             <GitBranchIcon /> Abrir o gerenciador Git
+          </Button>
+          <Button onClick={() => onNavigate("github")}>
+            <CloudIcon /> Conectar ao GitHub
           </Button>
           <Button onClick={() => onNavigate("history")}>
             <ServerIcon /> Ver histórico

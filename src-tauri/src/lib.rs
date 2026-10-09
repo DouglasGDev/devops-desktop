@@ -7,6 +7,7 @@ mod files;
 mod files_transfer;
 mod git;
 mod git_probe;
+mod github;
 mod infra;
 mod models;
 mod ssh_config;
@@ -30,6 +31,7 @@ pub fn run() {
             app.manage(files_transfer::TransferState::new());
             app.manage(auth::AuthBroker::new());
             app.manage(deploy::DeployState::new());
+            app.manage(github::GitHubState::new());
             Ok(())
         });
 

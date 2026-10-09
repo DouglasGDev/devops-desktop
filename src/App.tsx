@@ -9,6 +9,7 @@ import { DashboardView } from "./views/DashboardView";
 import { DeployView } from "./views/DeployView";
 import { FilesView } from "./views/FilesView";
 import { GitView } from "./views/GitView";
+import { GitHubView } from "./views/GitHubView";
 import { HistoryView } from "./views/HistoryView";
 import { ProjectsView } from "./views/ProjectsView";
 import { ServersView } from "./views/ServersView";
@@ -43,6 +44,7 @@ function Shell() {
                   <GitView onNavigate={setView} />
                 </div>
               ) : null}
+              {view === "github" ? <GitHubView /> : null}
               {view === "history" ? <HistoryView /> : null}
               {view === "settings" ? <SettingsView /> : null}
             </>

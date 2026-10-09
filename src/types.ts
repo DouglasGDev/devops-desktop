@@ -501,6 +501,54 @@ export interface DeployPreflight {
   message: string;
 }
 
+// GitHub: todos os campos abaixo vêm de respostas reais de api.github.com. O
+// token da conta fica apenas na memória do backend e nunca chega à interface.
+export interface GitHubStatus {
+  hasClientId: boolean;
+  loggedIn: boolean;
+  login: string | null;
+}
+
+export interface GitHubDeviceFlow {
+  userCode: string;
+  verificationUri: string;
+  expiresIn: number;
+  interval: number;
+}
+
+export interface GitHubConnectResult {
+  status: "pending" | "connected" | "error";
+  message: string | null;
+  login: string | null;
+}
+
+export interface GitHubRepo {
+  name: string;
+  fullName: string;
+  private: boolean;
+  defaultBranch: string;
+  htmlUrl: string;
+  cloneUrl: string;
+  sshUrl: string;
+  sizeKb: number;
+  language: string | null;
+  pushedAt: string | null;
+  archived: boolean;
+  fork: boolean;
+}
+
+export interface GitHubPull {
+  number: number;
+  title: string;
+  state: string;
+  author: string | null;
+  headRef: string;
+  baseRef: string;
+  draft: boolean;
+  updatedAt: string | null;
+  htmlUrl: string;
+}
+
 export type ViewId =
   | "dashboard"
   | "servers"
@@ -508,6 +556,7 @@ export type ViewId =
   | "files"
   | "git"
   | "projects"
+  | "github"
   | "deploy"
   | "history"
   | "settings";

@@ -42,6 +42,7 @@ servidor ou no repositório. Quando uma etapa obrigatória falha, a interface mo
 | **Deploy** | Cinco estratégias reais: **A** SFTP sincronizado, **B** Git no servidor, **C** build local + artefatos, **D** sequência de scripts, **E** Docker/Compose. Pipeline visual de até 15 etapas com log, código de saída, verificação de ferramentas no servidor antes de executar, cancelamento cooperativo, release anterior preservada e rollback assistido. |
 | **Segurança** | Bloqueio de commit/push quando o conteúdo que o Git publicaria contém segredo, varredura de projeto, regras extras configuráveis, remoção assistida do índice sem apagar o arquivo local. |
 | **Dashboard** | Estado dos servidores, deploys recentes e resultado, falhas do histórico, transferências em andamento, alertas de configuração e métricas reais de CPU, memória, disco, containers e serviços — lidas do servidor só quando você pedir. |
+| **GitHub** (opcional) | Conectar a conta pelo fluxo de dispositivo do OAuth, listar repositórios reais da conta, ver pull requests abertos, criar repositório (com confirmação), vincular um projeto cadastrado como `origin`. |
 | **Auditoria** | Tudo fica em SQLite local, pesquisável e filtrável por servidor, projeto, tipo, nível e resultado. |
 
 ---
@@ -136,8 +137,8 @@ O comando roda `npm run build`, compila em release e gera os dois pacotes config
 
 ```
 src-tauri/target/release/bundle/
-├── nsis/DevOps Desktop_0.1.0_x64-setup.exe      (3,65 MiB)
-└── msi/DevOps Desktop_0.1.0_x64_en-US.msi       (5,34 MiB)
+├── nsis/DevOps Desktop_0.1.0_x64-setup.exe      (4,36 MiB)
+└── msi/DevOps Desktop_0.1.0_x64_en-US.msi       (6,22 MiB)
 ```
 
 O instalador NSIS é o recomendado para uso individual; o MSI atende implantação por GPO/domínio. O `bundle` já traz
@@ -164,6 +165,7 @@ gerados e testados aqui.
 | `git_editor` | Configurações | `system`, `vscode` ou `cursor` para "abrir no editor". |
 | `secret_patterns` | Configurações → Proteção de segredos | Regras extras, uma por linha, somadas às regras internas de nome/extensão/conteúdo. |
 | `terminal_history_enabled` | Configurações | Liga/desliga o histórico local de comandos do terminal. |
+| `github_client_id` | GitHub → Client ID | Identificador **público** da OAuth App usada no fluxo de dispositivo. Não é segredo; um token de acesso é recusado nesse campo. |
 
 ### 8.2 Arquivos que o aplicativo lê (e nunca escreve)
 
@@ -189,6 +191,25 @@ Três formas, escolhidas por servidor:
 Nada é presumido. Antes de um deploy, a etapa de verificação executa comandos de leitura no servidor para confirmar
 `git`, `docker`, `node`, `php`, `rsync` etc. conforme a estratégia. Se faltar algo, o pipeline falha nessa etapa com a
 mensagem "ferramenta ausente" e o log da checagem — sem tentar adivinhar caminho nem instalar nada.
+
+### 8.5 Conta GitHub (opcional)
+
+A seção **GitHub** só funciona com um *Client ID* de OAuth App. Ele **não** é um segredo: é o identificador público da
+aplicação, e por isso pode ficar no banco local.
+
+1. Em `github.com/settings/developers`, crie uma **OAuth App** (nome, URL de casa e callback podem ser
+   `http://localhost`).
+2. Marque **Enable Device Flow** e copie o **Client ID**.
+3. No aplicativo, em **GitHub → Client ID da aplicação OAuth**, cole o identificador e salve. O campo aceita apenas o
+   formato do Client ID (20 caracteres hexadecimais ou `Iv1.` + hexadecimal); token de acesso é recusado de propósito,
+   para ninguém persistir um segredo nesse campo.
+4. Clique em **Conectar conta**: aparece um código de verificação; abra `github.com/login/device`, digite o código e
+   autorize. O aplicativo repete a pergunta ao GitHub no intervalo que o próprio GitHub informou.
+
+O token (`repo,user`) vive **apenas na memória do processo**: não vai para o SQLite, para os logs nem para o disco, e
+fecha junto com o aplicativo — ao reabrir, é preciso reconectar. Toda requisição vai para `https://api.github.com`
+(host fixo no código; a interface não aceita URL de API). Em rede corporativa com proxy, a seção reporta a falha de
+transporte em vez de mostrar dados de exemplo.
 
 ---
 
@@ -247,6 +268,22 @@ O pipeline executa, em ordem: verificação de requisitos → preparo local → 
 no servidor → verificação final. Cada etapa mostra comando, duração, código de saída e mensagem. Cancelar interrompe de
 forma cooperativa e registra a execução como cancelada. **Se uma etapa obrigatória falha, o resultado final é falha.**
 
+### 9.7 GitHub
+
+Depois de configurar o [Client ID](#85-conta-github-opcional):
+
+1. **GitHub → Conectar conta** — digite o código exibido em `github.com/login/device` e autorize. A tela mostra o
+   progresso da espera e o login quando conseguir.
+2. **Repositórios da conta** — lista lida de `api.github.com` no momento (nome, visibilidade, branch padrão, linguagem,
+   tamanho, último push). Em cada linha: **Pull requests** (abre os PRs abertos reais daquele repositório) e **Abrir**
+   (leva ao site).
+3. **Vincular um projeto local a um repositório** — escolha o projeto cadastrado e o repositório; a aplicação cria
+   `origin` (ou substitui a URL existente, depois de avisar). Nenhuma outra coisa muda: sem commit, sem push.
+4. **Criar repositório novo** — nome, descrição opcional e visibilidade. Há confirmação explícita porque a ação é
+   externa e continua visível depois; repositório público é lido por qualquer pessoa.
+
+Se a conta não estiver conectada, a listagem fica vazia com a orientação de conectar — nunca uma tabela de exemplo.
+
 ---
 
 ## 10. Modelo de segurança
@@ -254,7 +291,8 @@ forma cooperativa e registra a execução como cancelada. **Se uma etapa obrigat
 Resumo do que é garantido pelo código, não só pela interface:
 
 - **Nenhum segredo em repouso.** Senhas, tokens, chaves privadas e valores de variáveis secretas não são gravados no
-  SQLite, em arquivo de configuração, nem nos logs. A senha SSH vive apenas na memória da operação que a pediu.
+  SQLite, em arquivo de configuração, nem nos logs. A senha SSH vive apenas na memória da operação que a pediu. O token
+  do GitHub também: só o **Client ID público** é persistido, e o campo que o recebe recusa token de acesso.
 - **Verificação de chave de host sempre ativa.** O terminal pede confirmação explícita do host desconhecido; as rotas
   automatizadas recusam host fora do `known_hosts` em vez de aceitar em silêncio. Não existe botão que desligue a
   checagem (`StrictHostKeyChecking=no` nunca é usado).
@@ -273,7 +311,10 @@ Resumo do que é garantido pelo código, não só pela interface:
   validadas antes de irem ao comando. Comandos shell são montados com **argv separado**, nunca por concatenação. Os
   scripts executados no servidor vêm do próprio aplicativo (pipeline e coleta de métricas) — não existe executor que
   aceite comando arbitrário vindo da interface.
-- **CSP ativa** no `tauri.conf.json`, com `connect-src` restrito ao IPC local.
+- **CSP ativa** no `tauri.conf.json`: `default-src 'self'` e `connect-src` só permitem o IPC local (`ipc:`,
+  `http://ipc.localhost`) e o servidor de desenvolvimento em `localhost:1420`. A interface não abre conexão de rede
+  nenhuma; as chamadas ao GitHub saem do lado Rust, para o host fixo `api.github.com`, e a auditoria registra a operação
+  sem gravar token nem cabeçalho.
 - **Logs técnicos** descrevem operação, servidor, projeto, etapa e código de saída — sem valores sensíveis.
 
 ---
@@ -284,7 +325,7 @@ Resumo do que é garantido pelo código, não só pela interface:
 .
 ├── src/                    # React 19 + TypeScript (camada de apresentação)
 │   ├── components/         # UI primitiva, painéis de Git, deploy, ícones
-│   ├── views/              # Dashboard, Servidores, Arquivos, Terminal, Projetos, Git, Deploy, Histórico, Configurações
+│   ├── views/              # Dashboard, Servidores, Arquivos, Terminal, Projetos, Git, GitHub, Deploy, Histórico, Configurações
 │   ├── lib/                # api.ts (contrato com o backend), format.ts, hooks
 │   ├── store/              # AppContext: servidores, projetos, configurações, toasts, prompt de senha
 │   └── types.ts            # tipos espelhando as structs serializadas do Rust
@@ -304,6 +345,7 @@ Resumo do que é garantido pelo código, não só pela interface:
         ├── security.rs      # regras e varredura de segredos (§8)
         ├── deploy.rs        # motor de deploy e pipeline de etapas (§9/§10)
         ├── infra.rs         # métricas reais do servidor (§12)
+        ├── github.rs        # fluxo de dispositivo OAuth e chamadas a api.github.com
         ├── auth.rs          # broker de senha por operação (SSH_ASKPASS em memória)
         └── audit.rs         # trilha de auditoria local
 ```
@@ -321,11 +363,15 @@ cd src-tauri
 cargo test --lib
 ```
 
-Cobertura atual do backend (120 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
+Cobertura atual do backend (132 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
 timeout e cancelamento, sessões PTY, ciclo completo de Git em repositório temporário (status, stage por hunk, commit,
 log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), guarda de segredos lendo o
 índice e o `HEAD`, varredura de árvore, regras extras, migrações e repositório SQLite, parser das métricas reais e o
-script de leitura (que não escreve nada nem presume ferramenta).
+script de leitura (que não escreve nada nem presume ferramenta), além da integração GitHub: validação de Client ID
+(recusando token colado no campo), validação de `dono/nome` e de nome de repositório, codificação de URL, parsing da
+resposta de repositórios, mensagem de erro por status HTTP e o fato de que nenhum token aparece na resposta para a
+interface. Nenhum teste de rede é feito: as rotas que falam com o GitHub são exercitadas só na máquina, com dados de
+resposta fixos dentro do próprio teste.
 
 Esses testes usam os binários **reais** do sistema: é requisito da aplicação (e da suíte) ter `git` e `ssh` no `PATH`.
 Em uma máquina sem essas ferramentas, os testes que as exercitam falham — não são pulados silenciosamente.

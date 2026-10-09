@@ -16,6 +16,11 @@ import type {
   FileDiff,
   GitActionOutcome,
   GitIdentity,
+  GitHubConnectResult,
+  GitHubDeviceFlow,
+  GitHubPull,
+  GitHubRepo,
+  GitHubStatus,
   GraphRow,
   ImportSshHost,
   Project,
@@ -322,4 +327,22 @@ export const api = {
     }),
   openInEditor: (projectId: number, path?: string | null) =>
     invoke<void>("open_in_editor", { projectId, path: path ?? null }),
+
+  // GitHub: o token fica no backend; a interface só recebe status e dados.
+  githubStatus: () => invoke<GitHubStatus>("github_status"),
+  githubSetClientId: (clientId: string) =>
+    invoke<GitHubStatus>("github_set_client_id", { input: { clientId } }),
+  githubConnectStart: () => invoke<GitHubDeviceFlow>("github_connect_start"),
+  githubConnectPoll: () => invoke<GitHubConnectResult>("github_connect_poll"),
+  githubDisconnect: () => invoke<GitHubStatus>("github_disconnect"),
+  githubRepos: () => invoke<GitHubRepo[]>("github_repos"),
+  githubPulls: (repo: string) => invoke<GitHubPull[]>("github_pulls", { repo }),
+  githubCreateRepo: (params: { name: string; private: boolean; description?: string | null }) =>
+    invoke<GitHubRepo>("github_create_repo", {
+      input: {
+        name: params.name,
+        private: params.private,
+        description: params.description ?? null,
+      },
+    }),
 };
