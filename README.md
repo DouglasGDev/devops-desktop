@@ -278,6 +278,9 @@ no histórico local (opcional) para reutilização e auditoria. Fechar a janela 
 
 ### 9.5 Git
 
+- **Abrir a pasta do repositório**: sem conta de nenhum serviço no meio. O seletor nativo de pastas devolve o caminho,
+  a pasta é canonicizada e sondada, e só entra na lista se realmente for um repositório Git — uma pasta comum é
+  desfeita na hora e a tela diz isso. O mesmo card oferece *Clonar repositório* para uma pasta do computador.
 - **Alterações**: arquivos staged/unstaged/untracked, diff lado a lado por linha, stage por trecho.
 - **Commit**: mensagem livre, `amend` com aviso de reescrita de histórico (nunca feito automaticamente).
 - **Histórico**: gráfico de commits com branches e tags, detalhe do commit, diff entre dois commits/branches.

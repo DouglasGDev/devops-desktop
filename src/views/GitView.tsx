@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../lib/api";
 import { useGitRepo } from "../lib/useGitRepo";
 import { formatRelative, formatTimestamp } from "../lib/format";
@@ -11,6 +12,7 @@ import {
   CommitIcon,
   DownloadIcon,
   ExternalLinkIcon,
+  FolderIcon,
   GitBranchIcon,
   KeyIcon,
   PlusIcon,
@@ -87,7 +89,7 @@ function targetLabel(target: DiffTarget, branch: string | null): string {
 }
 
 export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
-  const { projects, settings, pushToast } = useApp();
+  const { projects, settings, pushToast, reloadProjects } = useApp();
   const gitProjects = useMemo(() => projects.filter((p) => p.isGitRepo), [projects]);
   const [projectId, setProjectId] = useState<number | null>(gitProjects[0]?.id ?? null);
   const [tab, setTab] = useState<Tab>("changes");
@@ -105,6 +107,7 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
   const [revertAsk, setRevertAsk] = useState<CommitDetail | null>(null);
   const [resetAsk, setResetAsk] = useState<{ commit: string; subject: string; mode: ResetMode } | null>(null);
   const [acesso, setAcesso] = useState<RemoteAccess | null>(null);
+  const [abrindo, setAbrindo] = useState(false);
 
   const git = useGitRepo(projectId, pushToast);
   const status = git.status;
@@ -226,18 +229,50 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
     await git.push({ allowSecrets });
   };
 
+  // Abrir uma pasta que já existe no computador: o seletor nativo devolve o
+  // caminho, o backend canoniciza a pasta, sonda se ela tem um repositório e a
+  // cadastra. Uma pasta sem `.git` não vira projeto — é desfeita na hora, para a
+  // lista continuar mostrando só o que realmente existe.
+  const abrirPastaLocal = async () => {
+    setAbrindo(true);
+    try {
+      const dir = await open({ directory: true, multiple: false, title: "Selecionar a pasta do repositório" });
+      if (typeof dir !== "string" || dir.trim() === "") return;
+      const novo = await api.addProject(dir, null);
+      if (!novo.isGitRepo) {
+        await api.deleteProject(novo.id);
+        pushToast("error", `A pasta escolhida não é um repositório Git — “${novo.name}” não foi cadastrada.`);
+        return;
+      }
+      await reloadProjects();
+      setProjectId(novo.id);
+      setTarget(null);
+      setTab("changes");
+      pushToast("success", `Repositório “${novo.name}” aberto.`);
+    } catch (e) {
+      pushToast("error", String(e));
+    } finally {
+      setAbrindo(false);
+    }
+  };
+
   if (gitProjects.length === 0) {
     return (
       <Card>
         <EmptyState
           icon={<GitBranchIcon className="size-8" />}
-          title="Nenhum projeto com repositório Git"
-          description="Cadastre uma pasta que já seja um repositório, ou clone um repositório novo em uma pasta do seu computador."
+          title="Nenhum repositório aberto"
+          description="Aponte uma pasta do seu computador que já seja um repositório, clone um repositório novo para uma pasta, ou cadastre a pasta em Projetos."
         >
-          <Button variant="primary" onClick={() => setCloning(true)}>
+          <Button variant="primary" disabled={abrindo} onClick={() => void abrirPastaLocal()}>
+            {abrindo ? <Spinner className="size-4" /> : <FolderIcon className="size-4" />} Abrir pasta local
+          </Button>
+          <Button disabled={abrindo} onClick={() => setCloning(true)}>
             <PlusIcon className="size-4" /> Clonar repositório
           </Button>
-          <Button onClick={() => onNavigate("projects")}>Ir para Projetos</Button>
+          <Button disabled={abrindo} onClick={() => onNavigate("projects")}>
+            Ir para Projetos
+          </Button>
         </EmptyState>
         <CloneDialog open={cloning} onClose={() => setCloning(false)} />
       </Card>
