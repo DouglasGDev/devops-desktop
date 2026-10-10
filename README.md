@@ -43,7 +43,7 @@ está em [docs/ENTREGAS.md](docs/ENTREGAS.md).
 | **Terminal** | Sessões PTY múltiplas ligadas a um servidor, com redimensionamento, histórico de comandos local e encerramento limpo ao fechar a janela. |
 | **Git** | Status, stage por arquivo ou por trecho (hunk), diff linha a linha, commit (com amend), gráfico de histórico de commits, árvore dos arquivos rastreados com o conteúdo que o Git guarda no HEAD, branches locais/remotas, criar/renomear/excluir/alternar, merge, rebase, resolução de conflito com lado escolhido, fetch/pull/push, tags, remotes, clone, reverter commit e mover a cabeça do ramo, publicação pelo Git (comandos locais + push + tag), teste de acesso ao remoto e abrir o repositório no editor (VS Code/Cursor/system). Funciona sozinho: nenhuma dessas ações depende de haver um servidor cadastrado. |
 | **Acesso da máquina** | Detectar o que está instalado (`ssh`, `ssh-add`, `git`, `gh`), quantas chaves o `ssh-agent` tem, a identidade que o git resolve, os editores encontrados no disco e a conta ativa do `gh`; dizer se a máquina já está liberada para publicar e, quando não está, abrir o navegador no fluxo de autorização do GitHub e confirmar `liberado como @login`. |
-| **Deploy** | Cinco estratégias reais: **A** SFTP sincronizado, **B** Git no servidor, **C** build local + artefatos, **D** sequência de scripts, **E** Docker/Compose. Pipeline visual de até 15 etapas com log, código de saída, verificação de ferramentas no servidor antes de executar, cancelamento cooperativo, release anterior preservada e rollback assistido. |
+| **Deploy** | Cinco estratégias reais: **A** SFTP sincronizado, **B** Git no servidor, **C** build local + artefatos, **D** sequência de scripts, **E** Docker/Compose. Pipeline visual de até 15 etapas com log, código de saída, verificação de ferramentas no servidor antes de executar, cancelamento cooperativo, release anterior preservada e rollback assistido. O destino pode ser **esta máquina** (sem SSH, com **C** ou **D**): comparação por conteúdo, cópia só do que mudou, ponto de recuperação em `.devops-backups` e reversão que repõe inclusive os arquivos removidos da limpeza. |
 | **Segurança** | Bloqueio de commit/push quando o conteúdo que o Git publicaria contém segredo, varredura de projeto, regras extras configuráveis, remoção assistida do índice sem apagar o arquivo local. |
 | **Dashboard** | Estado dos servidores, deploys recentes e resultado, falhas do histórico, transferências em andamento, alertas de configuração e métricas reais de CPU, memória, disco, containers e serviços — lidas do servidor só quando você pedir. |
 | **GitHub** (opcional) | Conectar a conta pelo fluxo de dispositivo do OAuth e trabalhar o repositório de dentro do app: bandeja com o que é seu (revisão pedida, seus PRs, suas issues), pull request com diff real, conversa de comentários, revisão (aprovar / pedir alterações) e mesclar com método escolhido, abrir um PR a partir de um ramo desta máquina, mapear a pasta local de um repo publicado — o app mostra o caminho exato e abre a pasta no Explorador — e abrir ali mesmo a seção Git completa daquela pasta (aba **Local**), issues com descrição e comentários, execuções do Actions com reexecução, visão geral que liga o remoto às pastas locais (clonar, vincular como `origin`) e criação de repositório. Tudo com confirmação nas ações que escrevem; sem conta conectada, a aba mostra só a conta e o Client ID. |
@@ -145,7 +145,12 @@ npm run tauri build
 ```
 
 O comando roda `npm run build`, compila em release e gera os dois pacotes configurados em
-`src-tauri/tauri.conf.json` (`bundle.targets: ["nsis", "msi"]`). Saída real desta versão:
+`src-tauri/tauri.conf.json` (`bundle.targets: ["nsis", "msi"]`).
+
+O executável embute o `dist/` que existia **quando o Rust compilou**, não o que existe quando ele terminou: mexer em
+`src/` com `npm run tauri build` rodando gera um instalador com frontend velho. A conferência é direta — abra o app e
+compare o hash de `/assets/index-*.js` que a janela carrega com o arquivo em `dist/assets/`; se diferirem, refaça
+`npm run build` e depois o bundle, sem editar nada no meio. Saída real desta versão:
 
 ```
 src-tauri/target/release/bundle/
@@ -342,13 +347,34 @@ no histórico local (opcional) para reutilização e auditoria. Fechar a janela 
 
 ### 9.6 Deploy
 
-Perfil por projeto/servidor com: estratégia (A–E), diretório de destino, branch, comandos de build, lista de artefatos,
-sequência de scripts, variáveis (nome/valor, com valores sensíveis marcados como secretos e enviados pelo ambiente do
-processo, não pelo log), diretório de releases e symlink de `current`.
+Perfil por projeto com **destino** — um servidor SSH ou uma pasta desta máquina — e estratégia (A–E), diretório de
+destino, branch, comandos de build, lista de artefatos, sequência de scripts, variáveis (nome/valor, com valores
+sensíveis marcados como secretos e enviados pelo ambiente do processo, não pelo log), diretório de releases e symlink
+de `current`. No destino "Nesta máquina" as estratégias disponíveis são **artefatos** e **script**, e o symlink de
+release não existe (a publicação escreve direto na pasta de destino).
 
 O pipeline executa, em ordem: verificação de requisitos → preparo local → transferência → troca de release → comandos
 no servidor → verificação final. Cada etapa mostra comando, duração, código de saída e mensagem. Cancelar interrompe de
 forma cooperativa e registra a execução como cancelada. **Se uma etapa obrigatória falha, o resultado final é falha.**
+
+**Publicar sem servidor** (destino "Nesta máquina"): as quinze etapas são as mesmas, com dois nomes trocados — a conexão
+vira **Abrir a pasta de destino** e o envio vira **Copiar os arquivos para o destino**. A comparação é por CRC32 do
+arquivo, então só o que realmente mudou é copiado; o resto da etapa informa quantos ficaram inalterados e quantos
+foram deixados de fora. O ponto de recuperação fica em `<destino>/.devops-backups/<execução>/`: antes de sobrescrever,
+o arquivo que já estava no destino é copiado para lá, e **Reverter** repõe esse conteúdo. Com *apagar excedentes*
+ligado, o arquivo a mais no destino é **movido** para a mesma guarda em vez de removido — nada desaparece sem poder
+voltar. O motor exige que o destino seja uma pasta absoluta nomeada, fora da pasta do projeto: raiz de disco (`D:\`,
+`/`), caminho relativo, trecho com `..` e destino dentro do próprio código-fonte são recusados — a tela do modelo já
+barra na hora de salvar, e a primeira etapa confirma antes de copiar qualquer arquivo (medido nesta máquina: o modelo
+com destino `E:/ssh-master/publicado` falhou na etapa 1 com "a pasta de destino está dentro do projeto" sem tocar no
+disco).
+Comandos de preparação, teste, build, reinicialização e checagem de saúde rodam nesta máquina (`cmd /C` no Windows,
+`sh -c` no Unix), com o mesmo prazo e cancelamento cooperativo do modo remoto, e a saída passa pela mesma máscara de
+segredos. Na estratégia **C**, o que a preparação ou o build gera entra na cópia: depois desses comandos a seleção é
+refeita e passa de novo pela checagem de segredos antes do envio — e se o caminho declarado ainda não existir porque é
+justamente o que o comando produz, a etapa de identificação espera em vez de falhar (a cobrança vem depois do comando,
+com o mesmo recado de caminho). Na **D** nada é copiado: a publicação são os comandos, e os caminhos de inclusão não
+entram em jogo — nem na pré-vistoria, que usa a mesma regra.
 
 ### 9.7 GitHub
 
@@ -499,7 +525,7 @@ cd src-tauri
 cargo test --lib
 ```
 
-Cobertura atual do backend (187 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
+Cobertura atual do backend (200 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
 timeout e cancelamento, sessões PTY, ciclo completo de Git em repositório temporário (status, stage por hunk, commit,
 log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), trabalho guardado e
 reprodução de commit no git real (`stash push` tira a alteração da pasta e `stash list` mostra exatamente a entrada que o
@@ -554,17 +580,28 @@ vêm da resposta, um comentário sem texto é mostrado como sem texto e um item 
 abertura de pull request (o nome do ramo é o que o GitHub endereça — `dono:ramo` de fork passa, vazio, com espaço, com
 `..`, começando em `-` ou acima de 250 caracteres não; origem igual ao destino é recusada antes de qualquer chamada, e a
 descrição tem limite), e a busca do ramo de um pull request no git local —
-um PR que não existe no remoto **não** deixa branch fantasma criado. Nenhum teste de rede é feito: as rotas que falam com o GitHub são exercitadas só na máquina, com dados de
+um PR que não existe no remoto **não** deixa branch fantasma criado. O deploy sem servidor também é coberto: o caminho
+de destino aceito em POSIX, em unidade Windows e em compartilhamento de rede (com raiz de disco, `..`, quebra de linha
+e caminho relativo recusados), as estratégias que exigem servidor, a migração que deixa a
+coluna do servidor anulável provando que modelo, execução e etapas sobrevivem à troca da tabela, o índice único que faz
+`ON CONFLICT (run_id, position)` registrar cada etapa, a exclusão de servidor ou projeto levando os modelos e o histórico
+deles junto (com a contagem que a interface mostra), o critério de cópia por CRC32, a varredura local que espelha o
+`find` do servidor, a poda de pastas vazias que **não** toca na guarda de arquivos e o ambiente entregue aos processos
+locais sem passar pela linha de comando. Nenhum teste de rede é feito: as rotas que falam com o GitHub são exercitadas só na máquina, com dados de
 resposta fixos dentro do próprio teste.
 
 Esses testes usam os binários **reais** do sistema: é requisito da aplicação (e da suíte) ter `git` e `ssh` no `PATH`.
 Em uma máquina sem essas ferramentas, os testes que as exercitam falham — não são pulados silenciosamente.
 
-O frontend é verificado por `npm run build`, que roda `tsc --noEmit` antes do bundle. Não há runner de teste de interface
-no projeto: a comparação entre o origin lido do git e o `dono/repositorio` do GitHub (`src/lib/repo.ts`) foi conferida
-chamando a própria função fora da tela, com as formas reais de URL — HTTPS com `.git`, `git@…:dono/repo.git`, `ssh://`,
-barra final, forquilha de outra pessoa (não conta como o seu clone) e host interno de git (casa por `dono/repo`, não por
-`github.com`).
+O frontend é verificado por `npm run build`, que roda `tsc --noEmit` antes do bundle. Não há suíte de testes de interface
+rodando sozinha no projeto: o que existe é um piloto — `scripts/ponte-cdp.mjs` abre o executável compilado com
+`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223`, clica na janela real e chama os mesmos comandos que
+a interface chama, com o mesmo payload (o passo a passo está em `docs/ENTREGAS.md`, §4.1). Foi assim que o fluxo de
+publicação sem servidor foi conferido de ponta a ponta: salvar o modelo, pré-vistoria, publicar, comparar o destino e a
+guarda no disco, reverter e remover o modelo. A comparação entre o origin lido do git e o `dono/repositorio` do GitHub
+(`src/lib/repo.ts`) foi conferida chamando a própria função fora da tela, com as formas reais de URL — HTTPS com `.git`,
+`git@…:dono/repo.git`, `ssh://`, barra final, forquilha de outra pessoa (não conta como o seu clone) e host interno de
+git (casa por `dono/repo`, não por `github.com`).
 
 ---
 
