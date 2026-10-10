@@ -1166,6 +1166,33 @@ pub fn push(dir: &Path, remote: Option<&str>, branch: Option<&str>, set_upstream
 
 // ---------- tags / remotes ----------
 
+/// Envia uma tag que já existe localmente. `push` com refspec explícito: sem
+/// isto o git empurraria apenas o ramo, e uma publicação ficaria sem a marca.
+pub fn push_tag(dir: &Path, remote: &str, name: &str) -> Result<String, String> {
+    validate_id(remote)?;
+    validate_id(name)?;
+    run(dir, &["push", remote, &format!("refs/tags/{name}")])
+}
+
+/// O remoto de uma publicação: `origin` quando existe, senão o primeiro
+/// cadastrado. Sem remoto não há para onde publicar — o erro diz isso.
+pub fn default_remote(dir: &Path) -> Result<String, String> {
+    let texto = run(dir, &["remote"])?;
+    let nomes: Vec<&str> = texto
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if nomes.is_empty() {
+        return Err("este repositório não tem remoto cadastrado — adicione um antes de publicar".into());
+    }
+    Ok(nomes
+        .iter()
+        .find(|n| **n == "origin")
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| nomes[0].to_string()))
+}
+
 pub fn tags(dir: &Path) -> Result<Vec<TagInfo>, String> {
     const FMT: &str = "%(refname:short)%1f%(objectname:short)%1f%(if)%(*objectname)%(then)%(contents:subject)%(else)%(contents:subject)%(end)";
     let text = run(dir, &["for-each-ref", &format!("--format={FMT}"), "refs/tags"])?;
@@ -1217,6 +1244,15 @@ pub fn delete_tag(dir: &Path, name: &str) -> Result<(), String> {
     validate_id(name)?;
     run(dir, &["tag", "-d", name])?;
     Ok(())
+}
+
+/// Retira a tag do remoto com o refspec de exclusão (`:refs/tags/<nome>`). Só a
+/// referência deixa de existir lá: nenhum commit é reescrito e nada é apagado
+/// do histórico local — para isso existe `delete_tag`.
+pub fn delete_remote_tag(dir: &Path, remote: &str, name: &str) -> Result<String, String> {
+    validate_id(remote)?;
+    validate_id(name)?;
+    run(dir, &["push", remote, &format!(":refs/tags/{name}")])
 }
 
 pub fn remotes(dir: &Path) -> Result<Vec<RemoteInfo>, String> {
@@ -1850,6 +1886,59 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&pais);
         let _ = std::fs::remove_dir_all(&origem);
+    }
+
+    #[test]
+    fn publicar_empurra_ramo_e_tag_e_despublicar_retira_so_a_tag() {
+        let origem = temp_repo("pub-origem");
+        write(&origem, "a.txt", "a\n");
+        stage(&origem, &["a.txt".into()]).unwrap();
+        commit(&origem, "primeiro", false).unwrap();
+        let remoto = bare_origin(&origem);
+
+        let pais = temp_dir("pub-clone");
+        let destino = pais.join("work");
+        clone(&pais, &url(&remoto), Some("work"), None).unwrap();
+        assert_eq!(default_remote(&destino).unwrap(), "origin", "o clone traz origin");
+
+        write(&destino, "b.txt", "b\n");
+        stage(&destino, &["b.txt".into()]).unwrap();
+        commit(&destino, "segundo", false).unwrap();
+        push(&destino, Some("origin"), None, false).unwrap();
+        create_tag(&destino, "v1", None, None).unwrap();
+        push_tag(&destino, "origin", "v1").unwrap();
+
+        assert!(
+            tags(&remoto).unwrap().iter().any(|t| t.name == "v1"),
+            "push_tag leva a tag até o remoto"
+        );
+        assert_eq!(
+            run(&remoto, &["rev-parse", "main"]).unwrap().trim(),
+            run(&destino, &["rev-parse", "HEAD"]).unwrap().trim(),
+            "o ramo publicado está no mesmo commit"
+        );
+
+        delete_remote_tag(&destino, "origin", "v1").unwrap();
+        assert!(
+            !tags(&remoto).unwrap().iter().any(|t| t.name == "v1"),
+            "despublicar tira a tag do remoto"
+        );
+        assert!(
+            tags(&destino).unwrap().iter().any(|t| t.name == "v1"),
+            "a tag local continua — nada foi apagado daqui"
+        );
+        assert_eq!(
+            run(&remoto, &["rev-parse", "main"]).unwrap().trim(),
+            run(&destino, &["rev-parse", "HEAD"]).unwrap().trim(),
+            "despublicar a tag não mexe no ramo do remoto"
+        );
+
+        assert!(push_tag(&destino, "-x", "v1").is_err(), "remoto começando com '-' é recusado");
+        assert!(delete_remote_tag(&destino, "origin", "..").is_err(), "nome com .. é recusado");
+
+        let _ = std::fs::remove_dir_all(&pais);
+        let _ = std::fs::remove_dir_all(&origem);
+        let _ = std::fs::remove_dir_all(&remoto);
     }
 
     #[test]

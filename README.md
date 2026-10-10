@@ -38,7 +38,7 @@ servidor ou no repositório. Quando uma etapa obrigatória falha, a interface mo
 | **Servidores SSH** | Importar automaticamente os acessos já existentes em `~/.ssh/config`, cadastrar manualmente, organizar por ambiente (dev, staging, produção, banco, Docker), testar conexão com diagnóstico real (DNS, porta, autenticação, chave de host). |
 | **Arquivos remotos (SFTP)** | Navegar, criar pasta, renomear, mudar permissão, ver/editar arquivo de texto, baixar e enviar (inclusive pastas), com progresso, velocidade e cancelamento. |
 | **Terminal** | Sessões PTY múltiplas ligadas a um servidor, com redimensionamento, histórico de comandos local e encerramento limpo ao fechar a janela. |
-| **Git** | Status, stage por arquivo ou por trecho (hunk), diff linha a linha, commit (com amend), gráfico de histórico de commits, branches locais/remotas, criar/renomear/excluir/alternar, merge, rebase, resolução de conflito com lado escolhido, fetch/pull/push, tags, remotes, clone e abrir o repositório no editor (VS Code/Cursor/system). |
+| **Git** | Status, stage por arquivo ou por trecho (hunk), diff linha a linha, commit (com amend), gráfico de histórico de commits, branches locais/remotas, criar/renomear/excluir/alternar, merge, rebase, resolução de conflito com lado escolhido, fetch/pull/push, tags, remotes, clone, reverter commit e mover a cabeça do ramo, publicação pelo Git (comandos locais + push + tag) e abrir o repositório no editor (VS Code/Cursor/system). Funciona sozinho: nenhuma dessas ações depende de haver um servidor cadastrado. |
 | **Deploy** | Cinco estratégias reais: **A** SFTP sincronizado, **B** Git no servidor, **C** build local + artefatos, **D** sequência de scripts, **E** Docker/Compose. Pipeline visual de até 15 etapas com log, código de saída, verificação de ferramentas no servidor antes de executar, cancelamento cooperativo, release anterior preservada e rollback assistido. |
 | **Segurança** | Bloqueio de commit/push quando o conteúdo que o Git publicaria contém segredo, varredura de projeto, regras extras configuráveis, remoção assistida do índice sem apagar o arquivo local. |
 | **Dashboard** | Estado dos servidores, deploys recentes e resultado, falhas do histórico, transferências em andamento, alertas de configuração e métricas reais de CPU, memória, disco, containers e serviços — lidas do servidor só quando você pedir. |
@@ -137,8 +137,8 @@ O comando roda `npm run build`, compila em release e gera os dois pacotes config
 
 ```
 src-tauri/target/release/bundle/
-├── nsis/DevOps Desktop_0.1.0_x64-setup.exe      (4,36 MiB)
-└── msi/DevOps Desktop_0.1.0_x64_en-US.msi       (6,22 MiB)
+├── nsis/DevOps Desktop_0.1.0_x64-setup.exe      (4,40 MiB)
+└── msi/DevOps Desktop_0.1.0_x64_en-US.msi       (6,29 MiB)
 ```
 
 O instalador NSIS é o recomendado para uso individual; o MSI atende implantação por GPO/domínio. O `bundle` já traz
@@ -223,10 +223,14 @@ transporte em vez de mostrar dados de exemplo.
 4. **Selecionar um projeto local** — *Projetos → Adicionar a partir de pasta*; a pasta é detectada como repositório Git
    quando for.
 5. **Editar e revisar** — *Git*: diff por arquivo/hunk, stage seletivo, commit com mensagem própria.
-6. **Publicar** — *Deploy*: escolher o perfil, revisar a pré-verificação (arquivos, tamanho, segredos, ferramentas),
-   acompanhar o pipeline etapa a etapa.
-7. **Se algo falhar** — o resultado fica registrado como falha, com a etapa, o comando e o código de saída; *Rollback*
-   reaponta para a release anterior quando a estratégia tiver release anterior.
+6. **Publicar** — dois caminhos, e nenhum depende do outro:
+   - *Git → Publicar*: roda os comandos locais do projeto, envia o ramo e marca com tag. Não precisa de servidor
+     cadastrado; é o caminho de quem só quer usar o gerenciador Git.
+   - *Deploy*: escolher o perfil, revisar a pré-verificação (arquivos, tamanho, segredos, ferramentas), acompanhar o
+     pipeline etapa a etapa no servidor.
+7. **Se algo falhar** — o resultado fica registrado como falha, com a etapa, o comando e o código de saída; no deploy,
+   *Rollback* reaponta para a release anterior quando a estratégia tiver release anterior; no Git, a publicação pode ser
+   desfeita com *Reverter este commit* e *Despublicar* a tag.
 
 ### 9.2 Servidores
 
@@ -262,6 +266,15 @@ no histórico local (opcional) para reutilização e auditoria. Fechar a janela 
 - **Branches**: criar, alternar, renomear, excluir (com confirmação), remotas visíveis.
 - **Merge/Rebase**: executados com saída do Git tratada; conflito abre a escolha de lado por arquivo.
 - **Remotos**: listar, adicionar, mudar URL, remover; fetch/pull (merge ou rebase)/push com rastreio de branch.
+- **Publicar (canivete, sem servidor)**: o botão *Publicar* na barra do Git abre uma janela que executa, nesta ordem e
+  só depois do clique, a checagem de segredos do que o remoto ainda não tem, os comandos locais digitados (um por
+  linha, rodados na pasta do projeto com prazo de 10 minutos cada — `npm test`, `npm run build`), o `git push` do ramo
+  atual (com `--set-upstream` quando o ramo ainda não tem rastreio) e, se uma tag for informada, criá-la no commit
+  atual e enviá-la (`git push <remoto> refs/tags/<nome>`). Se um comando local falhar, o erro com as últimas linhas da
+  saída aparece e **nada é enviado**; os comandos ficam salvos por projeto para a próxima publicação. A janela mostra a
+  saída real de cada etapa. O contrário também existe: *Despublicar* numa tag faz `git push <remoto> :refs/tags/<nome>`,
+  que retira a referência do remoto sem reescrever commit algum e sem apagar a tag local. Reverter o conteúdo publicado
+  é a ação *Reverter este commit* acima, seguida de *Enviar*.
 - **Segredos**: antes do commit e do push, a aplicação lê **o conteúdo que o Git publicaria** (`git show :path` do
   índice e `git show HEAD:path`) e bloqueia quando há segredo, mostrando caminho e motivo — nunca o valor.
   Há ação assistida para tirar do índice (`git rm --cached`) mantendo o arquivo local e listando no `.gitignore`.
@@ -300,7 +313,9 @@ Resumo do que é garantido pelo código, não só pela interface:
 
 - **Nenhum segredo em repouso.** Senhas, tokens, chaves privadas e valores de variáveis secretas não são gravados no
   SQLite, em arquivo de configuração, nem nos logs. A senha SSH vive apenas na memória da operação que a pediu. O token
-  do GitHub também: só o **Client ID público** é persistido, e o campo que o recebe recusa token de acesso.
+  do GitHub também: só o **Client ID público** é persistido, e o campo que o recebe recusa token de acesso. O que o
+  banco guarda como texto são os dados de trabalho (servidores, projetos, perfis, histórico) e os comandos que você
+  cadastra — por isso a janela *Publicar* lembra os comandos, e não um token dentro deles.
 - **Verificação de chave de host sempre ativa.** O terminal pede confirmação explícita do host desconhecido; as rotas
   automatizadas recusam host fora do `known_hosts` em vez de aceitar em silêncio. Não existe botão que desligue a
   checagem (`StrictHostKeyChecking=no` nunca é usado).
@@ -316,9 +331,12 @@ Resumo do que é garantido pelo código, não só pela interface:
 - **Sem reescrita automática do remoto.** `push --force`, `reset` em histórico publicado e `amend` de commit enviado são
   explicados e exigem confirmação; a aplicação nunca força nada por conta própria.
 - **Entradas validadas.** Caminhos rejeitam `..`, começo com `-` ou `/` e caracteres de controle; revisões Git são
-  validadas antes de irem ao comando. Comandos shell são montados com **argv separado**, nunca por concatenação. Os
-  scripts executados no servidor vêm do próprio aplicativo (pipeline e coleta de métricas) — não existe executor que
-  aceite comando arbitrário vindo da interface.
+  validadas antes de irem ao comando. Comandos shell são montados com **argv separado**, nunca por concatenação. No
+  servidor, só executam os scripts fixos do aplicativo (pipeline e coleta de métricas) e os comandos cadastrados no
+  perfil de deploy — limitados e validados no cadastro; não há um endpoint que receba um comando arbitrário e o rode num
+  host remoto. As únicas coisas que a interface envia para rodar **na própria máquina** são os comandos de build/teste
+  do perfil e os da janela *Publicar*, sempre digitados por você, salvos no banco local e executados apenas depois do
+  clique, dentro da pasta do projeto e com prazo por comando.
 - **CSP ativa** no `tauri.conf.json`: `default-src 'self'` e `connect-src` só permitem o IPC local (`ipc:`,
   `http://ipc.localhost`) e o servidor de desenvolvimento em `localhost:1420`. A interface não abre conexão de rede
   nenhuma; as chamadas ao GitHub saem do lado Rust, para o host fixo `api.github.com`, e a auditoria registra a operação
@@ -360,8 +378,9 @@ Resumo do que é garantido pelo código, não só pela interface:
 ```
 
 Contrato explícito: cada comando Tauri recebe argumentos em `snake_case` e devolve structs `#[serde(rename_all =
-"camelCase")]`, tipadas em `src/types.ts`. O frontend nunca envia caminho de repositório nem comando arbitrário — envia
-IDs cadastrados, e o backend resolve o caminho a partir do banco.
+"camelCase")]`, tipadas em `src/types.ts`. O frontend nunca envia caminho de repositório nem de servidor — envia IDs
+cadastrados, e o backend resolve o caminho a partir do banco. As exceções são os textos que a pessoa escreve e o
+aplicativo repassa sem reinterpretar: mensagem de commit, URL de remoto e os comandos de build/teste/publicação.
 
 ---
 
@@ -372,13 +391,16 @@ cd src-tauri
 cargo test --lib
 ```
 
-Cobertura atual do backend (137 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
+Cobertura atual do backend (140 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
 timeout e cancelamento, sessões PTY, ciclo completo de Git em repositório temporário (status, stage por hunk, commit,
-log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), reversão de commit — o
+log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), publicação por Git em clone
+de um remoto `bare` real (`push_tag` leva a tag até o remoto, `delete_remote_tag` tira só a referência de lá, o ramo e a
+tag local permanecem intactos, e referências começando com `-` ou com `..` são recusadas), reversão de commit — o
 commit inverso criado por `revert`, a exigência de escolher o pai em um merge, e os três modos de `reset` verificados no
 sistema de arquivos (`soft` mantém o índice preparado, `mixed` solta o índice sem apagar o disco, `hard` substitui o
 conteúdo rastreado e deixa o arquivo não rastreado); `reset_soft_preserva_o_indice` confere, arquivo por arquivo, que o
-índice sobrevive ao `--soft` —, guarda de segredos lendo o índice e o `HEAD`, varredura de árvore,
+índice sobrevive ao `--soft` —, o recorte de saída dos comandos locais de uma publicação (as últimas linhas, stderr
+tendo preferência sobre stdout), guarda de segredos lendo o índice e o `HEAD`, varredura de árvore,
 regras extras, migrações e repositório SQLite, o helper que monta os processos filhos sem janela de console (argv
 preservado), parser das métricas reais e o script de leitura (que não escreve nada nem presume ferramenta), além da
 integração GitHub: validação de Client ID

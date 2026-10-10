@@ -56,6 +56,13 @@ export interface GitRepo {
     setUpstream?: boolean;
     allowSecrets?: boolean;
   }) => Promise<GitActionOutcome | null>;
+  publish: (params: {
+    remote?: string | null;
+    tag?: string | null;
+    commands: string[];
+    allowSecrets?: boolean;
+  }) => Promise<GitActionOutcome | null>;
+  unpublishTag: (name: string, remote?: string | null) => Promise<GitActionOutcome | null>;
   createTag: (name: string, target?: string | null, message?: string | null) => Promise<TagInfo[] | null>;
   deleteTag: (name: string) => Promise<TagInfo[] | null>;
   addRemote: (name: string, url: string) => Promise<RemoteInfo[] | null>;
@@ -366,6 +373,25 @@ export function useGitRepo(projectId: number | null, notify: GitNotify): GitRepo
     [reloadAfter],
   );
 
+  /** Publicação sem servidor: comandos locais, envio do ramo e tag. O desfecho
+   * volta para a janela de publicação mostrar a saída real de cada etapa. */
+  const publish = useCallback(
+    (params: {
+      remote?: string | null;
+      tag?: string | null;
+      commands: string[];
+      allowSecrets?: boolean;
+    }) => reloadAfter("Publicando via git", (id) => api.gitPublish({ ...params, projectId: id })),
+    [reloadAfter],
+  );
+
+  /** Retira a tag do remoto; a local e o histórico permanecem. */
+  const unpublishTag = useCallback(
+    (name: string, remote?: string | null) =>
+      reloadAfter(`Retirando a tag ${name} do remoto`, (id) => api.gitUnpublishTag(id, name, remote ?? null)),
+    [reloadAfter],
+  );
+
   const createTag = useCallback(
     (name: string, target?: string | null, message?: string | null) =>
       guard(`Criando a tag ${name}`, (id) => api.gitCreateTag(id, name, target ?? null, message ?? null)).then(
@@ -446,6 +472,8 @@ export function useGitRepo(projectId: number | null, notify: GitNotify): GitRepo
     fetch,
     pull,
     push,
+    publish,
+    unpublishTag,
     createTag,
     deleteTag,
     addRemote,

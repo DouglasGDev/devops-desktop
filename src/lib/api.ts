@@ -302,6 +302,22 @@ export const api = {
       setUpstream: params.setUpstream ?? false,
       allowSecrets: params.allowSecrets ?? false,
     }),
+  gitPublish: (params: {
+    projectId: number;
+    remote?: string | null;
+    tag?: string | null;
+    commands?: string[];
+    allowSecrets?: boolean;
+  }) =>
+    invoke<GitActionOutcome>("git_publish", {
+      projectId: params.projectId,
+      remote: params.remote ?? null,
+      tag: params.tag ?? null,
+      commands: params.commands ?? [],
+      allowSecrets: params.allowSecrets ?? false,
+    }),
+  gitUnpublishTag: (projectId: number, name: string, remote?: string | null) =>
+    invoke<GitActionOutcome>("git_unpublish_tag", { projectId, name, remote: remote ?? null }),
   gitTags: (projectId: number) => invoke<TagInfo[]>("git_tags", { projectId }),
   gitCreateTag: (projectId: number, name: string, target?: string | null, message?: string | null) =>
     invoke<TagInfo[]>("git_create_tag", {

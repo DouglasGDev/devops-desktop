@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import type { GitRepo } from "../../lib/useGitRepo";
 import type { BranchInfo, TagInfo } from "../../types";
-import { PlusIcon, TagIcon, TrashIcon } from "../Icons";
+import { CloudIcon, PlusIcon, TagIcon, TrashIcon } from "../Icons";
 import { Badge, Button, Card, Confirm, EmptyState, Field, Input, Modal, Select, Textarea } from "../ui";
 
 export function TagsPanel({
@@ -19,8 +19,11 @@ export function TagsPanel({
   const [target, setTarget] = useState("");
   const [message, setMessage] = useState("");
   const [deleting, setDeleting] = useState<TagInfo | null>(null);
+  const [unpublishing, setUnpublishing] = useState<TagInfo | null>(null);
 
   const heads = useMemo(() => branches.filter((b) => b.isHead), [branches]);
+  // O mesmo remoto que o backend escolheria: origin quando existe, senão o primeiro.
+  const remotoPadrao = git.remotes.find((r) => r.name === "origin")?.name ?? git.remotes[0]?.name ?? null;
 
   const create = async () => {
     const trimmed = name.trim();
@@ -39,6 +42,12 @@ export function TagsPanel({
     if (list) setDeleting(null);
   };
 
+  const despublicar = async () => {
+    if (!unpublishing) return;
+    const feito = await git.unpublishTag(unpublishing.name, remotoPadrao);
+    if (feito) setUnpublishing(null);
+  };
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -46,8 +55,8 @@ export function TagsPanel({
           <PlusIcon className="size-3.5" /> Nova tag
         </Button>
         <p className="text-xs text-zinc-500 dark:text-zinc-400">
-          Com mensagem a tag é anotada (vira um objeto com autor e data). Tags não são enviadas ao remoto até você usar
-          “Enviar”.
+          Com mensagem a tag é anotada (vira um objeto com autor e data). O botão “Enviar” leva apenas o ramo: a
+          tag chega ao remoto pela publicação (botão “Publicar”) e sai dele por “Despublicar”.
         </p>
       </div>
 
@@ -79,6 +88,19 @@ export function TagsPanel({
                   <span className="mt-0.5 block truncate text-[11px] text-zinc-500 dark:text-zinc-400">{t.message}</span>
                 ) : null}
               </span>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={busy || remotoPadrao === null}
+                title={
+                  remotoPadrao === null
+                    ? "Sem remoto cadastrado não há o que despublicar"
+                    : `Retirar a tag de ${remotoPadrao} (a local continua aqui)`
+                }
+                onClick={() => setUnpublishing(t)}
+              >
+                <CloudIcon className="size-3.5" /> Despublicar
+              </Button>
               <Button size="sm" variant="ghost" disabled={busy} title="Excluir a tag local" onClick={() => setDeleting(t)}>
                 <TrashIcon className="size-3.5" />
               </Button>
@@ -124,6 +146,21 @@ export function TagsPanel({
         busy={busy}
         onConfirm={() => void remove()}
         onClose={() => setDeleting(null)}
+      />
+
+      <Confirm
+        open={unpublishing !== null}
+        title={`Despublicar a tag ${unpublishing?.name ?? ""}`}
+        message={
+          unpublishing
+            ? `Será feito git push ${remotoPadrao ?? ""} :refs/tags/${unpublishing.name}: a referência deixa de existir no remoto. ` +
+              `Nenhum commit é reescrito e a tag continua neste computador — para apagá-la daqui use Excluir.`
+            : ""
+        }
+        confirmLabel="Retirar do remoto"
+        busy={busy}
+        onConfirm={() => void despublicar()}
+        onClose={() => setUnpublishing(null)}
       />
     </div>
   );

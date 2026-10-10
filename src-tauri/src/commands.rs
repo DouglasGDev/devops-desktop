@@ -1,7 +1,8 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{atomic::AtomicBool, Arc, Mutex, MutexGuard},
+    time::Duration,
 };
 
 use rusqlite::{types::ToSql, Connection};
@@ -23,7 +24,7 @@ use crate::{
         RoutineInput, SearchProjectRow, SearchResults, SearchServerRow, Server, ServerInput,
         SshDiscoveryReport, TerminalHistoryEntry, TerminalSessionInfo, ToolVersions,
     },
-    security, ssh_config, ssh_test,
+    security, ssh_config, ssh_test, sshexec,
     terminal::{self, TerminalState},
     tools,
 };
@@ -1431,6 +1432,190 @@ async fn git_push(
     .await
 }
 
+/// As últimas linhas de uma saída de comando. Numa falha o que importa está no
+/// fim, e um build não seria despejado inteiro na tela nem no histórico.
+fn last_lines(text: &str, max: usize) -> String {
+    let linhas: Vec<&str> = text
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    if linhas.is_empty() {
+        return "(sem saída)".to_string();
+    }
+    if linhas.len() <= max {
+        return linhas.join("\n");
+    }
+    format!("…\n{}", linhas[linhas.len() - max..].join("\n"))
+}
+
+/// O que um comando local informou, sem o conteúdo todo: stderr tem a mensagem,
+/// stdout costuma ter o resto do log.
+fn failure_detail(result: &sshexec::ExecResult) -> String {
+    let texto = if result.stderr.trim().is_empty() {
+        &result.stdout
+    } else {
+        &result.stderr
+    };
+    last_lines(texto, 20)
+}
+
+const LOCAL_COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
+const MAX_PUBLISH_COMMANDS: usize = 20;
+
+/// Publicação por Git, sem servidor: verifica os segredos do que ainda não está
+/// no remoto, roda os comandos locais de teste/build na pasta do projeto, envia
+/// o ramo e, se pedida, cria e envia a tag. Antes do primeiro envio qualquer
+/// falha interrompe tudo; depois do ramo publicado, uma falha na tag é reportada
+/// dizendo exatamente o que entrou e o que ficou de fora.
+#[tauri::command]
+async fn git_publish(
+    state: State<'_, AppState>,
+    project_id: i64,
+    remote: Option<String>,
+    tag: Option<String>,
+    commands: Vec<String>,
+    allow_secrets: Option<bool>,
+) -> Result<GitActionOutcome, String> {
+    let db = state.db.clone();
+    let remote = trim_opt(remote);
+    let tag = trim_opt(tag);
+    let allow_secrets = allow_secrets.unwrap_or(false);
+    if commands.len() > MAX_PUBLISH_COMMANDS {
+        return Err(format!(
+            "são {} comandos; o limite de uma publicação é {MAX_PUBLISH_COMMANDS}",
+            commands.len()
+        ));
+    }
+    for cmd in &commands {
+        if cmd.trim().is_empty() {
+            continue;
+        }
+        if cmd.len() > 500 {
+            return Err("comando local longo demais (máximo 500 caracteres)".into());
+        }
+    }
+    let extra = extra_secret_patterns(&db)?;
+    let rotulo = remote.clone().unwrap_or_else(|| "o remoto padrão".to_string());
+    let mut detail = format!("publicação para {rotulo}");
+    if let Some(t) = &tag {
+        detail.push_str(&format!(" com a tag {t}"));
+    }
+    let locais = commands
+        .iter()
+        .filter(|c| !c.trim().is_empty())
+        .count();
+    if locais > 0 {
+        detail.push_str(&format!(" ({locais} comando(s) locais antes do envio)"));
+    }
+    git_write(db, project_id, "git_publish", detail, move |dir| {
+        // §8: publicar é tirar o conteúdo da máquina, então o que o push levaria
+        // é lido no HEAD antes de qualquer comando.
+        if !allow_secrets {
+            let rels = git::push_risk_paths(dir)?;
+            let found = security::head_findings(dir, &rels, &extra);
+            if security::blocks(&found) {
+                return Err(secret_block_message("publicação", &found));
+            }
+        }
+        let escolhido = match remote.as_deref() {
+            Some(r) => r.to_string(),
+            None => git::default_remote(dir)?,
+        };
+        let mut partes: Vec<String> = Vec::new();
+
+        for raw in &commands {
+            let cmd = raw.trim();
+            if cmd.is_empty() {
+                continue;
+            }
+            let cancel = AtomicBool::new(false);
+            let result = sshexec::run_local(cmd, dir, LOCAL_COMMAND_TIMEOUT, &cancel)
+                .map_err(|e| format!("{cmd}: {e}"))?;
+            if result.cancelled {
+                return Err(format!("o comando {cmd} foi interrompido — nada foi publicado"));
+            }
+            if result.timed_out {
+                return Err(format!(
+                    "o comando {cmd} passou de {} minutos — nada foi publicado",
+                    LOCAL_COMMAND_TIMEOUT.as_secs() / 60
+                ));
+            }
+            if !result.ok() {
+                return Err(format!(
+                    "o comando {cmd} terminou com código {} — nada foi publicado\n{}",
+                    result.exit_code.unwrap_or(-1),
+                    failure_detail(&result)
+                ));
+            }
+            partes.push(format!("$ {cmd}\n{}", last_lines(&result.stdout, 8)));
+        }
+
+        let situacao = git::status(dir)?;
+        // Ramo sem rastreio: o primeiro envio precisa dizer onde ele nasce.
+        let enviado = git::push(dir, Some(&escolhido), None, situacao.upstream.is_none())?;
+        partes.push(format!("git push {escolhido}\n{}", enviado.trim()));
+
+        if let Some(nome) = tag.as_deref() {
+            let existente = git::tags(dir)?.iter().any(|t| t.name == nome);
+            if !existente {
+                git::create_tag(dir, nome, None, None)?;
+            }
+            // O ramo já está publicado: se só a tag falhar, a resposta diz isso
+            // em vez de fingir que a publicação inteira não aconteceu.
+            let subida = match git::push_tag(dir, &escolhido, nome) {
+                Ok(saida) => saida,
+                Err(e) => {
+                    let recebido = partes.join("\n\n");
+                    return Err(format!(
+                        "{recebido}\n\no ramo foi publicado; apenas a tag {nome} não chegou a {escolhido}: {e}"
+                    ));
+                }
+            };
+            let mut linha = format!(
+                "tag {nome} {}",
+                if existente { "enviada (já existia local)" } else { "criada e enviada" }
+            );
+            let resumo = subida.trim();
+            if !resumo.is_empty() {
+                linha.push('\n');
+                linha.push_str(resumo);
+            }
+            partes.push(linha);
+        }
+
+        Ok(outcome(partes.join("\n\n")))
+    })
+    .await
+}
+
+/// Desfaz a marca publicada: a tag sai do remoto. O ramo e o histórico não são
+/// tocados, e a tag local continua — para isso existe a exclusão de tag.
+#[tauri::command]
+async fn git_unpublish_tag(
+    state: State<'_, AppState>,
+    project_id: i64,
+    remote: Option<String>,
+    name: String,
+) -> Result<GitActionOutcome, String> {
+    let db = state.db.clone();
+    let remote = trim_opt(remote);
+    let rotulo = remote.clone().unwrap_or_else(|| "o remoto padrão".to_string());
+    let detail = format!("tag {name} retirada de {rotulo}");
+    git_write(db, project_id, "git_unpublish_tag", detail, move |dir| {
+        let escolhido = match remote.as_deref() {
+            Some(r) => r.to_string(),
+            None => git::default_remote(dir)?,
+        };
+        let saida = git::delete_remote_tag(dir, &escolhido, &name)?;
+        Ok(outcome(format!(
+            "git push {escolhido} :refs/tags/{name}\n{}",
+            saida.trim()
+        )))
+    })
+    .await
+}
+
 #[tauri::command]
 async fn git_tags(state: State<'_, AppState>, project_id: i64) -> Result<Vec<git::TagInfo>, String> {
     let db = state.db.clone();
@@ -2399,6 +2584,8 @@ pub fn register_all(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri
         git_fetch,
         git_pull,
         git_push,
+        git_publish,
+        git_unpublish_tag,
         git_tags,
         git_create_tag,
         git_delete_tag,
@@ -2479,6 +2666,40 @@ mod git_helpers_tests {
         assert!(!red.contains("token"));
         // a cauda aparece exatamente uma vez
         assert_eq!(red.matches("app.git").count(), 1);
+    }
+
+    #[test]
+    fn saida_longa_de_comando_local_mostra_so_o_fim() {
+        let longo = (1..=40)
+            .map(|n| format!("linha {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cortado = last_lines(&longo, 8);
+        assert!(cortado.starts_with("…\n"), "avisa que houve corte");
+        assert_eq!(cortado.lines().count(), 9);
+        assert!(cortado.ends_with("linha 40"), "o fim é o que importa");
+        assert_eq!(last_lines("a\nb", 8), "a\nb", "curta fica inteira");
+        assert_eq!(last_lines("  \n\n  ", 8), "(sem saída)");
+    }
+
+    #[test]
+    fn falha_local_prefere_o_stderr_e_usa_o_stdout_como_plano_b() {
+        let com_erro = sshexec::ExecResult {
+            exit_code: Some(1),
+            stdout: "42 testes executados\n".into(),
+            stderr: "erro: falta a variável TOKEN\n".into(),
+            timed_out: false,
+            cancelled: false,
+        };
+        assert_eq!(failure_detail(&com_erro), "erro: falta a variável TOKEN");
+        let sem_erro = sshexec::ExecResult {
+            exit_code: Some(2),
+            stdout: "rodou até aqui\n".into(),
+            stderr: "   ".into(),
+            timed_out: false,
+            cancelled: false,
+        };
+        assert_eq!(failure_detail(&sem_erro), "rodou até aqui");
     }
 
     #[test]

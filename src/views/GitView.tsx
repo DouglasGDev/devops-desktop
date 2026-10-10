@@ -13,6 +13,7 @@ import {
   GitBranchIcon,
   PlusIcon,
   RefreshIcon,
+  RocketIcon,
   UndoIcon,
   UploadIcon,
   XIcon,
@@ -35,6 +36,7 @@ import { ChangesPanel } from "../components/git/ChangesPanel";
 import { CloneDialog } from "../components/git/CloneDialog";
 import { DiffView } from "../components/git/DiffView";
 import { HistoryPanel } from "../components/git/HistoryPanel";
+import { PublishDialog } from "../components/git/PublishDialog";
 import { RemotesPanel } from "../components/git/RemotesPanel";
 import { SecretsPanel } from "../components/git/SecretsPanel";
 import { TagsPanel } from "../components/git/TagsPanel";
@@ -97,6 +99,7 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
   const [compareFrom, setCompareFrom] = useState("");
   const [compareTo, setCompareTo] = useState("");
   const [pushBlock, setPushBlock] = useState<SecretFinding[] | null>(null);
+  const [publishing, setPublishing] = useState(false);
   const [revertAsk, setRevertAsk] = useState<CommitDetail | null>(null);
   const [resetAsk, setResetAsk] = useState<{ commit: string; subject: string; mode: ResetMode } | null>(null);
 
@@ -302,6 +305,19 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
               title={status?.upstream ? "Enviar os commits para o remoto" : "Cadastre um remoto ou acompanhe um ramo remoto antes de enviar"}
             >
               <UploadIcon className="size-3.5" /> Enviar
+            </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              disabled={git.busy !== null || git.remotes.length === 0}
+              onClick={() => setPublishing(true)}
+              title={
+                git.remotes.length === 0
+                  ? "Cadastre um remoto em Remotos antes de publicar"
+                  : "Rodar os comandos do projeto, enviar o ramo e marcar com uma tag — sem precisar de servidor"
+              }
+            >
+              <RocketIcon className="size-3.5" /> Publicar
             </Button>
             <Button size="sm" onClick={() => setCloning(true)}>
               <PlusIcon className="size-3.5" /> Clonar
@@ -517,6 +533,10 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
       </div>
 
       <CloneDialog open={cloning} onClose={() => setCloning(false)} />
+
+      {projectId !== null ? (
+        <PublishDialog git={git} projectId={projectId} open={publishing} onClose={() => setPublishing(false)} />
+      ) : null}
 
       <Confirm
         open={revertAsk !== null}
