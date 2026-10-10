@@ -208,9 +208,13 @@ mensagem "ferramenta ausente" e o log da checagem — sem tentar adivinhar camin
 A seção **GitHub** só funciona com um *Client ID* de OAuth App. Ele **não** é um segredo: é o identificador público da
 aplicação, e por isso pode ficar no banco local.
 
-1. Em `github.com/settings/developers`, crie uma **OAuth App** (nome, URL de casa e callback podem ser
-   `http://localhost`).
-2. Marque **Enable Device Flow** e copie o **Client ID**.
+1. Em `github.com/settings/developers` (New OAuth App), o formulário pede três valores e nenhum deles exige servidor
+   próprio: **Application name** é livre; **Homepage URL** aceita qualquer endereço público — o deste repositório serve
+   (`https://github.com/DouglasGDev/devops-desktop`); **Authorization callback URL** precisa ser digitado, mas o fluxo de
+   dispositivo **nunca redireciona para ele**, então repita o mesmo endereço da homepage. Sem domínio, sem hospedagem,
+   sem porta aberta.
+2. Marque **Enable Device Flow**, salve e copie o **Client ID** (começa com `Iv`). O **Client secret** existe só para o
+   fluxo de website com backend e ele **não** vai para nenhum lugar desta aplicação.
 3. No aplicativo, em **GitHub → Client ID da aplicação OAuth**, cole o identificador e salve. O campo aceita apenas o
    formato do Client ID (20 caracteres hexadecimais ou `Iv1.` + hexadecimal); token de acesso é recusado de propósito,
    para ninguém persistir um segredo nesse campo.
