@@ -43,7 +43,7 @@ servidor ou no repositório. Quando uma etapa obrigatória falha, a interface mo
 | **Deploy** | Cinco estratégias reais: **A** SFTP sincronizado, **B** Git no servidor, **C** build local + artefatos, **D** sequência de scripts, **E** Docker/Compose. Pipeline visual de até 15 etapas com log, código de saída, verificação de ferramentas no servidor antes de executar, cancelamento cooperativo, release anterior preservada e rollback assistido. |
 | **Segurança** | Bloqueio de commit/push quando o conteúdo que o Git publicaria contém segredo, varredura de projeto, regras extras configuráveis, remoção assistida do índice sem apagar o arquivo local. |
 | **Dashboard** | Estado dos servidores, deploys recentes e resultado, falhas do histórico, transferências em andamento, alertas de configuração e métricas reais de CPU, memória, disco, containers e serviços — lidas do servidor só quando você pedir. |
-| **GitHub** (opcional) | Conectar a conta pelo fluxo de dispositivo do OAuth, listar repositórios reais da conta, ver pull requests abertos, criar repositório (com confirmação), vincular um projeto cadastrado como `origin`. |
+| **GitHub** (opcional) | Conectar a conta pelo fluxo de dispositivo do OAuth e trabalhar o repositório de dentro do app: bandeja com o que é seu (revisão pedida, seus PRs, suas issues), pull request com diff real, conversa de comentários, revisão (aprovar / pedir alterações) e mesclar com método escolhido, abrir um PR a partir de um ramo desta máquina, issues com descrição e comentários, execuções do Actions com reexecução, visão geral que liga o remoto às pastas locais (clonar, vincular como `origin`) e criação de repositório. Tudo com confirmação nas ações que escrevem; sem conta conectada, a aba mostra só a conta e o Client ID. |
 | **Auditoria** | Tudo fica em SQLite local, pesquisável e filtrável por servidor, projeto, tipo, nível e resultado. |
 
 ---
@@ -146,8 +146,8 @@ O comando roda `npm run build`, compila em release e gera os dois pacotes config
 
 ```
 src-tauri/target/release/bundle/
-├── nsis/DevOps Desktop_0.1.0_x64-setup.exe      (4,43 MiB)
-└── msi/DevOps Desktop_0.1.0_x64_en-US.msi       (6,33 MiB)
+├── nsis/DevOps Desktop_0.1.0_x64-setup.exe      (4,56 MiB)
+└── msi/DevOps Desktop_0.1.0_x64_en-US.msi       (6,57 MiB)
 ```
 
 O instalador NSIS é o recomendado para uso individual; o MSI atende implantação por GPO/domínio. O `bundle` já traz
@@ -344,17 +344,23 @@ A aba **GitHub** é um posto de trabalho, não uma listagem: tudo que aparece ve
    - **Pull requests** abre o diff real do PR com o mesmo leitor de patch usado no Git local. Ações: comentar, aprovar,
      pedir alterações e **Mesclar** — esta última com escolha de método (merge, squash, rebase) e sempre com o SHA que
      foi lido do detalhe do PR. Enquanto o GitHub estiver calculando a viabilidade, a tela diz isso em vez de afirmar
-     que dá para mesclar. **Buscar ramo do PR** faz `git fetch` de `refs/pull/<n>/head` e cria `github/pr-<n>` no
+     que dá para mesclar. **Conversa** é o fio de comentários do PR, lido na hora; um comentário que você escreve
+     aparece na lista sem trocar de aba. **Abrir PR** cria um pull request a partir de um ramo desta máquina: o projeto
+     cadastrado, os ramos locais (do `git branch` real), o ramo de destino lido de `/branches`, título, descrição e se
+     é rascunho. O aplicativo não empurra o ramo — publicar é ação sua, na seção Git — e avisa isso antes do envio.
+     **Buscar ramo do PR** faz `git fetch` de `refs/pull/<n>/head` e cria `github/pr-<n>` no
      projeto escolhido; um PR inexistente não deixa branch fantasma.
    - **Issues** lista as abertas (pull requests ficam de fora, porque na API do GitHub todo PR também é issue), mostra a
-     descrição que veio na resposta, cria issue nova, comenta e fecha — fechamento com confirmação explícita.
+     descrição que veio na resposta, o fio de comentários, cria issue nova, comenta e fecha — fechamento com
+     confirmação explícita.
    - **Verificações** lê as execuções do Actions com status e conclusão reais, reexecuta um workflow depois de avisar
      que quem decide os passos é o YAML do repositório, e abre o log no site.
 4. **Novo repositório** — nome, descrição opcional e visibilidade, com confirmação explícita porque a ação é externa e
    fica visível depois; repositório público é lido por qualquer pessoa.
 
-Escrever no GitHub (comentar, revisar, mesclar, criar/fechar issue, reexecutar) nunca é automático: cada uma dessas
-ações é um botão que você aperta, e todas deixam registro na auditoria sem corpo de mensagem nem token.
+Escrever no GitHub (comentar, revisar, mesclar, criar/fechar issue, abrir pull request, reexecutar) nunca é
+automático: cada uma dessas ações é um botão que você aperta, e todas deixam registro na auditoria sem corpo de
+mensagem nem token.
 
 Se a conta não estiver conectada, a aba mostra só a conta e o Client ID — nenhuma tabela de exemplo.
 
@@ -461,7 +467,7 @@ cd src-tauri
 cargo test --lib
 ```
 
-Cobertura atual do backend (181 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
+Cobertura atual do backend (183 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
 timeout e cancelamento, sessões PTY, ciclo completo de Git em repositório temporário (status, stage por hunk, commit,
 log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), publicação por Git em clone
 de um remoto `bare` real (`push_tag` leva a tag até o remoto, `delete_remote_tag` tira só a referência de lá, o ramo e a
@@ -498,7 +504,11 @@ não afirma que dá para mesclar enquanto o `mergeable` do GitHub for `null`; o 
 diff local, com o cabeçalho `diff --git` que a API não manda; issue e pull request se separam pelo que a própria API
 marca; `APPROVE`/`REQUEST_CHANGES`/`COMMENT` e `merge`/`squash`/`rebase` são os únicos valores aceitos; o SHA do merge é
 o que foi lido no detalhe, com pelo menos sete dígitos hex; o `dono/repo` usado no log de auditoria vem do slug validado,
-nunca do que foi digitado; corpo vazio ou enorme não vira comentário), e a busca do ramo de um pull request no git local —
+nunca do que foi digitado; corpo vazio ou enorme não vira comentário), o fio de comentários (autor e marcação temporal
+vêm da resposta, um comentário sem texto é mostrado como sem texto e um item sem `html_url` não entra na lista), a
+abertura de pull request (o nome do ramo é o que o GitHub endereça — `dono:ramo` de fork passa, vazio, com espaço, com
+`..`, começando em `-` ou acima de 250 caracteres não; origem igual ao destino é recusada antes de qualquer chamada, e a
+descrição tem limite), e a busca do ramo de um pull request no git local —
 um PR que não existe no remoto **não** deixa branch fantasma criado. Nenhum teste de rede é feito: as rotas que falam com o GitHub são exercitadas só na máquina, com dados de
 resposta fixos dentro do próprio teste.
 
@@ -527,6 +537,8 @@ O frontend é verificado por `npm run build`, que roda `tsc --noEmit` antes do b
 | O pull request abre sem linhas de diff | Arquivo binário, grande demais, ou sem patch na resposta da API. | O cabeçalho do arquivo ainda aparece com a contagem; **Site** leva ao diff completo no navegador. |
 | *Verificações* diz "Nenhuma execução de workflow" | O repositório não tem arquivo em `.github/workflows`, ou nada rodou nele — é a resposta do GitHub, não falha da aplicação. | Confira o workflow no site; a lista é lida de `/actions/runs` do próprio repositório. |
 | "não foi possível buscar o pull request #N" | O número não existe naquele remoto, o projeto escolhido aponta para outro `origin`, ou a rede falhou no `git fetch`. | A mensagem distingue busca do PR da troca de branch. Confira o remoto do projeto em *Git → Remotos* e repita; nenhum branch é criado quando a busca falha. |
+| **Conversa** traz uma linha vermelha ou fica em "lendo os comentários…" | O `GET /issues/<n>/comments` falhou (token expirado, repo privado sem acesso, rede). A tela mostra a resposta do GitHub em vez de esconder a seção. | *Atualizar* (o ícone de recarregar da seção) refaz a leitura. Se o token expirou, reconecte a conta — ele vive só na memória do processo. |
+| "Abrir PR" falha dizendo que a base ou o head não existem | O nome do ramo é enviado como o GitHub endereça, mas o **ramo de origem precisa já estar no remoto** — a aplicação não empurra nada por você. | Vá em *Git → Publicar/empurrar* e envie o ramo, depois abra de novo. ramo de origem igual ao de destino é recusado antes de qualquer chamada. |
 | Acesso diz que o remoto "não aponta para um repositório acessível" | URL do remoto errada, ou repositório privado sem liberação. | Confira **Remotos** (o nome aparece no veredito, nunca a URL) e refaça o teste. |
 | Painel mostra "ssh-agent ... sem nenhuma chave carregada" | O agente está rodando, mas vazio. | `ssh-add ~/.ssh/id_ed25519`. Sem chave no agente, todo remoto SSH pede credencial que a aplicação não pode digitar por você. |
 | Teste falha com "Chave de host desconhecida ou alterada" | O host ainda não está no `known_hosts` (ou a chave dele mudou). | Abra uma sessão desse servidor no **terminal integrado**: o OpenSSH pergunta dentro da sessão e, se você confirmar, a chave entra no `known_hosts`. Depois repita o teste. A aplicação nunca aceita a chave sozinha — se a chave *mudou*, investigue antes de aceitar. |

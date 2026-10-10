@@ -1200,13 +1200,128 @@ fn slug_para_log(slug: &str) -> String {
     }
 }
 
+/// Um comentário do fio. Sem texto na resposta, `body` é `None` — a tela diz que
+/// não há texto em vez de mostrar uma linha em branco.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubComment {
+    pub author: Option<String>,
+    pub body: Option<String>,
+    pub created_at: Option<String>,
+    pub url: String,
+}
+
+fn parse_comment(v: &Value) -> Option<GitHubComment> {
+    let url = str_field(v, "html_url")?;
+    Some(GitHubComment {
+        author: v.get("user").and_then(|u| str_field(u, "login")),
+        body: v
+            .get("body")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .map(|b| b.chars().take(8000).collect()),
+        created_at: str_field(v, "created_at"),
+        url,
+    })
+}
+
+/// O fio de comentários. A mesma rota atende issue e pull request, porque na API
+/// do GitHub um pull request também é uma issue.
+pub fn comentarios(state: &GitHubState, slug: &str, number: i64) -> Result<Vec<GitHubComment>, String> {
+    if number <= 0 {
+        return Err("número de issue ou pull request inválido".to_string());
+    }
+    let token = require_token(state)?;
+    let url = format!(
+        "{}?per_page=100&sort=created&direction=asc",
+        repo_url(slug, &format!("/issues/{number}/comments"))?
+    );
+    let body = get_json(&url, &token)?;
+    let itens = body
+        .as_array()
+        .ok_or_else(|| "o fio de comentários veio em formato inesperado".to_string())?;
+    Ok(itens.iter().filter_map(parse_comment).collect())
+}
+
+/// Os ramos que existem no remoto — o destino de um pull request novo precisa
+/// estar lá, não apenas nesta máquina.
+pub fn ramos(state: &GitHubState, slug: &str) -> Result<Vec<String>, String> {
+    let token = require_token(state)?;
+    let url = format!("{}?per_page=100", repo_url(slug, "/branches")?);
+    let body = get_json(&url, &token)?;
+    let itens = body
+        .as_array()
+        .ok_or_else(|| "a lista de ramos veio em formato inesperado".to_string())?;
+    Ok(itens.iter().filter_map(|v| str_field(v, "name")).collect())
+}
+
+/// Nome de ramo aceito no corpo do pull request. `dono:ramo` vale porque é assim
+/// que o GitHub endereça o ramo de um fork.
+fn nome_de_ramo(nome: &str, o_que: &str) -> Result<String, String> {
+    let trimmed = nome.trim();
+    if trimmed.is_empty() || trimmed.len() > 250 {
+        return Err(format!("{o_que} precisa de um nome de ramo"));
+    }
+    if trimmed.starts_with('-') || trimmed.contains("..") || trimmed.contains(' ') || trimmed.contains('\0') {
+        return Err(format!("{o_que} não é um nome de ramo válido"));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Abrir pull request entre ramos que já existem no remoto. Nada é empurrado
+/// aqui: escrever no remoto continua sendo a seção Git.
+pub fn create_pull(conn: &Connection, state: &GitHubState, input: &NewPullInput) -> Result<PullDetail, String> {
+    let title = corpo_texto(&input.title, 256, "o título do pull request")?;
+    let head = nome_de_ramo(&input.head, "o ramo de origem")?;
+    let base = nome_de_ramo(&input.base, "o ramo de destino")?;
+    if head == base {
+        return Err("o ramo de origem e o de destino são o mesmo — não há o que abrir".to_string());
+    }
+    let corpo = input
+        .body
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    if corpo.len() > 65_000 {
+        return Err("a descrição do pull request passou de 65 000 caracteres".to_string());
+    }
+    let url = repo_url(&input.repo, "/pulls")?;
+    let token = require_token(state)?;
+    let resposta = api_json(
+        "POST",
+        &url,
+        &token,
+        Some(json!({
+            "title": title,
+            "head": head,
+            "base": base,
+            "body": if corpo.is_empty() { Value::Null } else { json!(corpo) },
+            "draft": input.draft,
+        })),
+    )?;
+    let pull = parse_pull_detail(&resposta)?;
+    audit::log(
+        conn,
+        "warning",
+        "github",
+        "Pull request aberto no GitHub",
+        None,
+        None,
+        None,
+        Some(&format!("#{} · {}", pull.number, slug_para_log(&input.repo))),
+    )?;
+    Ok(pull)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PullNumberInput {
     pub repo: String,
     pub number: i64,
 }
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommentInput {
@@ -1255,6 +1370,19 @@ pub struct CloseIssueInput {
 pub struct RerunInput {
     pub repo: String,
     pub run_id: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewPullInput {
+    pub repo: String,
+    pub title: String,
+    pub head: String,
+    pub base: String,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub draft: bool,
 }
 
 impl ConnectResult {
@@ -1591,6 +1719,35 @@ mod tests {
         let cortada = parse_issue(&gigante).unwrap().body.unwrap();
         assert!(cortada.ends_with("(descrição cortada; abra no site para ler inteira)"));
         assert!(cortada.chars().count() < 4100, "corte não respeitou o limite");
+    }
+
+    #[test]
+    fn o_fio_de_comentarios_mostra_o_que_o_github_devolveu() {
+        let com_texto: Value =
+            serde_json::from_str(r#"{"html_url":"https://x/1","user":{"login":"douglas"},"body":"  vi o erro  ","created_at":"2026-10-10T00:00:00Z"}"#)
+                .unwrap();
+        let lido = parse_comment(&com_texto).unwrap();
+        assert_eq!(lido.author.as_deref(), Some("douglas"));
+        assert_eq!(lido.body.as_deref(), Some("vi o erro"));
+        assert_eq!(lido.created_at.as_deref(), Some("2026-10-10T00:00:00Z"));
+
+        let sem_corpo: Value = serde_json::from_str(r#"{"html_url":"https://x/2","body":"   "}"#).unwrap();
+        let lido = parse_comment(&sem_corpo).unwrap();
+        assert_eq!(lido.body, None, "comentário vazio não pode virar linha com texto inventado");
+        assert_eq!(lido.author, None);
+
+        // Sem endereço não é comentário: nada de linha sem link no fio.
+        let sem_url: Value = serde_json::from_str(r#"{"body":"solta"}"#).unwrap();
+        assert!(parse_comment(&sem_url).is_none());
+    }
+
+    #[test]
+    fn o_ramo_do_pull_request_e_o_que_o_github_endereca() {
+        assert_eq!(nome_de_ramo(" main ", "ramo").unwrap(), "main");
+        assert_eq!(nome_de_ramo("outra-pessoa:feature-x", "ramo").unwrap(), "outra-pessoa:feature-x");
+        for invalido in ["", "a b", "a..b", "-comeca-com-traco", &format!("r{}", "o".repeat(250))] {
+            assert!(nome_de_ramo(invalido, "ramo").is_err(), "aceitou {invalido:?}");
+        }
     }
 
     #[test]

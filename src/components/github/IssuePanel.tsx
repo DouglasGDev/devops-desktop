@@ -4,6 +4,7 @@ import { api } from "../../lib/api";
 import { formatAgo } from "../../lib/format";
 import { useApp } from "../../store/AppContext";
 import type { GitHubIssue, ViewId } from "../../types";
+import { Conversa } from "./Conversa";
 import {
   AlertTriangleIcon,
   CheckIcon,
@@ -35,6 +36,7 @@ export function IssuePanel({
   const [comentario, setComentario] = useState("");
   const [acao, setAcao] = useState<string | null>(null);
   const [fechando, setFechando] = useState(false);
+  const [conversa, setConversa] = useState(0);
 
   const [criando, setCriando] = useState(false);
   const [titulo, setTitulo] = useState("");
@@ -75,6 +77,7 @@ export function IssuePanel({
       await rota();
       pushToast("success", `${nome} concluído no GitHub.`);
       depois?.();
+      setConversa((v) => v + 1);
       await lerLista();
     } catch (e) {
       pushToast("error", String(e));
@@ -259,6 +262,10 @@ export function IssuePanel({
                 O GitHub devolveu esta issue sem descrição — quem abriu não escreveu corpo.
               </p>
             )}
+
+            <div className="border-t border-zinc-200 pt-3 dark:border-zinc-800">
+              <Conversa repo={repo} number={escolhida.number} versao={conversa} />
+            </div>
 
             <div className="flex flex-col gap-2">
               <Field label={`Comentar na issue #${escolhida.number}`}>

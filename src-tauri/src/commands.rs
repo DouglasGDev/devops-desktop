@@ -2759,6 +2759,42 @@ async fn github_rerun(
     .await
 }
 
+#[tauri::command]
+async fn github_comments(
+    gh: State<'_, github::GitHubState>,
+    input: github::PullNumberInput,
+) -> Result<Vec<github::GitHubComment>, String> {
+    let gh = (*gh).clone();
+    spawn("github_comments", move || {
+        github::comentarios(&gh, &input.repo, input.number)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn github_branches(
+    gh: State<'_, github::GitHubState>,
+    repo: String,
+) -> Result<Vec<String>, String> {
+    let gh = (*gh).clone();
+    spawn("github_branches", move || github::ramos(&gh, &repo)).await
+}
+
+#[tauri::command]
+async fn github_create_pull(
+    state: State<'_, AppState>,
+    gh: State<'_, github::GitHubState>,
+    input: github::NewPullInput,
+) -> Result<github::PullDetail, String> {
+    let db = state.db.clone();
+    let gh = (*gh).clone();
+    spawn("github_create_pull", move || {
+        let conn = lock_db(&db)?;
+        github::create_pull(&conn, &gh, &input)
+    })
+    .await
+}
+
 /// O pull request vira trabalho local: busca a cabeça do PR e muda para a
 /// branch de leitura. Sem remoto informado, usa o mesmo da publicação.
 #[tauri::command]
@@ -2896,6 +2932,9 @@ pub fn register_all(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri
         github_review,
         github_merge,
         github_rerun,
+        github_comments,
+        github_branches,
+        github_create_pull,
         git_checkout_pull,
     ])
 }

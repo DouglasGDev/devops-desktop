@@ -515,7 +515,14 @@ export function GitHubView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
                 </Card>
 
                 {aba === "visao" && repoObj !== null ? <RepoOverview repo={repoObj} onNavigate={onNavigate} /> : null}
-                {aba === "pulls" ? <PullRequestPanel repo={repoSel} numeroInicial={prAlvo} onNavigate={onNavigate} /> : null}
+                {aba === "pulls" ? (
+                  <PullRequestPanel
+                    repo={repoSel}
+                    numeroInicial={prAlvo}
+                    branchPadrao={repoObj?.defaultBranch ?? null}
+                    onNavigate={onNavigate}
+                  />
+                ) : null}
                 {aba === "issues" ? <IssuePanel repo={repoSel} numeroInicial={issueAlvo} onNavigate={onNavigate} /> : null}
                 {aba === "acoes" ? <ChecksPanel repo={repoSel} /> : null}
               </>

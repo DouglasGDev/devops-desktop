@@ -20,6 +20,7 @@ import type {
   GitHubDeviceFlow,
   GitHubInbox,
   GitHubIssue,
+  GitHubComment,
   GitHubPull,
   GitHubPullDetail,
   GitHubRepo,
@@ -399,6 +400,27 @@ export const api = {
   githubMerge: (params: { repo: string; number: number; method: MergeMethod; sha: string }) =>
     invoke<string>("github_merge", { input: params }),
   githubRerun: (repo: string, runId: number) => invoke<void>("github_rerun", { input: { repo, runId } }),
+  githubComments: (repo: string, number: number) =>
+    invoke<GitHubComment[]>("github_comments", { input: { repo, number } }),
+  githubBranches: (repo: string) => invoke<string[]>("github_branches", { repo }),
+  githubCreatePull: (params: {
+    repo: string;
+    title: string;
+    head: string;
+    base: string;
+    body?: string | null;
+    draft?: boolean;
+  }) =>
+    invoke<GitHubPullDetail>("github_create_pull", {
+      input: {
+        repo: params.repo,
+        title: params.title,
+        head: params.head,
+        base: params.base,
+        body: params.body ?? null,
+        draft: params.draft ?? false,
+      },
+    }),
   gitCheckoutPull: (projectId: number, number: number, remote?: string | null) =>
     invoke<GitActionOutcome>("git_checkout_pull", {
       projectId,

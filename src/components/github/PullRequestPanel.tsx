@@ -3,7 +3,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "../../lib/api";
 import { formatAgo } from "../../lib/format";
 import { useApp } from "../../store/AppContext";
-import type { FileDiff, GitHubPull, GitHubPullDetail, MergeMethod, ViewId } from "../../types";
+import type { BranchInfo, FileDiff, GitHubPull, GitHubPullDetail, MergeMethod, ViewId } from "../../types";
+import { Conversa } from "./Conversa";
 import { DiffView } from "../git/DiffView";
 import {
   AlertTriangleIcon,
@@ -13,10 +14,11 @@ import {
   ExternalLinkIcon,
   GitBranchIcon,
   MergeIcon,
+  PlusIcon,
   RefreshIcon,
   XIcon,
 } from "../Icons";
-import { Badge, Button, Card, Confirm, EmptyState, Field, Select, Spinner, Textarea } from "../ui";
+import { Badge, Button, Card, Checkbox, Confirm, EmptyState, Field, Input, Modal, Select, Spinner, Textarea } from "../ui";
 
 const METODOS: { valor: MergeMethod; nome: string; porque: string }[] = [
   { valor: "merge", nome: "Merge commit", porque: "guarda os commits do ramo e um commit de merge" },
@@ -51,10 +53,12 @@ function estado_merge(detalhe: GitHubPullDetail): { tom: "success" | "warning" |
 export function PullRequestPanel({
   repo,
   numeroInicial,
+  branchPadrao,
   onNavigate,
 }: {
   repo: string;
   numeroInicial: number | null;
+  branchPadrao: string | null;
   onNavigate: (v: ViewId) => void;
 }) {
   const { projects, pushToast } = useApp();
@@ -70,6 +74,18 @@ export function PullRequestPanel({
   const [acao, setAcao] = useState<string | null>(null);
   const [projeto, setProjeto] = useState<number | "">("");
   const [mergeAsk, setMergeAsk] = useState<MergeMethod | null>(null);
+  const [conversa, setConversa] = useState(0);
+
+  // Abrir pull request a partir de um ramo desta máquina.
+  const [novoAberto, setNovoAberto] = useState(false);
+  const [novoProjeto, setNovoProjeto] = useState<number | "">("");
+  const [ramosLocais, setRamosLocais] = useState<BranchInfo[] | null>(null);
+  const [ramosRemotos, setRamosRemotos] = useState<string[] | null>(null);
+  const [head, setHead] = useState("");
+  const [base, setBase] = useState("");
+  const [titulo, setTitulo] = useState("");
+  const [descricao, setDescricao] = useState("");
+  const [rascunho, setRascunho] = useState(false);
 
   const repositorios = useMemo(() => projects.filter((p) => p.isGitRepo), [projects]);
 
@@ -127,6 +143,7 @@ export function PullRequestPanel({
       pushToast("success", `${nome} concluído no GitHub.`);
       depois?.(r);
       setComentario("");
+      setConversa((v) => v + 1);
       await lerLista();
     } catch (e) {
       pushToast("error", String(e));
@@ -167,6 +184,83 @@ export function PullRequestPanel({
     }
   };
 
+  // Os ramos que servem de origem são os desta máquina; os de destino são os que
+  // o remoto tem. Nada aqui empurra branch nenhuma — isso é leitura.
+  useEffect(() => {
+    if (!novoAberto) {
+      setRamosRemotos(null);
+      return;
+    }
+    let vivo = true;
+    api
+      .githubBranches(repo)
+      .then((r) => {
+        if (!vivo) return;
+        setRamosRemotos(r);
+        setBase((atual) => atual || branchPadrao || (r.includes("main") ? "main" : (r[0] ?? "")));
+      })
+      .catch((e) => {
+        if (vivo) {
+          setRamosRemotos([]);
+          pushToast("error", String(e));
+        }
+      });
+    return () => {
+      vivo = false;
+    };
+  }, [novoAberto, repo, branchPadrao, pushToast]);
+
+  useEffect(() => {
+    if (novoProjeto === "") {
+      setRamosLocais(null);
+      return;
+    }
+    let vivo = true;
+    api
+      .gitBranches(novoProjeto)
+      .then((r) => {
+        if (!vivo) return;
+        const cabeca = r.find((b) => b.isHead);
+        setRamosLocais(r);
+        setHead((atual) => atual || cabeca?.name || "");
+      })
+      .catch((e) => {
+        if (vivo) {
+          setRamosLocais([]);
+          pushToast("error", String(e));
+        }
+      });
+    return () => {
+      vivo = false;
+    };
+  }, [novoProjeto, pushToast]);
+
+  const abrirPull = async () => {
+    setAcao("Pull request");
+    try {
+      const criado = await api.githubCreatePull({
+        repo,
+        title: titulo.trim(),
+        head,
+        base,
+        body: descricao.trim() || null,
+        draft: rascunho,
+      });
+      setNovoAberto(false);
+      setTitulo("");
+      setDescricao("");
+      setRascunho(false);
+      setHead("");
+      pushToast("success", `Pull request #${criado.number} aberto em ${repo}.`);
+      setNumero(criado.number);
+      await lerLista();
+    } catch (e) {
+      pushToast("error", String(e));
+    } finally {
+      setAcao(null);
+    }
+  };
+
   if (listaErro) {
     return (
       <Card className="flex flex-wrap items-center justify-between gap-3 p-4">
@@ -199,6 +293,9 @@ export function PullRequestPanel({
           <Button size="sm" onClick={() => void lerLista()}>
             <RefreshIcon className="size-3.5" /> Atualizar
           </Button>
+          <Button size="sm" variant="primary" onClick={() => setNovoAberto(true)}>
+            <PlusIcon className="size-3.5" /> Abrir pull request de um ramo local
+          </Button>
         </EmptyState>
       </Card>
     );
@@ -209,11 +306,16 @@ export function PullRequestPanel({
   return (
     <div className="grid min-h-0 gap-3 lg:grid-cols-[minmax(0,17rem)_minmax(0,1fr)]">
       <Card className="flex max-h-[34rem] flex-col gap-1 overflow-y-auto p-2">
-        <div className="flex items-center justify-between px-1 py-1">
+        <div className="flex items-center justify-between gap-2 px-1 py-1">
           <span className="text-xs text-zinc-500 dark:text-zinc-400">{pulls.length} abertos</span>
-          <Button size="sm" variant="ghost" onClick={() => void lerLista()}>
-            <RefreshIcon className="size-3.5" />
-          </Button>
+          <div className="flex items-center gap-1">
+            <Button size="sm" variant="ghost" onClick={() => setNovoAberto(true)}>
+              <PlusIcon className="size-3.5" /> Abrir PR
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => void lerLista()}>
+              <RefreshIcon className="size-3.5" />
+            </Button>
+          </div>
         </div>
         {pulls.map((p) => (
           <button
@@ -360,6 +462,10 @@ export function PullRequestPanel({
               ) : null}
             </div>
 
+            <div className="border-t border-zinc-200 pt-3 dark:border-zinc-800">
+              <Conversa repo={repo} number={detalhe.number} versao={conversa} />
+            </div>
+
             {acao ? (
               <p className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
                 <Spinner className="size-3" /> {acao} em andamento…
@@ -401,6 +507,74 @@ export function PullRequestPanel({
           </p>
         </Confirm>
       </Card>
+
+      <Modal open={novoAberto} onClose={acao === "Pull request" ? () => {} : () => setNovoAberto(false)} title="Abrir pull request">
+        <div className="grid gap-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="De um repositório desta máquina">
+              <Select
+                value={novoProjeto === "" ? "" : String(novoProjeto)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setNovoProjeto(v === "" ? "" : Number(v));
+                  setHead("");
+                }}
+              >
+                <option value="">selecione o projeto</option>
+                {repositorios.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Ramo de origem">
+              <Select value={head} onChange={(e) => setHead(e.target.value)} disabled={ramosLocais === null}>
+                <option value="">{ramosLocais === null ? "escolha o projeto antes" : "escolha o ramo"}</option>
+                {(ramosLocais ?? [])
+                  .filter((b) => !b.name.includes("/"))
+                  .map((b) => (
+                    <option key={b.name} value={b.name}>
+                      {b.name}
+                      {b.isHead ? " (você está aqui)" : ""}
+                      {b.remote ? ` · ${b.ahead > 0 ? `${b.ahead} à frente` : b.behind > 0 ? `${b.behind} atrás` : "sincronizado"}` : " · sem remoto"}
+                    </option>
+                  ))}
+              </Select>
+            </Field>
+          </div>
+          <Field label="Ramo de destino">
+            <Select value={base} onChange={(e) => setBase(e.target.value)} disabled={ramosRemotos === null}>
+              <option value="">{ramosRemotos === null ? "lendo os ramos do remoto…" : "escolha o destino"}</option>
+              {(ramosRemotos ?? []).map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Título">
+            <Input value={titulo} onChange={(e) => setTitulo(e.target.value)} placeholder="o que este pull request faz" />
+          </Field>
+          <Field label="Descrição (opcional)">
+            <Textarea rows={3} value={descricao} onChange={(e) => setDescricao(e.target.value)} />
+          </Field>
+          <Checkbox checked={rascunho} onChange={setRascunho} label="Criar como rascunho" />
+        </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <Button onClick={() => setNovoAberto(false)} disabled={acao === "Pull request"}>
+            Cancelar
+          </Button>
+          <Button
+            variant="primary"
+            loading={acao === "Pull request"}
+            disabled={titulo.trim() === "" || head === "" || base === "" || head === base}
+            onClick={() => void abrirPull()}
+          >
+            Abrir no GitHub
+          </Button>
+        </div>
+      </Modal>
     </div>
   );
 }

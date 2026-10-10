@@ -631,8 +631,15 @@ export interface GitHubIssue {
   url: string;
 }
 
-export interface GitHubRun {
-  id: number;
+/** Um comentário do fio. `body` nulo é o GitHub dizendo que não há texto. */
+export interface GitHubComment {
+  author: string | null;
+  body: string | null;
+  createdAt: string | null;
+  url: string;
+}
+
+export interface GitHubRun {  id: number;
   name: string;
   displayTitle: string;
   headBranch: string;
