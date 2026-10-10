@@ -146,7 +146,7 @@ O comando roda `npm run build`, compila em release e gera os dois pacotes config
 
 ```
 src-tauri/target/release/bundle/
-├── nsis/DevOps Desktop_0.1.0_x64-setup.exe      (4,42 MiB)
+├── nsis/DevOps Desktop_0.1.0_x64-setup.exe      (4,43 MiB)
 └── msi/DevOps Desktop_0.1.0_x64_en-US.msi       (6,33 MiB)
 ```
 
@@ -224,7 +224,11 @@ aplicação, e por isso pode ficar no banco local.
    exibindo `liberado como @login`.
 
 O token (`repo,user`) vive **apenas na memória do processo**: não vai para o SQLite, para os logs nem para o disco, e
-fecha junto com o aplicativo — ao reabrir, é preciso reconectar. Toda requisição vai para `https://api.github.com`
+fecha junto com o aplicativo — ao reabrir, é preciso reconectar. A leitura do login (`GET /user`) é o que confirma a
+conexão na tela; se ela falhar, **a autorização continua guardada** e o aviso diz o que falhou, em vez de aparecer como
+"conexão falhou" o que foi apenas uma leitura a mais (proxy corporativo que deixa passar `github.com` e trava
+`api.github.com` é o caso comum). As perguntas de acompanhamento respeitam o intervalo que o próprio GitHub informou,
+atualizado a cada tentativa, para não tomar 429. Toda requisição vai para `https://api.github.com`
 (host fixo no código; a interface não aceita URL de API). Em rede corporativa com proxy, a seção reporta a falha de
 transporte em vez de mostrar dados de exemplo.
 
@@ -481,6 +485,7 @@ O frontend é verificado por `npm run build`, que roda `tsc --noEmit` antes do b
 | "o git não respondeu em 30 s e foi interrompido" | Um `git` local travado: índice com `index.lock` de outro git, hook parado ou antivírus segurando a pasta. | A mensagem diz o prazo e o motivo provável. Feche os outros `git` da pasta e tente de novo; nenhuma operação de git fica girando sem fim. |
 | "o git não respondeu em 10 min e foi interrompido" | Operação de rede lenta de verdade (clone grande) ou o remoto pedindo credencial que o git não pode perguntar (`GIT_TERMINAL_PROMPT=0`). | Rode o mesmo comando num terminal uma vez para liberar a credencial (chave no agente ou gerenciador de credenciais) e repita. |
 | A lista de arquivos remotos mostrava nomes com `//` no meio | O `ls` do cliente sftp devolve o caminho inteiro quando o argumento é absoluto, e o aplicativo juntava a pasta com o caminho todo. | Corrigido: a entrada volta a ser só o nome do arquivo/pasta. Se ainda vir algo estranho, diga o que aparece na coluna **Nome**. |
+| Linha vermelha no card **Conta GitHub** | A frase vermelha é a resposta do próprio GitHub, não uma falha genérica. As três causas reais são: Device Flow desmarcado na OAuth App, código de verificação expirado, ou `api.github.com` bloqueado por proxy depois que o `github.com` deixou passar. | Leia a frase: ela diz qual das três. Expirou → *Conectar conta* de novo (o código dura ~15 min). Proxy → o card mostra "sem rede, proxy ou DNS" e a autorização em si fica guardada. |
 | *Testar acesso* diz "sem liberação" | O remoto não aceita a credencial desta máquina (chave fora do agente, token revogado, chave não adicionada ao repositório). | Coloque a chave no agente (`ssh-add`), ou use **Liberar pelo navegador** na mesma tela, ou rode `gh auth login` num terminal. Depois repita o teste — é o `git ls-remote` que afirma o resultado, não a interface. |
 | Acesso diz que o remoto "não aponta para um repositório acessível" | URL do remoto errada, ou repositório privado sem liberação. | Confira **Remotos** (o nome aparece no veredito, nunca a URL) e refaça o teste. |
 | Painel mostra "ssh-agent ... sem nenhuma chave carregada" | O agente está rodando, mas vazio. | `ssh-add ~/.ssh/id_ed25519`. Sem chave no agente, todo remoto SSH pede credencial que a aplicação não pode digitar por você. |

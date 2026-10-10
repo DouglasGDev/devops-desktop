@@ -342,6 +342,12 @@ pub fn connect_poll(conn: &Connection, state: &GitHubState) -> Result<ConnectRes
         return Ok(ConnectResult::pending());
     }
 
+    if let Ok(mut guard) = state.device.lock() {
+        if let Some(p) = guard.as_mut() {
+            p.last_poll = Instant::now();
+        }
+    }
+
     let body = post_form(
         TOKEN_ENDPOINT,
         &[
@@ -352,32 +358,48 @@ pub fn connect_poll(conn: &Connection, state: &GitHubState) -> Result<ConnectRes
     )?;
 
     if let Some(token) = str_field(&body, "access_token") {
-        let user = get_json(&format!("{API_BASE}/user"), &token)?;
-        let login = str_field(&user, "login")
-            .ok_or_else(|| "o GitHub não informou o login da conta autenticada".to_string())?;
+        // O token foi concedido pelo github.com e passa a valer antes mesmo de
+        // api.github.com responder: ler o login é conveniência, não condição.
+        // Se a leitura falhar (proxy, escopo), a autorização fica guardada e a
+        // mensagem diz o que falhou, em vez de jogar a autorização fora e
+        // aparecer como "conexão falhou" o que foi só uma leitura a mais.
         if let Ok(mut guard) = state.token.lock() {
-            *guard = Some(token);
-        }
-        if let Ok(mut guard) = state.login.lock() {
-            *guard = Some(login.clone());
+            *guard = Some(token.clone());
         }
         if let Ok(mut guard) = state.device.lock() {
             guard.take();
         }
+        let (login, aviso) = match get_json(&format!("{API_BASE}/user"), &token) {
+            Ok(user) => match str_field(&user, "login") {
+                Some(l) => (Some(l), None),
+                None => (None, Some("o GitHub respondeu sem o login da conta".to_string())),
+            },
+            Err(e) => (None, Some(e)),
+        };
+        if let Some(ref l) = login {
+            if let Ok(mut guard) = state.login.lock() {
+                *guard = Some(l.clone());
+            }
+        }
+        let detalhe = match (&login, &aviso) {
+            (Some(l), _) => format!("login: {l}"),
+            (None, Some(e)) => e.clone(),
+            (None, None) => "a resposta não informou o login".to_string(),
+        };
         audit::log(
             conn,
-            "info",
+            if login.is_some() { "info" } else { "warning" },
             "github",
-            "Conta GitHub conectada",
+            if login.is_some() { "Conta GitHub conectada" } else { "Conta autorizada, login não lido" },
             None,
             None,
             None,
-            Some(&format!("login: {login}")),
+            Some(&detalhe),
         )?;
         return Ok(ConnectResult {
             status: "connected",
-            message: None,
-            login: Some(login),
+            message: aviso,
+            login,
         });
     }
 

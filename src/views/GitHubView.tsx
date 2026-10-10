@@ -90,7 +90,12 @@ export function GitHubView() {
             setFlow(null);
             setConnectError(null);
             await recarregarStatus();
-            pushToast("info", `Conta GitHub conectada como ${r.login ?? "desconhecida"}.`);
+            pushToast(
+              r.login ? "info" : "error",
+              r.login
+                ? `Conta GitHub conectada como ${r.login}.`
+                : `O GitHub aceitou a autorização, mas o login não foi lido: ${r.message ?? "resposta sem o login"}`,
+            );
           } else if (r.status === "error") {
             setFlow(null);
             setConnectError(r.message ?? "a autorização não foi concluída");
