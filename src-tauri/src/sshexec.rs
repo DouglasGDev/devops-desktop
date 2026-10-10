@@ -195,7 +195,6 @@ pub fn run_script(
     })
 }
 
-/// Colhe o processo até o prazo ou até o cancelamento, devolvendo o código de
 /// Executa um comando local exatamente como cadastrado no modelo de deploy
 /// (testes e build). `cmd /C` no Windows, `sh -c` nos demais: o comando é um
 /// único argv, nunca concatenação com o caminho do projeto.
@@ -226,6 +225,13 @@ pub fn run_local(
             format!("falha ao iniciar o comando local: {e}")
         }
     })?;
+    Ok(collect(&mut child, timeout, cancel))
+}
+
+/// Colhe um processo já iniciado dentro do prazo, drenando stdout e stderr em
+/// threads: um cano cheio nunca trava a coleta. No estouro de prazo ou
+/// cancelamento o filho é encerrado antes da função voltar.
+pub fn collect(child: &mut Child, timeout: Duration, cancel: &AtomicBool) -> ExecResult {
     let (tx_out, rx_out) = mpsc::channel();
     let (tx_err, rx_err) = mpsc::channel();
     if let Some(pipe) = child.stdout.take() {
@@ -234,18 +240,18 @@ pub fn run_local(
     if let Some(pipe) = child.stderr.take() {
         thread::spawn(move || drain(pipe, tx_err));
     }
-    let (exit_code, timed_out, cancelled) = harvest(&mut child, timeout, cancel);
+    let (exit_code, timed_out, cancelled) = harvest(child, timeout, cancel);
     if timed_out || cancelled {
         let _ = child.kill();
         let _ = child.wait();
     }
-    Ok(ExecResult {
+    ExecResult {
         exit_code,
         stdout: take_string(rx_out),
         stderr: take_string(rx_err),
         timed_out,
         cancelled,
-    })
+    }
 }
 
 /// Colhe o processo até o prazo ou até o cancelamento, devolvendo o código de

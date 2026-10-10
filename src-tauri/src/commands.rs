@@ -1616,6 +1616,27 @@ async fn git_unpublish_tag(
     .await
 }
 
+/// Lê a liberação da máquina para um remoto: `git ls-remote` com prazo, sem
+/// prompt de credencial e sem escrever nada. O veredito negativo vira
+/// `ok:false` com a frase do que falta — não um erro de IPC.
+#[tauri::command]
+async fn git_check_remote(
+    state: State<'_, AppState>,
+    project_id: i64,
+    remote: Option<String>,
+) -> Result<git::RemoteAccess, String> {
+    let db = state.db.clone();
+    let remote = trim_opt(remote);
+    git_read(db, project_id, move |dir| {
+        let escolhido = match remote.as_deref() {
+            Some(r) => r.to_string(),
+            None => git::default_remote(dir)?,
+        };
+        git::remote_access(dir, &escolhido)
+    })
+    .await
+}
+
 #[tauri::command]
 async fn git_tags(state: State<'_, AppState>, project_id: i64) -> Result<Vec<git::TagInfo>, String> {
     let db = state.db.clone();
@@ -2586,6 +2607,7 @@ pub fn register_all(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri
         git_push,
         git_publish,
         git_unpublish_tag,
+        git_check_remote,
         git_tags,
         git_create_tag,
         git_delete_tag,

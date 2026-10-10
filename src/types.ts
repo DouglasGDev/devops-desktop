@@ -127,6 +127,13 @@ export interface ToolVersions {
   sshAdd: string | null;
   git: string | null;
   agentRunning: boolean | null;
+  /** Chaves carregadas no ssh-agent. */
+  agentKeys: number | null;
+  /** user.name + user.email globais do git. */
+  gitUser: string | null;
+  gh: string | null;
+  /** Conta ativa do `gh auth status`; nunca o token. */
+  ghAccount: string | null;
 }
 
 export interface RoutineParam {
@@ -312,6 +319,13 @@ export interface RemoteInfo {
   name: string;
   fetchUrl: string | null;
   pushUrl: string | null;
+}
+
+/** Veredito do teste de acesso da máquina a um remoto (git ls-remote). */
+export interface RemoteAccess {
+  ok: boolean;
+  remote: string;
+  detail: string;
 }
 
 export interface CommitDetail {

@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../lib/api";
 import type { GitEditor, ToolVersions } from "../types";
 import { useApp } from "../store/AppContext";
-import { CheckIcon, ExternalLinkIcon, RefreshIcon, XIcon } from "../components/Icons";
+import { ExternalLinkIcon } from "../components/Icons";
+import { MachineAccess } from "../components/MachineAccess";
 import { Badge, Button, Card, Checkbox, Field, Select, SectionTitle, Spinner, Textarea } from "../components/ui";
 
 const EDITORS: GitEditor[] = ["system", "vscode", "cursor"];
@@ -169,27 +170,7 @@ export function SettingsView() {
         </p>
       </Card>
 
-      <Card className="p-5">
-        <div className="flex items-center justify-between">
-          <SectionTitle>Ferramentas do sistema</SectionTitle>
-          <Button size="sm" loading={toolsLoading} onClick={() => void loadTools()}>
-            <RefreshIcon className="size-3.5" /> Verificar novamente
-          </Button>
-        </div>
-        {tools === null ? (
-          <p className="text-sm text-zinc-500">Detectando…</p>
-        ) : (
-          <ul className="divide-y divide-zinc-100 text-sm dark:divide-zinc-800">
-            <ToolRow label="Cliente SSH (OpenSSH)" value={tools.ssh} />
-            <ToolRow label="ssh-add (SSH Agent)" value={tools.sshAdd} extra={tools.agentRunning === null ? null : tools.agentRunning ? "agente em execução" : "agente parado"} />
-            <ToolRow label="Git" value={tools.git} />
-          </ul>
-        )}
-        <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-400">
-          A aplicação depende do OpenSSH e do Git nativos do computador para preservar a compatibilidade com as suas
-          configurações, chaves e agentes existentes.
-        </p>
-      </Card>
+      <MachineAccess tools={tools} loading={toolsLoading} onRescan={() => void loadTools()} />
 
       <Card className="p-5">
         <SectionTitle>Dados locais</SectionTitle>
@@ -214,27 +195,5 @@ export function SettingsView() {
         </p>
       </Card>
     </div>
-  );
-}
-
-function ToolRow({ label, value, extra }: { label: string; value: string | null; extra?: string | null }) {
-  return (
-    <li className="flex items-center gap-3 py-2">
-      <span>{label}</span>
-      <span className="ml-auto flex items-center gap-2">
-        {extra ? <Badge tone={extra.includes("execução") ? "success" : "warning"}>{extra}</Badge> : null}
-        {value ? (
-          <>
-            <span className="font-mono text-xs text-zinc-500 dark:text-zinc-400">{value}</span>
-            <CheckIcon className="size-4 text-emerald-500" />
-          </>
-        ) : (
-          <>
-            <span className="text-xs text-red-500">não encontrado</span>
-            <XIcon className="size-4 text-red-500" />
-          </>
-        )}
-      </span>
-    </li>
   );
 }

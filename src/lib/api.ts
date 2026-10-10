@@ -25,6 +25,7 @@ import type {
   ImportSshHost,
   Project,
   RemoteEntry,
+  RemoteAccess,
   RemoteInfo,
   RepoStatus,
   ResetMode,
@@ -328,6 +329,10 @@ export const api = {
     }),
   gitDeleteTag: (projectId: number, name: string) => invoke<TagInfo[]>("git_delete_tag", { projectId, name }),
   gitRemotes: (projectId: number) => invoke<RemoteInfo[]>("git_remotes", { projectId }),
+  // Só lê refs no remoto, com prazo de 25s: prova que esta máquina consegue
+  // publicar. Um `ok:false` traz a frase do que falta, não um erro.
+  gitCheckRemote: (projectId: number, remote?: string | null) =>
+    invoke<RemoteAccess>("git_check_remote", { projectId, remote: remote ?? null }),
   gitAddRemote: (projectId: number, name: string, url: string) =>
     invoke<RemoteInfo[]>("git_add_remote", { projectId, name, url }),
   gitSetRemoteUrl: (projectId: number, name: string, url: string) =>

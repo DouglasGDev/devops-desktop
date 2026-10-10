@@ -6,6 +6,7 @@ import type {
   GitIdentity,
   GraphRow,
   PullStrategy,
+  RemoteAccess,
   RemoteInfo,
   RepoStatus,
   ResetMode,
@@ -63,6 +64,8 @@ export interface GitRepo {
     allowSecrets?: boolean;
   }) => Promise<GitActionOutcome | null>;
   unpublishTag: (name: string, remote?: string | null) => Promise<GitActionOutcome | null>;
+  /** `git ls-remote` com prazo: diz se esta máquina consegue publicar. */
+  checkRemote: (remote?: string | null) => Promise<RemoteAccess | null>;
   createTag: (name: string, target?: string | null, message?: string | null) => Promise<TagInfo[] | null>;
   deleteTag: (name: string) => Promise<TagInfo[] | null>;
   addRemote: (name: string, url: string) => Promise<RemoteInfo[] | null>;
@@ -392,6 +395,15 @@ export function useGitRepo(projectId: number | null, notify: GitNotify): GitRepo
     [reloadAfter],
   );
 
+  const checkRemote = useCallback(
+    (remote?: string | null) =>
+      guard("Testando o acesso ao remoto", (id) => api.gitCheckRemote(id, remote ?? null)).then((r) => {
+        if (r && alive.current) notify(r.ok ? "success" : "error", `${r.remote}: ${r.detail}`);
+        return r;
+      }),
+    [guard, notify],
+  );
+
   const createTag = useCallback(
     (name: string, target?: string | null, message?: string | null) =>
       guard(`Criando a tag ${name}`, (id) => api.gitCreateTag(id, name, target ?? null, message ?? null)).then(
@@ -474,6 +486,7 @@ export function useGitRepo(projectId: number | null, notify: GitNotify): GitRepo
     push,
     publish,
     unpublishTag,
+    checkRemote,
     createTag,
     deleteTag,
     addRemote,

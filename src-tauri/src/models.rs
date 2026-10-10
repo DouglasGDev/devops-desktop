@@ -166,8 +166,16 @@ pub struct SshDiscoveryReport {
 pub struct ToolVersions {
     pub ssh: Option<String>,
     pub ssh_add: Option<String>,
-    pub git: Option<String>,
     pub agent_running: Option<bool>,
+    /// Chaves carregadas no agente (`ssh-add -l`), ou `None` se não deu para perguntar.
+    pub agent_keys: Option<i64>,
+    pub git: Option<String>,
+    /// `user.name` + `user.email` resolvidos pelo git nesta máquina; sem os dois
+    /// um commit é recusado.
+    pub git_user: Option<String>,
+    pub gh: Option<String>,
+    /// Conta ativa do `gh auth status` — nunca o token.
+    pub gh_account: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

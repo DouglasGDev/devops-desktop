@@ -3,14 +3,16 @@ import { api } from "../lib/api";
 import { useGitRepo } from "../lib/useGitRepo";
 import { formatRelative, formatTimestamp } from "../lib/format";
 import { useApp } from "../store/AppContext";
-import type { CommitDetail, FileDiff, GitEditor, PullStrategy, ResetMode, SecretFinding, ViewId } from "../types";
+import type { CommitDetail, FileDiff, GitEditor, PullStrategy, RemoteAccess, ResetMode, SecretFinding, ViewId } from "../types";
 import {
   AlertTriangleIcon,
+  CheckIcon,
   CloudIcon,
   CommitIcon,
   DownloadIcon,
   ExternalLinkIcon,
   GitBranchIcon,
+  KeyIcon,
   PlusIcon,
   RefreshIcon,
   RocketIcon,
@@ -102,11 +104,17 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
   const [publishing, setPublishing] = useState(false);
   const [revertAsk, setRevertAsk] = useState<CommitDetail | null>(null);
   const [resetAsk, setResetAsk] = useState<{ commit: string; subject: string; mode: ResetMode } | null>(null);
+  const [acesso, setAcesso] = useState<RemoteAccess | null>(null);
 
   const git = useGitRepo(projectId, pushToast);
   const status = git.status;
   const branch = status?.branch ?? null;
   const editor = (settings.git_editor ?? "system") as GitEditor;
+
+  // O veredito de acesso pertence a um repositório: trocar o projeto o invalida.
+  useEffect(() => {
+    setAcesso(null);
+  }, [projectId]);
 
   useEffect(() => {
     if (gitProjects.length === 0) {
@@ -319,6 +327,18 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
             >
               <RocketIcon className="size-3.5" /> Publicar
             </Button>
+            <Button
+              size="sm"
+              disabled={git.busy !== null || git.remotes.length === 0}
+              onClick={() => void git.checkRemote().then(setAcesso)}
+              title={
+                git.remotes.length === 0
+                  ? "Cadastre um remoto em Remotos antes de testar o acesso"
+                  : "Perguntar ao remoto (git ls-remote) se esta máquina já está liberada para publicar"
+              }
+            >
+              <KeyIcon className="size-3.5" /> Testar acesso
+            </Button>
             <Button size="sm" onClick={() => setCloning(true)}>
               <PlusIcon className="size-3.5" /> Clonar
             </Button>
@@ -341,6 +361,27 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
         </div>
         {git.error ? (
           <p className="mt-2 rounded-lg bg-red-500/10 px-2.5 py-1.5 text-xs text-red-700 dark:text-red-300">{git.error}</p>
+        ) : null}
+        {acesso ? (
+          <p
+            className={`mt-2 flex items-start gap-2 rounded-lg px-2.5 py-1.5 text-xs ${
+              acesso.ok
+                ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                : "bg-amber-500/10 text-amber-700 dark:text-amber-300"
+            }`}
+          >
+            {acesso.ok ? (
+              <CheckIcon className="mt-0.5 size-3.5 shrink-0" />
+            ) : (
+              <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+            )}
+            <span className="flex-1">
+              {acesso.remote}: {acesso.detail}
+            </span>
+            <button type="button" className="shrink-0 underline decoration-dotted" onClick={() => setAcesso(null)}>
+              fechar
+            </button>
+          </p>
         ) : null}
       </Card>
 

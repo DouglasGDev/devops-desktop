@@ -10,6 +10,8 @@ use std::{
     io::Write,
     path::Path,
     process::{Command, Stdio},
+    sync::atomic::AtomicBool,
+    time::Duration,
 };
 
 use serde::Serialize;
@@ -129,6 +131,17 @@ pub struct RemoteInfo {
     pub name: String,
     pub fetch_url: Option<String>,
     pub push_url: Option<String>,
+}
+
+/// Veredito do teste de acesso a um remoto. A URL não entra aqui de propósito:
+/// ela pode carregar credencial, e o nome do remoto basta para a interface.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteAccess {
+    pub ok: bool,
+    pub remote: String,
+    /// Uma frase em português dizendo o que foi confirmado ou o que falta.
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1193,6 +1206,141 @@ pub fn default_remote(dir: &Path) -> Result<String, String> {
         .unwrap_or_else(|| nomes[0].to_string()))
 }
 
+const ACCESS_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// Prova real de que esta máquina consegue falar com o remoto: `git ls-remote`
+/// com prazo, stdin fechado e prompt de credencial desativado pelo `base_cmd`.
+/// Só lê refs: nada é escrito no remoto e a URL nunca aparece no resultado.
+pub fn remote_access(dir: &Path, remote: &str) -> Result<RemoteAccess, String> {
+    validate_id(remote)?;
+    let mut child = base_cmd(dir)
+        .arg("ls-remote")
+        .arg(remote)
+        .arg("HEAD")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => {
+                "o git não foi encontrado no PATH — instale o Git para usar esta seção".to_string()
+            }
+            _ => format!("não foi possível executar o git: {e}"),
+        })?;
+    let feito = crate::sshexec::collect(&mut child, ACCESS_TIMEOUT, &AtomicBool::new(false));
+    Ok(describe_access(remote, &feito))
+}
+
+/// Traduz o desfecho do `ls-remote` em uma frase de liberação. A distinção que
+/// importa para o usuário: remoto que responde mas recusa a credencial é "sem
+/// liberação", e um remoto recém-criado sem commits é sucesso, não falha.
+fn describe_access(remote: &str, feito: &crate::sshexec::ExecResult) -> RemoteAccess {
+    let negado = |motivo: String| RemoteAccess {
+        ok: false,
+        remote: remote.to_string(),
+        detail: motivo,
+    };
+    if feito.timed_out {
+        return negado(format!(
+            "{remote} não respondeu em {}s — confira a conexão e o endereço do remoto.",
+            ACCESS_TIMEOUT.as_secs()
+        ));
+    }
+    if feito.exit_code == Some(0) {
+        let head = feito
+            .stdout
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if head.is_empty() {
+            return RemoteAccess {
+                ok: true,
+                remote: remote.to_string(),
+                detail: "acesso liberado: o remoto está vazio — a primeira publicação cria a base.".into(),
+            };
+        }
+        return RemoteAccess {
+            ok: true,
+            remote: remote.to_string(),
+            detail: format!("acesso liberado: HEAD do {remote} em {}.", short_ref(&head)),
+        };
+    }
+    let texto = format!("{}\n{}", feito.stderr, feito.stdout).to_lowercase();
+    const SEM_CREDENCIAL: &str = "sem liberação: esta máquina não tem credencial válida para ";
+    for marca in [
+        "permission denied",
+        "authentication failed",
+        "terminal prompts disabled",
+        "could not read username",
+        "could not read password",
+        "support for password authentication was removed",
+        "invalid username or password",
+        "bad credentials",
+    ] {
+        if texto.contains(marca) {
+            return negado(format!(
+                "{SEM_CREDENCIAL}{remote}. Coloque a chave no ssh-agent, faça o login do GitHub \
+                 ou rode `gh auth login` (Configurações → Acesso da máquina)."
+            ));
+        }
+    }
+    if texto.contains("repository not found")
+        || texto.contains("does not appear to be a git repository")
+    {
+        return negado(format!(
+            "{remote} não aponta para um repositório acessível — confira o endereço do remoto e, \
+             se ele for privado, a liberação desta máquina."
+        ));
+    }
+    for marca in [
+        "could not resolve",
+        "name or service not known",
+        "connection refused",
+        "network is unreachable",
+        "connection reset",
+        "timed out",
+    ] {
+        if texto.contains(marca) {
+            return negado(format!(
+                "a máquina não chegou ao servidor do remoto {remote} ({marca}) — verifique a \
+                 conexão de rede."
+            ));
+        }
+    }
+    let detalhe = reduzido(&format!("{}\n{}", feito.stderr, feito.stdout));
+    negado(format!(
+        "o teste de acesso a {remote} falhou ({}). Detalhe do git: {detalhe}",
+        feito.summary()
+    ))
+}
+
+/// As três últimas linhas úteis do que o git escreveu, sem estourar a tela.
+fn reduzido(texto: &str) -> String {
+    let linhas: Vec<&str> = texto
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let tomados = if linhas.len() <= 3 {
+        linhas.join(" ")
+    } else {
+        format!("… {}", linhas[linhas.len() - 3..].join(" "))
+    };
+    if tomados.is_empty() {
+        return "(sem detalhe)".into();
+    }
+    let corte: String = tomados.chars().take(400).collect();
+    if corte.chars().count() == tomados.chars().count() {
+        corte
+    } else {
+        format!("{corte}…")
+    }
+}
+
+fn short_ref(id: &str) -> String {
+    id.chars().take(7).collect()
+}
+
 pub fn tags(dir: &Path) -> Result<Vec<TagInfo>, String> {
     const FMT: &str = "%(refname:short)%1f%(objectname:short)%1f%(if)%(*objectname)%(then)%(contents:subject)%(else)%(contents:subject)%(end)";
     let text = run(dir, &["for-each-ref", &format!("--format={FMT}"), "refs/tags"])?;
@@ -2193,6 +2341,121 @@ mod tests {
         assert!(err.contains("não é um repositório"), "mensagem: {err}");
         assert!(!is_repo(&dir));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ExecResult fabricado só para exercitar a tradução do veredito, sem
+    /// depender de rede.
+    fn feito(exit: Option<i32>, stdout: &str, stderr: &str, timed_out: bool) -> crate::sshexec::ExecResult {
+        crate::sshexec::ExecResult {
+            exit_code: exit,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            timed_out,
+            cancelled: false,
+        }
+    }
+
+    #[test]
+    fn veredito_de_acesso_libera_o_que_responde_e_recusa_o_que_nao_pode() {
+        // remoto alcançável com commits
+        let vivo = describe_access("origin", &feito(Some(0), "abc1234567890\tHEAD\n", "", false));
+        assert!(vivo.ok);
+        assert!(vivo.detail.contains("abc1234"), "mostra o HEAD curto: {}", vivo.detail);
+
+        // remoto recém-criado: vazio é sucesso, não falha
+        let vazio = describe_access("origin", &feito(Some(0), "", "", false));
+        assert!(vazio.ok, "remoto sem commits ainda é acesso liberado");
+        assert!(vazio.detail.contains("vazio"));
+
+        // chave não aceita
+        let negado = describe_access(
+            "origin",
+            &feito(Some(128), "", "git@github.com: Permission denied (publickey).", false),
+        );
+        assert!(!negado.ok);
+        assert!(negado.detail.contains("sem liberação"), "mensagem: {}", negado.detail);
+
+        // credencial pedida na hora (jamais acontece: o prompt está desativado)
+        let sem_credencial = describe_access(
+            "origin",
+            &feito(
+                Some(128),
+                "",
+                "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+                false,
+            ),
+        );
+        assert!(!sem_credencial.ok);
+        assert!(sem_credencial.detail.contains("sem liberação"));
+
+        // endereço errado
+        let endereco = describe_access(
+            "origin",
+            &feito(Some(128), "", "fatal: 'x' does not appear to be a git repository", false),
+        );
+        assert!(!endereco.ok);
+        assert!(endereco.detail.contains("endereço"), "mensagem: {}", endereco.detail);
+
+        // rede
+        let rede = describe_access(
+            "origin",
+            &feito(Some(128), "", "ssh: connect to host github.com port 22: Connection timed out", false),
+        );
+        assert!(!rede.ok);
+        assert!(rede.detail.contains("rede"), "mensagem: {}", rede.detail);
+
+        // prazo estourado: a tela nunca fica pendurada
+        let lento = describe_access("origin", &feito(None, "", "", true));
+        assert!(!lento.ok);
+        assert!(lento.detail.contains("não respondeu"));
+
+        // sem tradução conhecida, o texto do git volta como detalhe
+        let outro = describe_access("origin", &feito(Some(128), "", "error: RPC failed; HTTP 500", false));
+        assert!(!outro.ok);
+        assert!(outro.detail.contains("RPC failed"), "mensagem: {}", outro.detail);
+    }
+
+    #[test]
+    fn detalhe_grande_e_cortado_e_a_contagem_nao_estoura() {
+        assert_eq!(reduzido(""), "(sem detalhe)");
+        let uma = reduzido("linha única\n");
+        assert_eq!(uma, "linha única");
+        let tres = reduzido("a\nb\nc\nd\n");
+        assert!(tres.starts_with("… b c d"), "as três últimas: {tres}");
+        let longo = reduzido(&"x".repeat(900));
+        assert_eq!(longo.chars().count(), 401, "corte em 400 + reticências");
+    }
+
+    #[test]
+    fn acesso_real_do_clone_ate_o_remoto_bare() {
+        let origem = temp_repo("acesso-origem");
+        write(&origem, "a.txt", "a\n");
+        stage(&origem, &["a.txt".into()]).unwrap();
+        commit(&origem, "primeiro", false).unwrap();
+        let remoto = bare_origin(&origem);
+
+        let pais = temp_dir("acesso-clone");
+        let destino = pais.join("work");
+        clone(&pais, &url(&remoto), Some("work"), None).unwrap();
+
+        let ok = remote_access(&destino, "origin").expect("ls-remote roda");
+        assert!(ok.ok, "o clone consegue falar com o bare: {}", ok.detail);
+        assert_eq!(ok.remote, "origin");
+
+        // um caminho que não é repositório: veredito negativo, sem exceção
+        let morto = temp_repo("acesso-morto");
+        add_remote(&morto, "origin", &url(&morto.join("nao-existe.git"))).unwrap();
+        let ruim = remote_access(&morto, "origin").expect("o teste é feito mesmo com remoto ruim");
+        assert!(!ruim.ok, "remoto inexistente não é liberação");
+        assert!(ruim.detail.contains("origin"));
+
+        // nome inválido nem chega a executar o git
+        assert!(remote_access(&destino, "-x").is_err(), "remoto começando com '-' é recusado");
+        assert!(remote_access(&destino, "../outro").is_err(), "referência com .. é recusada");
+
+        let _ = std::fs::remove_dir_all(&pais);
+        let _ = std::fs::remove_dir_all(&origem);
+        let _ = std::fs::remove_dir_all(&remoto);
     }
 }
 

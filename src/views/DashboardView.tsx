@@ -88,11 +88,27 @@ function montarAlertas(servers: Server[], tools: ToolVersions | null, runs: Depl
       acao: { label: "Ver ferramentas", view: "settings" },
     });
   }
-  if (tools && tools.agentRunning === false) {
+  if (tools && tools.git && tools.gitUser == null) {
     alertas.push({
       nivel: "warning",
-      texto: "ssh-agent não está em execução: chaves com passphrase vão pedir senha a cada operação.",
-      acao: { label: "Servidores", view: "servers" },
+      texto:
+        "O git não consegue resolver a identidade (user.name/user.email) desta máquina — o próximo commit de qualquer projeto falha com “Please tell me who you are”.",
+      acao: { label: "Acesso da máquina", view: "settings" },
+    });
+  }
+  if (tools && tools.agentRunning !== true && tools.ghAccount == null) {
+    alertas.push({
+      nivel: "warning",
+      texto:
+        "Nenhuma liberação detectada nesta máquina: o ssh-agent não entrega chaves e o gh não tem sessão. " +
+        "Remoto privado não autentica até liberar o acesso (chave no agente, gh auth login ou o login do GitHub).",
+      acao: { label: "Acesso da máquina", view: "settings" },
+    });
+  } else if (tools && (tools.agentKeys ?? 0) === 0) {
+    alertas.push({
+      nivel: "warning",
+      texto: "O ssh-agent está rodando, mas sem nenhuma chave carregada — os remotos SSH vão recusar a conexão.",
+      acao: { label: "Acesso da máquina", view: "settings" },
     });
   }
 
