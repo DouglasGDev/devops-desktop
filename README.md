@@ -39,7 +39,7 @@ servidor ou no repositório. Quando uma etapa obrigatória falha, a interface mo
 | **Arquivos remotos (SFTP)** | Navegar, criar pasta, renomear, mudar permissão, ver/editar arquivo de texto, baixar e enviar (inclusive pastas), com progresso, velocidade e cancelamento. |
 | **Terminal** | Sessões PTY múltiplas ligadas a um servidor, com redimensionamento, histórico de comandos local e encerramento limpo ao fechar a janela. |
 | **Git** | Status, stage por arquivo ou por trecho (hunk), diff linha a linha, commit (com amend), gráfico de histórico de commits, branches locais/remotas, criar/renomear/excluir/alternar, merge, rebase, resolução de conflito com lado escolhido, fetch/pull/push, tags, remotes, clone, reverter commit e mover a cabeça do ramo, publicação pelo Git (comandos locais + push + tag), teste de acesso ao remoto e abrir o repositório no editor (VS Code/Cursor/system). Funciona sozinho: nenhuma dessas ações depende de haver um servidor cadastrado. |
-| **Acesso da máquina** | Detectar o que está instalado (`ssh`, `ssh-add`, `git`, `gh`), quantas chaves o `ssh-agent` tem, a identidade global do git e a conta ativa do `gh`; dizer se a máquina já está liberada para publicar e, quando não está, abrir o navegador no fluxo de autorização do GitHub e confirmar `liberado como @login`. |
+| **Acesso da máquina** | Detectar o que está instalado (`ssh`, `ssh-add`, `git`, `gh`), quantas chaves o `ssh-agent` tem, a identidade que o git resolve, os editores encontrados no disco e a conta ativa do `gh`; dizer se a máquina já está liberada para publicar e, quando não está, abrir o navegador no fluxo de autorização do GitHub e confirmar `liberado como @login`. |
 | **Deploy** | Cinco estratégias reais: **A** SFTP sincronizado, **B** Git no servidor, **C** build local + artefatos, **D** sequência de scripts, **E** Docker/Compose. Pipeline visual de até 15 etapas com log, código de saída, verificação de ferramentas no servidor antes de executar, cancelamento cooperativo, release anterior preservada e rollback assistido. |
 | **Segurança** | Bloqueio de commit/push quando o conteúdo que o Git publicaria contém segredo, varredura de projeto, regras extras configuráveis, remoção assistida do índice sem apagar o arquivo local. |
 | **Dashboard** | Estado dos servidores, deploys recentes e resultado, falhas do histórico, transferências em andamento, alertas de configuração e métricas reais de CPU, memória, disco, containers e serviços — lidas do servidor só quando você pedir. |
@@ -63,10 +63,12 @@ servidor ou no repositório. Quando uma etapa obrigatória falha, a interface mo
 
 O aplicativo **não** instala dependência nenhuma por conta própria. Ele **detecta** o que existe e **diz se esta
 máquina já está liberada para publicar**, em **Configurações → Acesso da máquina** (botão *Reverificar*): versões reais
-de `ssh`/`ssh-add`/`git`/`gh`, se o `ssh-agent` está rodando e quantas chaves tem, a identidade global do git e a conta
-ativa do `gh`. Quando falta liberação, o próprio painel abre o navegador no fluxo de dispositivo do GitHub, mostra o
-código de verificação e confirma a liberação como `@login` assim que você autoriza. A prova final por repositório está
-na aba Git, no botão **Testar acesso** (§9.5).
+de `ssh`/`ssh-add`/`git`/`gh`, se o `ssh-agent` está rodando e quantas chaves tem, a identidade que o git resolve nesta
+máquina, os editores instalados e a conta ativa do `gh`. Cada sondagem tem prazo de 5 s e as sete rodam em paralelo: uma
+ferramenta travada é nomeada na tela ("instalado, mas não respondeu") em vez de deixar o painel girando. Quando falta
+liberação, o próprio painel abre o navegador no fluxo de dispositivo do GitHub, mostra o código de verificação e confirma
+a liberação como `@login` assim que você autoriza. A prova final por repositório está na aba Git, no botão
+**Testar acesso** (§9.5).
 
 **Para compilar:**
 
@@ -144,8 +146,8 @@ O comando roda `npm run build`, compila em release e gera os dois pacotes config
 
 ```
 src-tauri/target/release/bundle/
-├── nsis/DevOps Desktop_0.1.0_x64-setup.exe      (4,41 MiB)
-└── msi/DevOps Desktop_0.1.0_x64_en-US.msi       (6,32 MiB)
+├── nsis/DevOps Desktop_0.1.0_x64-setup.exe      (4,43 MiB)
+└── msi/DevOps Desktop_0.1.0_x64_en-US.msi       (6,33 MiB)
 ```
 
 O instalador NSIS é o recomendado para uso individual; o MSI atende implantação por GPO/domínio. O `bundle` já traz
@@ -169,7 +171,7 @@ gerados e testados aqui.
 | --- | --- | --- |
 | Tema | Interface | Escuro ou claro. |
 | `confirm_destructive` | Configurações | Pede confirmação antes de operação destrutiva (padrão: ligado). |
-| `git_editor` | Configurações | `system`, `vscode` ou `cursor` para "abrir no editor". |
+| `git_editor` | Configurações | Editor usado por "abrir no editor": `system` ou um dos suportados **encontrados nesta máquina** (`vscode`, `cursor`). As opções do campo vêm da detecção, e uma escolha salva que deixou de existir aparece marcada como *não encontrado*. |
 | `secret_patterns` | Configurações → Proteção de segredos | Regras extras, uma por linha, somadas às regras internas de nome/extensão/conteúdo. |
 | `terminal_history_enabled` | Configurações | Liga/desliga o histórico local de comandos do terminal. |
 | `github_client_id` | GitHub → Client ID | Identificador **público** da OAuth App usada no fluxo de dispositivo. Não é segredo; um token de acesso é recusado nesse campo. |
@@ -354,12 +356,16 @@ Resumo do que é garantido pelo código, não só pela interface:
   host remoto. As únicas coisas que a interface envia para rodar **na própria máquina** são os comandos de build/teste
   do perfil e os da janela *Publicar*, sempre digitados por você, salvos no banco local e executados apenas depois do
   clique, dentro da pasta do projeto e com prazo por comando.
-- **Detecção de máquina com argv fixo.** O painel *Acesso da máquina* executa apenas `ssh -V`, `git --version`,
+- **Detecção de máquina com argv fixo e prazo.** O painel *Acesso da máquina* executa apenas `ssh -V`, `git --version`,
   `git config --get user.name`/`user.email`, `ssh-add -l`, `gh --version` e `gh auth status` — comandos
-  escritos no código, sem nenhuma entrada vinda da interface. A linha do token do `gh` é descartada durante a leitura e
-  nunca chega à janela, ao banco nem ao log; o que aparece é só o nome da conta. O *Testar acesso* roda
-  `git ls-remote <remoto> HEAD` dentro da pasta do projeto cadastrado, com o nome do remoto validado (`-`, `..`, espaço
-  e caractere de controle são recusados antes de executar) e a URL fora do resultado.
+  escritos no código, sem nenhuma entrada vinda da interface, cada um com prazo de 5 s e o filho encerrado ao estourar
+  (por isso uma ferramenta travada não congela a janela). A linha do token do `gh` é descartada durante a leitura e
+  nunca chega à janela, ao banco nem ao log; o que aparece é só o nome da conta. Os editores são procurados **só no
+  sistema de arquivos** (pastas do `PATH` e diretórios de instalação conhecidos) — a detecção não executa editor
+  nenhum. O *Testar acesso* roda `git ls-remote <remoto> HEAD` dentro da pasta do projeto cadastrado, com o nome do
+  remoto validado (`-`, `..`, espaço e caractere de controle são recusados antes de executar) e a URL fora do resultado.
+  "Abrir no editor" chama o executável encontrado com o caminho como **argumento separado**, nunca por concatenação de
+  string; sem executável encontrado, usa o atalho registrado do programa.
 - **CSP ativa** no `tauri.conf.json`: `default-src 'self'` e `connect-src` só permitem o IPC local (`ipc:`,
   `http://ipc.localhost`) e o servidor de desenvolvimento em `localhost:1420`. A interface não abre conexão de rede
   nenhuma; as chamadas ao GitHub saem do lado Rust, para o host fixo `api.github.com`, e a auditoria registra a operação
@@ -414,7 +420,7 @@ cd src-tauri
 cargo test --lib
 ```
 
-Cobertura atual do backend (149 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
+Cobertura atual do backend (163 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
 timeout e cancelamento, sessões PTY, ciclo completo de Git em repositório temporário (status, stage por hunk, commit,
 log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), publicação por Git em clone
 de um remoto `bare` real (`push_tag` leva a tag até o remoto, `delete_remote_tag` tira só a referência de lá, o ramo e a
@@ -424,7 +430,10 @@ tag local permanecem intactos, e referências começando com `-` ou com `..` sã
 ferramentas da máquina (conta ativa do `gh` extraída sem nunca devolver a linha do token, formato antigo `as <login>`,
 sessão inativa que **não** conta como liberação, a contagem de chaves do `ssh-add -l`, o agente parado reconhecido pelo
 texto que as duas builds do OpenSSH imprimem (códigos diferentes entre elas) e a exigência de nome **e** e-mail para a
-identidade do git constar), reversão de commit — o
+identidade do git constar, a sondagem real que devolve *sem resposta* em segundos contra um programa vivo por 40 s e
+*ausente* contra um nome que não existe, e a procura de editores — que só lista o que de fato está no disco, no `PATH`
+ou na pasta-base de instalação), a rota do editor (executável encontrado > atalho registrado > padrão do sistema),
+reversão de commit — o
 commit inverso criado por `revert`, a exigência de escolher o pai em um merge, e os três modos de `reset` verificados no
 sistema de arquivos (`soft` mantém o índice preparado, `mixed` solta o índice sem apagar o disco, `hard` substitui o
 conteúdo rastreado e deixa o arquivo não rastreado); `reset_soft_preserva_o_indice` confere, arquivo por arquivo, que o
@@ -450,6 +459,8 @@ O frontend é verificado por `npm run build`, que roda `tsc --noEmit` antes do b
 | Sintoma | Causa provável | O que fazer |
 | --- | --- | --- |
 | "OpenSSH (ssh) não foi encontrado no PATH" | Cliente SSH não instalado ou fora do `PATH`. | *Configurações → Acesso da máquina → Reverificar* refaz a detecção. Instale o recurso opcional do Windows "Cliente OpenSSH" e reabra o aplicativo. |
+| Uma linha do painel diz "instalado, mas não respondeu dentro do prazo de 5 s" | O programa existe, mas trava quando é chamado (keyring pedindo interação, antivírus segurando o processo). | Rode o mesmo comando num terminal para ver o que ele pede. A janela continua mostrando o que as outras sondas trouxeram — nenhuma ferramenta lenta congela o painel. |
+| O editor não aparece na lista de Configurações | O executável não está no `PATH` nem nas pastas de instalação conhecidas (`%LOCALAPPDATA%\Programs\…`, `%ProgramFiles%\…`). | Use o editor padrão do sistema ou chame o instalador dele uma vez pelo terminal (que registra o comando `code`/`cursor`) e clique *Reverificar*. |
 | *Testar acesso* diz "sem liberação" | O remoto não aceita a credencial desta máquina (chave fora do agente, token revogado, chave não adicionada ao repositório). | Coloque a chave no agente (`ssh-add`), ou use **Liberar pelo navegador** na mesma tela, ou rode `gh auth login` num terminal. Depois repita o teste — é o `git ls-remote` que afirma o resultado, não a interface. |
 | Acesso diz que o remoto "não aponta para um repositório acessível" | URL do remoto errada, ou repositório privado sem liberação. | Confira **Remotos** (o nome aparece no veredito, nunca a URL) e refaça o teste. |
 | Painel mostra "ssh-agent ... sem nenhuma chave carregada" | O agente está rodando, mas vazio. | `ssh-add ~/.ssh/id_ed25519`. Sem chave no agente, todo remoto SSH pede credencial que a aplicação não pode digitar por você. |

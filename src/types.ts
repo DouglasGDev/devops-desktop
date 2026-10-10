@@ -122,6 +122,13 @@ export interface AuditEntry {
   detail: string | null;
 }
 
+/** Editor encontrado neste computador pela detecção de ferramentas. */
+export interface EditorInstalado {
+  id: GitEditor;
+  nome: string;
+  caminho: string;
+}
+
 export interface ToolVersions {
   ssh: string | null;
   sshAdd: string | null;
@@ -129,11 +136,15 @@ export interface ToolVersions {
   agentRunning: boolean | null;
   /** Chaves carregadas no ssh-agent. */
   agentKeys: number | null;
-  /** user.name + user.email globais do git. */
+  /** `user.name` + `user.email` resolvidos pelo git, em qualquer escopo. */
   gitUser: string | null;
   gh: string | null;
   /** Conta ativa do `gh auth status`; nunca o token. */
   ghAccount: string | null;
+  /** Programas chamados que não responderam dentro do prazo: existe, só não respondeu. */
+  semResposta: string[];
+  /** Editores achados no disco. A lista da Configurações vem daqui. */
+  editors: EditorInstalado[];
 }
 
 export interface RoutineParam {

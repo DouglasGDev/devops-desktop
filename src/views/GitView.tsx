@@ -239,6 +239,7 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
           </Button>
           <Button onClick={() => onNavigate("projects")}>Ir para Projetos</Button>
         </EmptyState>
+        <CloneDialog open={cloning} onClose={() => setCloning(false)} />
       </Card>
     );
   }

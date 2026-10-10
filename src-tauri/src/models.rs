@@ -163,6 +163,15 @@ pub struct SshDiscoveryReport {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct EditorInstalado {
+    pub id: String,
+    pub nome: String,
+    /// Executável encontrado neste computador; é por ele que o app abre.
+    pub caminho: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolVersions {
     pub ssh: Option<String>,
     pub ssh_add: Option<String>,
@@ -176,6 +185,12 @@ pub struct ToolVersions {
     pub gh: Option<String>,
     /// Conta ativa do `gh auth status` — nunca o token.
     pub gh_account: Option<String>,
+    /// Programas que foram chamados e não terminaram dentro do prazo da sonda.
+    /// Não é a mesma coisa que "ausente": o executável existe, só não respondeu,
+    /// e a detecção não pode esperar por ele.
+    pub sem_resposta: Vec<String>,
+    /// Editores encontrados no disco. A lista da Configurações vem daqui.
+    pub editors: Vec<EditorInstalado>,
 }
 
 #[derive(Debug, Serialize)]

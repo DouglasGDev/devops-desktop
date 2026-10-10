@@ -8,6 +8,13 @@ import { Badge, Button, Card, Checkbox, Field, Select, SectionTitle, Spinner, Te
 
 const EDITORS: GitEditor[] = ["system", "vscode", "cursor"];
 
+/** Nomes dos editores que a aplicação sabe abrir, para não depender da detecção
+ * quando o nome precisa aparecer sem o programa estar instalado. */
+const NOMES_DOS_EDITORES: Partial<Record<GitEditor, string>> = {
+  vscode: "Visual Studio Code",
+  cursor: "Cursor",
+};
+
 export function SettingsView() {
   const { settings, setSetting, pushToast } = useApp();
   const [tools, setTools] = useState<ToolVersions | null>(null);
@@ -68,6 +75,9 @@ export function SettingsView() {
   const editor: GitEditor = EDITORS.includes(settings.git_editor as GitEditor)
     ? (settings.git_editor as GitEditor)
     : "system";
+  // A lista é o que existe neste computador, não um catálogo fixo.
+  const instalados = (tools?.editors ?? []).filter((e) => e.id !== "system");
+  const escolhaAusente = editor !== "system" && !instalados.some((e) => e.id === editor);
 
   return (
     <div className="max-w-3xl space-y-4">
@@ -125,19 +135,46 @@ export function SettingsView() {
       <Card className="p-5">
         <SectionTitle>Git</SectionTitle>
         <Field label="Editor usado para abrir repositórios e arquivos">
-          <Select
-            className="max-w-xs"
-            value={editor}
-            onChange={(e) => void setSetting("git_editor", e.target.value)}
-          >
-            <option value="system">Editor padrão do Windows</option>
-            <option value="vscode">Visual Studio Code</option>
-            <option value="cursor">Cursor</option>
+          <Select className="max-w-xs" value={editor} onChange={(e) => void setSetting("git_editor", e.target.value)}>
+            <option value="system">Editor padrão do sistema</option>
+            {instalados.map((e) => (
+              <option key={e.id} value={e.id}>
+                {e.nome}
+              </option>
+            ))}
+            {escolhaAusente ? (
+              <option value={editor}>{`${NOMES_DOS_EDITORES[editor] ?? editor} (não encontrado)`}</option>
+            ) : null}
           </Select>
         </Field>
+        {tools === null ? (
+          <p className="mt-2 flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+            <Spinner className="size-3.5" /> Procurando os editores instalados nesta máquina…
+          </p>
+        ) : instalados.length > 0 ? (
+          <ul className="mt-2 space-y-1 text-xs text-zinc-500 dark:text-zinc-400">
+            {instalados.map((e) => (
+              <li key={e.id} className="font-mono break-all">
+                {e.nome}: {e.caminho}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+            Nenhum editor dos que a aplicação sabe abrir foi encontrado neste computador. Use o editor padrão do sistema
+            ou instale um dos suportados — a lista é refeita a cada “Reverificar”.
+          </p>
+        )}
+        {escolhaAusente ? (
+          <p className="mt-2 text-xs text-amber-700 dark:text-amber-400">
+            A escolha salva não está instalada aqui. O botão “Abrir no editor” ainda tenta o atalho do programa e, se ele
+            não existir, diz que falhou em vez de abrir outra coisa.
+          </p>
+        ) : null}
         <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
-          O botão “Abrir no editor” das seções de Git usa esta escolha. Com o editor padrão do Windows o caminho é entregue
-          ao sistema; com VS Code ou Cursor o app abre direto no arquivo do repositório.
+          O botão “Abrir no editor” das seções de Git usa esta escolha. Com o editor padrão do sistema o caminho é
+          entregue ao próprio sistema; com um editor encontrado pela detecção o aplicativo abre direto no arquivo do
+          repositório, chamando o executável que está listado acima.
         </p>
       </Card>
 

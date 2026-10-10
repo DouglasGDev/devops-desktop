@@ -19,8 +19,8 @@ use crate::{
     files_transfer::{self, TransferInfo, TransferState},
     git, git_probe, github, infra,
     models::{
-        AuditEntry, ConnectionTestResult, DeployProfile, DeployProfileInput, DeployRun, ImportSshHost,
-        Project, RemoteEntry, Routine,
+        AuditEntry, ConnectionTestResult, DeployProfile, DeployProfileInput, DeployRun, EditorInstalado,
+        ImportSshHost, Project, RemoteEntry, Routine,
         RoutineInput, SearchProjectRow, SearchResults, SearchServerRow, Server, ServerInput,
         SshDiscoveryReport, TerminalHistoryEntry, TerminalSessionInfo, ToolVersions,
     },
@@ -868,6 +868,37 @@ fn editor_target(editor: &str, path: Option<&Path>) -> Option<String> {
         .replace('#', "%23")
         .replace('?', "%3F");
     Some(format!("{scheme}/{encoded}"))
+}
+
+/// Por onde um editor é aberto.
+#[derive(Debug, PartialEq)]
+enum RotaEditor {
+    /// Executável encontrado pela detecção, que recebe o caminho como argumento.
+    Executavel(String),
+    /// Link profundo registrado (`vscode://file/…`), quando não há executável.
+    Link(String),
+    /// Entrega ao sistema.
+    Sistema,
+}
+
+/// A escolha do usuário só vale se o editor estiver nesta máquina. Com o
+/// executável encontrado na detecção, o caminho vai como argumento separado — o
+/// mesmo canal que a tela usa para afirmar que o editor existe. Sem ele, fica o
+/// link profundo; sem nenhum dos dois, o padrão do sistema.
+fn rota_do_editor(editor: &str, alvo: Option<&Path>, instalados: &[EditorInstalado]) -> RotaEditor {
+    let Some(alvo) = alvo else {
+        return RotaEditor::Sistema;
+    };
+    if editor == "system" {
+        return RotaEditor::Sistema;
+    }
+    if let Some(encontrado) = instalados.iter().find(|e| e.id == editor) {
+        return RotaEditor::Executavel(encontrado.caminho.clone());
+    }
+    match editor_target(editor, Some(alvo)) {
+        Some(link) => RotaEditor::Link(link),
+        None => RotaEditor::Sistema,
+    }
 }
 
 fn validate_file_path(raw: &str) -> Result<(), String> {
@@ -1804,14 +1835,22 @@ async fn open_in_editor(
         None => Some(dir.clone()),
     };
 
-    let opened = if let Some(link) = editor_target(&editor, target.as_deref()) {
-        open_url(link.as_str(), None::<&str>).map_err(|e| format!("falha ao abrir o editor: {e}"))
-    } else {
-        match target {
-            Some(file) => open_path(file.as_path(), None::<&str>)
-                .map_err(|e| format!("falha ao abrir o editor: {e}")),
+    let instalados = tools::detectar_editores();
+    let opened = match rota_do_editor(&editor, target.as_deref(), &instalados) {
+        RotaEditor::Executavel(caminho) => match target.as_deref() {
+            Some(alvo) => match crate::proc::command(&caminho).arg(alvo).spawn() {
+                Ok(_) => Ok(()),
+                Err(e) => Err(format!("o editor {caminho} não abriu: {e}")),
+            },
             None => Err("nenhum arquivo para abrir".to_string()),
+        },
+        RotaEditor::Link(link) => {
+            open_url(link.as_str(), None::<&str>).map_err(|e| format!("falha ao abrir o editor: {e}"))
         }
+        RotaEditor::Sistema => match target.as_deref() {
+            Some(file) => open_path(file, None::<&str>).map_err(|e| format!("falha ao abrir o editor: {e}")),
+            None => Err("nenhum arquivo para abrir".to_string()),
+        },
     };
     let conn = lock_db(&state.db)?;
     audit::log(
@@ -2747,6 +2786,31 @@ mod git_helpers_tests {
         // editor do sistema: nenhum deep link, o chamador usa o manipulador padrão
         assert_eq!(editor_target("system", Some(dir)), None);
         assert_eq!(editor_target("vscode", None), None);
+    }
+
+    #[test]
+    fn rota_do_editor_prefere_o_executavel_encontrado() {
+        let dir = Path::new("C:/Users/dougl/app");
+        let instalados = vec![EditorInstalado {
+            id: "vscode".into(),
+            nome: "Visual Studio Code".into(),
+            caminho: "C:/Program Files/Microsoft VS Code/Code.exe".into(),
+        }];
+        // o editor que a detecção achou é o que abre o arquivo
+        assert_eq!(
+            rota_do_editor("vscode", Some(dir), &instalados),
+            RotaEditor::Executavel("C:/Program Files/Microsoft VS Code/Code.exe".into())
+        );
+        // escolha que não existe no disco ainda tem o link profundo como recurso
+        assert_eq!(
+            rota_do_editor("cursor", Some(dir), &instalados),
+            RotaEditor::Link("cursor://file/C:/Users/dougl/app".into())
+        );
+        // o padrão do sistema e um id desconhecido vão para o manipulador nativo
+        assert_eq!(rota_do_editor("system", Some(dir), &instalados), RotaEditor::Sistema);
+        assert_eq!(rota_do_editor("gedit", Some(dir), &instalados), RotaEditor::Sistema);
+        // sem arquivo alvo não há o que entregar ao editor
+        assert_eq!(rota_do_editor("vscode", None, &instalados), RotaEditor::Sistema);
     }
 
     #[test]

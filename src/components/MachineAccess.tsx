@@ -16,7 +16,9 @@ type Props = {
  * Checklist real da máquina: o que está instalado, o que já tem credencial e o
  * que falta para publicar. Cada linha vem de um comando executado agora
  * (`git --version`, `ssh -V`, `ssh-add -l`, `gh auth status`) ou do estado do
- * fluxo de dispositivo do GitHub — nada aqui é suposição.
+ * fluxo de dispositivo do GitHub — nada aqui é suposição. Toda sondagem tem
+ * prazo: uma ferramenta travada é nomeada na tela em vez de deixar o card
+ * girando para sempre.
  */
 export function MachineAccess({ tools, loading, onRescan }: Props) {
   const { pushToast } = useApp();
@@ -87,12 +89,18 @@ export function MachineAccess({ tools, loading, onRescan }: Props) {
   const contaApp = status?.loggedIn === true;
   const liberado = contaApp || contaGh || temChaveNoAgente;
 
+  // Uma sonda que não respondeu é diferente de ferramenta ausente: o executável
+  // existe, só não devolveu nada dentro do prazo.
+  const semResposta = (programa: string) => tools?.semResposta.includes(programa) === true;
+  const lendoGitHub = status === null && statusErro === null;
+  const incerto = lendoGitHub && !contaGh && !temChaveNoAgente;
+
   const faltas: string[] = [];
   if (tools !== null) {
-    if (!gitOk) faltas.push("Git");
-    if (!sshOk) faltas.push("OpenSSH");
+    if (!gitOk) faltas.push(semResposta("git") ? "o git responder à sondagem" : "Git");
+    if (!sshOk) faltas.push(semResposta("ssh") ? "o ssh responder à sondagem" : "OpenSSH");
     if (gitOk && tools.gitUser == null) faltas.push("identidade do git");
-    if (!liberado) faltas.push("uma liberação de acesso");
+    if (!liberado && !incerto) faltas.push("uma liberação de acesso");
     if (statusErro !== null) faltas.push("a leitura do estado do GitHub");
   }
 
@@ -111,9 +119,17 @@ export function MachineAccess({ tools, loading, onRescan }: Props) {
         </Button>
       </div>
 
-      {tools === null || (status === null && statusErro === null) ? (
+      {tools === null ? (
         <p className="mt-3 flex items-center gap-2 text-sm text-zinc-500">
-          <Spinner className="size-3.5" /> Verificando as ferramentas e as liberações desta máquina…
+          <Spinner className="size-3.5" /> Verificando as ferramentas desta máquina…
+        </p>
+      ) : incerto ? (
+        <p className="mt-3 flex items-center gap-2 rounded-lg bg-zinc-500/10 p-3 text-sm text-zinc-600 dark:text-zinc-300">
+          <Spinner className="size-3.5" />
+          <span>
+            O que está instalado já foi lido. Falta só o estado do GitHub para dizer se o acesso está liberado — as
+            linhas abaixo valem do mesmo jeito.
+          </span>
         </p>
       ) : faltas.length === 0 ? (
         <div className="mt-3 flex items-start gap-2 rounded-lg bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-400">
@@ -137,35 +153,51 @@ export function MachineAccess({ tools, loading, onRescan }: Props) {
         <Item
           nome="Git"
           valor={tools?.git ?? null}
-          falta="não encontrado no PATH — instale o Git for Windows (winget install Git.Git)"
+          falta={
+            semResposta("git")
+              ? "instalado, mas não respondeu dentro do prazo de 5s — algo está travando o git nesta máquina"
+              : "não encontrado no PATH — instale o Git for Windows (winget install Git.Git)"
+          }
         />
         <Item
           nome="OpenSSH (ssh / ssh-add)"
           valor={tools?.ssh ?? null}
-          falta="não encontrado — ative o recurso opcional OpenSSH do Windows"
+          falta={
+            semResposta("ssh")
+              ? "instalado, mas não respondeu dentro do prazo de 5s"
+              : "não encontrado — ative o recurso opcional OpenSSH do Windows"
+          }
         />
         <Item
           nome="ssh-agent"
           valor={temChaveNoAgente ? `${tools?.agentKeys ?? 0} chave(s) carregada(s)` : null}
           falta={
-            tools?.agentRunning === true
-              ? "o agente está rodando, mas nenhuma chave foi carregada — ex.: ssh-add ~/.ssh/id_ed25519"
-              : "agente parado — sem chave carregada, um remoto SSH não autentica (ex.: ssh-add ~/.ssh/id_ed25519)"
+            semResposta("ssh-add")
+              ? "o ssh-add não respondeu dentro do prazo de 5s — o agente pode estar travado"
+              : tools?.agentRunning === true
+                ? "o agente está rodando, mas nenhuma chave foi carregada — ex.: ssh-add ~/.ssh/id_ed25519"
+                : "agente parado — sem chave carregada, um remoto SSH não autentica (ex.: ssh-add ~/.ssh/id_ed25519)"
           }
-          oculto={tools?.sshAdd == null}
+          oculto={tools?.sshAdd == null && !semResposta("ssh-add")}
         />
         <Item
           nome="Identidade do git"
           valor={tools?.gitUser ?? null}
-          falta={'o git não consegue resolver a identidade para commit — git config --global user.name "Seu Nome"'}
+          falta={
+            semResposta("git")
+              ? "não deu para ler: o git não respondeu à sondagem dentro do prazo"
+              : 'o git não consegue resolver a identidade para commit — git config --global user.name "Seu Nome"'
+          }
         />
         <Item
           nome="gh CLI"
           valor={ghOk && contaGh ? `${tools?.gh ?? ""} · conta ${tools?.ghAccount ?? ""}` : null}
           falta={
-            ghOk
-              ? "instalado sem sessão — rode gh auth login num terminal (a interface interativa dele não pode ser dirigida daqui)"
-              : "não encontrado no PATH — se o gh já estiver instalado (por exemplo em C:/Program Files/GitHub CLI), adicione essa pasta ao PATH; é um caminho opcional, o app publica sem ele"
+            semResposta("gh")
+              ? "instalado, mas não respondeu dentro do prazo de 5s — um gh travado não bloqueia nada aqui, o app publica sem ele"
+              : ghOk
+                ? "instalado sem sessão — rode gh auth login num terminal (a interface interativa dele não pode ser dirigida daqui)"
+                : "não encontrado no PATH — se o gh já estiver instalado (por exemplo em C:/Program Files/GitHub CLI), adicione essa pasta ao PATH; é um caminho opcional, o app publica sem ele"
           }
           opcional
         />
@@ -182,7 +214,7 @@ export function MachineAccess({ tools, loading, onRescan }: Props) {
               ) : (
                 <>
                   <Badge tone={status === null ? "neutral" : "warning"}>
-                    {status === null ? "estado não lido" : "sem autorização"}
+                    {status === null ? (statusErro !== null ? "estado não lido" : "lendo…") : "sem autorização"}
                   </Badge>
                   <Button
                     size="sm"
