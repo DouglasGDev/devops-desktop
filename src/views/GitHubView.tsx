@@ -332,7 +332,7 @@ export function GitHubView() {
         <SectionTitle>Client ID da aplicação OAuth</SectionTitle>
         <Field
           label={status?.hasClientId ? "Novo Client ID (substitui o salvo)" : "Client ID"}
-          hint="Crie uma OAuth App em github.com/settings/developers, marque “Enable Device Flow” e cole o campo Client ID. O Client secret tem o mesmo formato (40 hex) e não serve aqui; token de acesso também é recusado."
+          hint="Crie uma OAuth App em github.com/settings/developers, marque “Enable Device Flow” e cole o campo Client ID (os atuais começam com “Ov”; os antigos são hexadecimais). Client secret e token de acesso não servem aqui."
         >
           <div className="flex flex-wrap items-center gap-2">
             <Input

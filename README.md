@@ -213,15 +213,16 @@ aplicação, e por isso pode ficar no banco local.
    (`https://github.com/DouglasGDev/devops-desktop`); **Authorization callback URL** precisa ser digitado, mas o fluxo de
    dispositivo **nunca redireciona para ele**, então repita o mesmo endereço da homepage. Sem domínio, sem hospedagem,
    sem porta aberta.
-2. Marque **Enable Device Flow**, salve e copie o **Client ID** (começa com `Iv`). O **Client secret** existe só para o
-   fluxo de website com backend e ele **não** vai para nenhum lugar desta aplicação.
-3. No aplicativo, em **GitHub → Client ID da aplicação OAuth**, cole o identificador e salve. O campo aceita apenas o
-   formato do Client ID (16 a 40 caracteres hexadecimais, ou `Iv1.` + hexadecimal); token de acesso é recusado de
-   propósito, para ninguém persistir um segredo nesse campo. **Cuidado com um ponto**: o *Client secret* de uma OAuth App
-   tem exatamente o mesmo formato (40 hex), então nada neste aplicativo percebe se você colar o secret no lugar do ID — e
-   o GitHub responde com 404, que é a frase "o GitHub não reconhece o que foi enviado". É o campo **Client ID**, no topo
-   da página do app. Se o secret foi salvo aqui por engano, gere um secret novo no GitHub: ele ficou no banco local em
-   texto puro até você substituir o valor.
+2. Marque **Enable Device Flow**, salve e copie o **Client ID** que aparece no topo da página do app. O **Client
+   secret** existe só para o fluxo de website com backend e ele **não** vai para nenhum lugar desta aplicação.
+3. No aplicativo, em **GitHub → Client ID da aplicação OAuth**, cole o identificador e salve. O campo aceita os três
+   formatos que o GitHub já emitiu para um Client ID — os atuais, base62 de ~20 caracteres com maiúsculas e minúsculas
+   (`Ov23li…`), os antigos hexadecimais (20 ou 40), e `Iv1.` + hexadecimal de um GitHub App. Token de acesso é recusado
+   de propósito (tem `_` ou `-`), para ninguém persistir um segredo nesse campo. **Cuidado com um ponto**: o *Client
+   secret* é hexadecimal e cabe na mesma regra, então nada neste aplicativo percebe se você colar o secret no lugar do
+   ID — e o GitHub responde com 404, que é a frase "o GitHub não reconhece o que foi enviado". É o campo **Client ID**,
+   no topo da página do app. Se o secret foi salvo aqui por engano, gere um secret novo no GitHub: ele ficou no banco
+   local em texto puro até você substituir o valor.
 4. Clique em **Conectar conta**: aparece um código de verificação; abra `github.com/login/device`, digite o código e
    autorize. O aplicativo repete a pergunta ao GitHub no intervalo que o próprio GitHub informou. O mesmo fluxo também
    está em **Configurações → Acesso da máquina** (*Liberar pelo navegador*), que é onde o painel confirma a liberação
@@ -491,7 +492,8 @@ O frontend é verificado por `npm run build`, que roda `tsc --noEmit` antes do b
 | "o git não respondeu em 30 s e foi interrompido" | Um `git` local travado: índice com `index.lock` de outro git, hook parado ou antivírus segurando a pasta. | A mensagem diz o prazo e o motivo provável. Feche os outros `git` da pasta e tente de novo; nenhuma operação de git fica girando sem fim. |
 | "o git não respondeu em 10 min e foi interrompido" | Operação de rede lenta de verdade (clone grande) ou o remoto pedindo credencial que o git não pode perguntar (`GIT_TERMINAL_PROMPT=0`). | Rode o mesmo comando num terminal uma vez para liberar a credencial (chave no agente ou gerenciador de credenciais) e repita. |
 | A lista de arquivos remotos mostrava nomes com `//` no meio | O `ls` do cliente sftp devolve o caminho inteiro quando o argumento é absoluto, e o aplicativo juntava a pasta com o caminho todo. | Corrigido: a entrada volta a ser só o nome do arquivo/pasta. Se ainda vir algo estranho, diga o que aparece na coluna **Nome**. |
-| Linha vermelha no card **Conta GitHub** | A frase vermelha é a resposta do próprio GitHub, não uma falha genérica. **"o GitHub não reconhece o que foi enviado"** = o valor salvo não é um Client ID existente — o caso mais comum é o **Client secret** colado no lugar (os dois têm 40 hexadecimais). As outras duas causas reais são código expirado e `api.github.com` bloqueado por proxy. | Compare com o campo **Client ID** no topo da página do app em `github.com/settings/developers` e cole de novo. Expirou → *Conectar conta* de novo (o código dura ~15 min). Proxy → "sem rede, proxy ou DNS", e a autorização em si fica guardada. Se você salvou o secret, gere um secret novo no GitHub. |
+| Linha vermelha no card **Conta GitHub** | A frase vermelha é a resposta do próprio GitHub, não uma falha genérica. **"o GitHub não reconhece o que foi enviado"** = o valor salvo não é um Client ID existente — o caso mais comum é o **Client secret** colado no lugar (ele é hexadecimal, o Client ID dos apps atuais não). As outras duas causas reais são código expirado e `api.github.com` bloqueado por proxy. | Compare com o campo **Client ID** no topo da página do app em `github.com/settings/developers` e cole de novo. Expirou → *Conectar conta* de novo (o código dura ~15 min). Proxy → "sem rede, proxy ou DNS", e a autorização em si fica guardada. Se você salvou o secret, gere um secret novo no GitHub. |
+| "Client ID inválido" para um identificador que existe | O campo aceita os formatos que o GitHub emite como Client ID (`Ov23li…` base62, hex antigo de 20/40, `Iv1.` + hex de GitHub App) e recusa o que tem `_` ou `-` — ou seja, token de acesso. | Confira se copiou o **Client ID** e não um token (`ghp_…`, `github_pat_…`). Um identificador com hífen (UUID) não é Client ID de app nenhum. |
 | *Testar acesso* diz "sem liberação" | O remoto não aceita a credencial desta máquina (chave fora do agente, token revogado, chave não adicionada ao repositório). | Coloque a chave no agente (`ssh-add`), ou use **Liberar pelo navegador** na mesma tela, ou rode `gh auth login` num terminal. Depois repita o teste — é o `git ls-remote` que afirma o resultado, não a interface. |
 | Acesso diz que o remoto "não aponta para um repositório acessível" | URL do remoto errada, ou repositório privado sem liberação. | Confira **Remotos** (o nome aparece no veredito, nunca a URL) e refaça o teste. |
 | Painel mostra "ssh-agent ... sem nenhuma chave carregada" | O agente está rodando, mas vazio. | `ssh-add ~/.ssh/id_ed25519`. Sem chave no agente, todo remoto SSH pede credencial que a aplicação não pode digitar por você. |

@@ -133,17 +133,19 @@ impl GitHubState {
 
 // ---------------------------------------------------------------- client id
 
-/// Client ID de OAuth App (40 hex hoje, 20 hex nos criados antes) ou GitHub App
-/// (`Iv1.` + hexadecimal). A regra é estreita de propósito: um token de acesso
-/// colado aqui seria gravado no banco em texto puro, e isso a §4 proíbe.
+/// Client ID de OAuth App ou de GitHub App. O GitHub já emitiu o identificador
+/// de três jeitos: 40 (ou 20) caracteres hexadecimais, os de hoje em base62 com
+/// maiúsculas e minúsculas (`Ov23li…`, ~20 caracteres) e `Iv1.` + hexadecimal
+/// para GitHub App. A regra é estreita de propósito: os tokens de acesso têm `_`
+/// ou `-` e por isso são recusados — colar um token aqui seria gravar um segredo
+/// no banco, o que a §4 proíbe.
 ///
-/// O Client **secret** de uma OAuth App tem exatamente o mesmo formato do Client
-/// ID, então formato nenhum distingue os dois — o que distingue é a página onde
-/// foram copiados.
+/// O Client **secret** continua hexadecimal e cabe na regra, então formato
+/// nenhum distingue os dois — o que distingue é o campo de onde foi copiado.
 fn valid_client_id(value: &str) -> bool {
     let trimmed = value.trim();
-    let core = trimmed.strip_prefix("Iv1.").unwrap_or(trimmed);
-    (16..=40).contains(&core.len()) && core.chars().all(|c| c.is_ascii_hexdigit())
+    let core = trimmed.split_once('.').map_or(trimmed, |(_, id)| id);
+    (16..=40).contains(&core.chars().count()) && core.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 pub fn store_client_id(conn: &Connection, value: &str) -> Result<(), String> {
@@ -155,8 +157,9 @@ pub fn store_client_id(conn: &Connection, value: &str) -> Result<(), String> {
     }
     if !valid_client_id(value) {
         return Err(
-            "Client ID inválido: use o identificador da OAuth App (40 caracteres hexadecimais, ou `Iv1.` seguido de \
-             hexadecimal num GitHub App). Não cole token de acesso nem Client secret aqui."
+            "Client ID inválido: cole o campo “Client ID” da página da OAuth App (os atuais têm ~20 letras e \
+             números; os antigos são hexadecimais; um GitHub App começa com `Iv1.`). Token de acesso e Client \
+             secret não servem neste campo."
                 .into(),
         );
     }
@@ -313,12 +316,11 @@ fn dica_do_client_id(erro: &str, id: &str) -> String {
     }
     let prefixo: String = id.chars().take(6).collect();
     format!(
-        "{erro} O valor guardado neste aplicativo começa com `{prefixo}` e tem {} caracteres. Um 404 nesse endpoint \
-         significa que aquele identificador não existe: ou é o **Client secret** copiado no lugar do Client ID (os dois \
-         têm 40 hexadecimais, o formato não distingue), ou é um app que foi apagado. Abra \
-         github.com/settings/developers → OAuth Apps → o seu app: o campo **Client ID** no topo da página é o que vai \
-         aqui. Se você salvou o secret sem querer, gere um secret novo nessa página — o antigo ficou no banco local em \
-         texto puro até você substituir o valor.",
+        "{erro} O valor guardado começa com `{prefixo}` e tem {} caracteres. Esse endpoint só responde 404 quando o \
+         identificador não existe: abra a página do app em github.com/settings/developers e confira se o que foi \
+         colado é o **Client ID** (em cima) e não o **Client secret** (40 hex). Se o identificador estiver certo, \
+         marque **Enable Device Flow** no app. Salvou o secret sem querer? Gere um secret novo nessa página — o \
+         anterior ficou no banco local em texto puro até você trocar o valor.",
         id.chars().count()
     )
 }
@@ -669,16 +671,22 @@ mod tests {
     fn client_id_aceita_formato_oficial_e_recusa_token() {
         assert!(valid_client_id("Iv1.b50e9c5a61f47c2b"));
         assert!(valid_client_id("1234567890abcdef1234"));
+        assert!(valid_client_id("1234567890abcdef1234567890abcdef12345678"));
+        // OAuth App criada hoje: base62 de 20 caracteres, misto de maiúsculas e
+        // minúsculas. Exigir hexadecimal aqui recusava o identificador verdadeiro.
+        assert!(valid_client_id("Ov23liZK4pQr7mTxbN1a"));
         // vazio, curto demais, com espaço ou com caractere de estrutura
         assert!(!valid_client_id(""));
         assert!(!valid_client_id("abc"));
         assert!(!valid_client_id("1234567890 abcdef1234"));
+        assert!(!valid_client_id("12345678-90ab-cdef-1234-567890abcdef"));
         assert!(!valid_client_id(&"a".repeat(65)));
         // Tokens de acesso jamais são aceitos neste campo: ele é gravado no
         // banco em texto puro, e um token ali colado viraria segredo persistido.
         for token in [
             "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234",
             "gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234",
+            "ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234",
             "github_pat_11ABCDEFG0abcdefghij_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
         ] {
             assert!(!valid_client_id(token), "aceitou um token: {token}");
