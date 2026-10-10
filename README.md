@@ -365,7 +365,8 @@ Resumo do que é garantido pelo código, não só pela interface:
   nenhum. O *Testar acesso* roda `git ls-remote <remoto> HEAD` dentro da pasta do projeto cadastrado, com o nome do
   remoto validado (`-`, `..`, espaço e caractere de controle são recusados antes de executar) e a URL fora do resultado.
   "Abrir no editor" chama o executável encontrado com o caminho como **argumento separado**, nunca por concatenação de
-  string; sem executável encontrado, usa o atalho registrado do programa.
+  string; se ele não abrir, ou se a detecção não achou nenhum (no Windows só conta `.exe` — os scripts sem extensão das
+  pastas `bin` do VS Code e do Cursor não são prova de instalação), usa o atalho registrado do programa.
 - **CSP ativa** no `tauri.conf.json`: `default-src 'self'` e `connect-src` só permitem o IPC local (`ipc:`,
   `http://ipc.localhost`) e o servidor de desenvolvimento em `localhost:1420`. A interface não abre conexão de rede
   nenhuma; as chamadas ao GitHub saem do lado Rust, para o host fixo `api.github.com`, e a auditoria registra a operação

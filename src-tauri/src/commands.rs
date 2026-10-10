@@ -1840,7 +1840,13 @@ async fn open_in_editor(
         RotaEditor::Executavel(caminho) => match target.as_deref() {
             Some(alvo) => match crate::proc::command(&caminho).arg(alvo).spawn() {
                 Ok(_) => Ok(()),
-                Err(e) => Err(format!("o editor {caminho} não abriu: {e}")),
+                // o executável encontrado não abriu (foi movido, o antivírus
+                // segurou): ainda resta o atalho que o instalador registrou
+                Err(e) => match editor_target(&editor, Some(alvo)) {
+                    Some(link) => open_url(link.as_str(), None::<&str>)
+                        .map_err(|_| format!("o editor {caminho} não abriu: {e}")),
+                    None => Err(format!("o editor {caminho} não abriu: {e}")),
+                },
             },
             None => Err("nenhum arquivo para abrir".to_string()),
         },

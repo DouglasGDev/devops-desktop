@@ -290,6 +290,12 @@ fn no_path(path_var: &str, nomes: &[&str]) -> Option<String> {
             continue;
         }
         for nome in nomes {
+            // No Windows só um `.exe` é executável: as pastas `bin` do VS Code e
+            // do Cursor põem no PATH um script de shell sem extensão, que a
+            // aplicação não consegue abrir e que não é prova de instalação.
+            if cfg!(windows) && !nome.ends_with(".exe") {
+                continue;
+            }
             let candidato = Path::new(pasta).join(nome);
             if candidato.is_file() {
                 return Some(candidato.display().to_string());
@@ -612,6 +618,13 @@ mod tests {
         // pasta vazia e nome que não está nela não produzem caminho
         assert_eq!(no_path(&format!("{separador}{separador}"), &["Code.exe"]), None);
         assert_eq!(no_path(&raiz.display().to_string(), &["cursor"]), None);
+        // o shim de shell sem extensão que o instalador põe no PATH não é
+        // executável no Windows, então não pode virar escolha na tela
+        #[cfg(windows)]
+        {
+            std::fs::write(raiz.join("code"), "#!/bin/sh\n").unwrap();
+            assert_eq!(no_path(&raiz.display().to_string(), &["code", "code.cmd"]), None);
+        }
         let _ = std::fs::remove_dir_all(&raiz);
     }
 
