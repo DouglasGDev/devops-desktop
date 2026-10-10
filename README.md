@@ -216,8 +216,12 @@ aplicação, e por isso pode ficar no banco local.
 2. Marque **Enable Device Flow**, salve e copie o **Client ID** (começa com `Iv`). O **Client secret** existe só para o
    fluxo de website com backend e ele **não** vai para nenhum lugar desta aplicação.
 3. No aplicativo, em **GitHub → Client ID da aplicação OAuth**, cole o identificador e salve. O campo aceita apenas o
-   formato do Client ID (20 caracteres hexadecimais ou `Iv1.` + hexadecimal); token de acesso é recusado de propósito,
-   para ninguém persistir um segredo nesse campo.
+   formato do Client ID (16 a 40 caracteres hexadecimais, ou `Iv1.` + hexadecimal); token de acesso é recusado de
+   propósito, para ninguém persistir um segredo nesse campo. **Cuidado com um ponto**: o *Client secret* de uma OAuth App
+   tem exatamente o mesmo formato (40 hex), então nada neste aplicativo percebe se você colar o secret no lugar do ID — e
+   o GitHub responde com 404, que é a frase "o GitHub não reconhece o que foi enviado". É o campo **Client ID**, no topo
+   da página do app. Se o secret foi salvo aqui por engano, gere um secret novo no GitHub: ele ficou no banco local em
+   texto puro até você substituir o valor.
 4. Clique em **Conectar conta**: aparece um código de verificação; abra `github.com/login/device`, digite o código e
    autorize. O aplicativo repete a pergunta ao GitHub no intervalo que o próprio GitHub informou. O mesmo fluxo também
    está em **Configurações → Acesso da máquina** (*Liberar pelo navegador*), que é onde o painel confirma a liberação
@@ -435,7 +439,7 @@ cd src-tauri
 cargo test --lib
 ```
 
-Cobertura atual do backend (169 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
+Cobertura atual do backend (171 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
 timeout e cancelamento, sessões PTY, ciclo completo de Git em repositório temporário (status, stage por hunk, commit,
 log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), publicação por Git em clone
 de um remoto `bare` real (`push_tag` leva a tag até o remoto, `delete_remote_tag` tira só a referência de lá, o ramo e a
@@ -464,7 +468,9 @@ regras extras, migrações e repositório SQLite, o helper que monta os processo
 preservado), parser das métricas reais e o script de leitura (que não escreve nada nem presume ferramenta), além da
 integração GitHub: validação de Client ID
 (recusando token colado no campo), validação de `dono/nome` e de nome de repositório, codificação de URL, parsing da
-resposta de repositórios, mensagem de erro por status HTTP e o fato de que nenhum token aparece na resposta para a
+resposta de repositórios, mensagem de erro por status HTTP e **o que o GitHub escreveu no corpo** (`message` na API REST,
+`error_description`/`error` nos endpoints OAuth — sem isso um 404 do fluxo de dispositivo virava frase genérica), o fato
+de que nenhum token aparece na resposta para a
 interface. Nenhum teste de rede é feito: as rotas que falam com o GitHub são exercitadas só na máquina, com dados de
 resposta fixos dentro do próprio teste.
 
@@ -485,7 +491,7 @@ O frontend é verificado por `npm run build`, que roda `tsc --noEmit` antes do b
 | "o git não respondeu em 30 s e foi interrompido" | Um `git` local travado: índice com `index.lock` de outro git, hook parado ou antivírus segurando a pasta. | A mensagem diz o prazo e o motivo provável. Feche os outros `git` da pasta e tente de novo; nenhuma operação de git fica girando sem fim. |
 | "o git não respondeu em 10 min e foi interrompido" | Operação de rede lenta de verdade (clone grande) ou o remoto pedindo credencial que o git não pode perguntar (`GIT_TERMINAL_PROMPT=0`). | Rode o mesmo comando num terminal uma vez para liberar a credencial (chave no agente ou gerenciador de credenciais) e repita. |
 | A lista de arquivos remotos mostrava nomes com `//` no meio | O `ls` do cliente sftp devolve o caminho inteiro quando o argumento é absoluto, e o aplicativo juntava a pasta com o caminho todo. | Corrigido: a entrada volta a ser só o nome do arquivo/pasta. Se ainda vir algo estranho, diga o que aparece na coluna **Nome**. |
-| Linha vermelha no card **Conta GitHub** | A frase vermelha é a resposta do próprio GitHub, não uma falha genérica. As três causas reais são: Device Flow desmarcado na OAuth App, código de verificação expirado, ou `api.github.com` bloqueado por proxy depois que o `github.com` deixou passar. | Leia a frase: ela diz qual das três. Expirou → *Conectar conta* de novo (o código dura ~15 min). Proxy → o card mostra "sem rede, proxy ou DNS" e a autorização em si fica guardada. |
+| Linha vermelha no card **Conta GitHub** | A frase vermelha é a resposta do próprio GitHub, não uma falha genérica. **"o GitHub não reconhece o que foi enviado"** = o valor salvo não é um Client ID existente — o caso mais comum é o **Client secret** colado no lugar (os dois têm 40 hexadecimais). As outras duas causas reais são código expirado e `api.github.com` bloqueado por proxy. | Compare com o campo **Client ID** no topo da página do app em `github.com/settings/developers` e cole de novo. Expirou → *Conectar conta* de novo (o código dura ~15 min). Proxy → "sem rede, proxy ou DNS", e a autorização em si fica guardada. Se você salvou o secret, gere um secret novo no GitHub. |
 | *Testar acesso* diz "sem liberação" | O remoto não aceita a credencial desta máquina (chave fora do agente, token revogado, chave não adicionada ao repositório). | Coloque a chave no agente (`ssh-add`), ou use **Liberar pelo navegador** na mesma tela, ou rode `gh auth login` num terminal. Depois repita o teste — é o `git ls-remote` que afirma o resultado, não a interface. |
 | Acesso diz que o remoto "não aponta para um repositório acessível" | URL do remoto errada, ou repositório privado sem liberação. | Confira **Remotos** (o nome aparece no veredito, nunca a URL) e refaça o teste. |
 | Painel mostra "ssh-agent ... sem nenhuma chave carregada" | O agente está rodando, mas vazio. | `ssh-add ~/.ssh/id_ed25519`. Sem chave no agente, todo remoto SSH pede credencial que a aplicação não pode digitar por você. |

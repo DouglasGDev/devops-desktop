@@ -133,9 +133,13 @@ impl GitHubState {
 
 // ---------------------------------------------------------------- client id
 
-/// Client ID de OAuth App (20 hex) ou GitHub App (`Iv1.` + hex). A regra é
-/// estreita de propósito: um token pessoal colado por engano aqui seria gravado
-/// no banco em texto puro, e isso a §4 proíbe.
+/// Client ID de OAuth App (40 hex hoje, 20 hex nos criados antes) ou GitHub App
+/// (`Iv1.` + hexadecimal). A regra é estreita de propósito: um token de acesso
+/// colado aqui seria gravado no banco em texto puro, e isso a §4 proíbe.
+///
+/// O Client **secret** de uma OAuth App tem exatamente o mesmo formato do Client
+/// ID, então formato nenhum distingue os dois — o que distingue é a página onde
+/// foram copiados.
 fn valid_client_id(value: &str) -> bool {
     let trimmed = value.trim();
     let core = trimmed.strip_prefix("Iv1.").unwrap_or(trimmed);
@@ -151,8 +155,8 @@ pub fn store_client_id(conn: &Connection, value: &str) -> Result<(), String> {
     }
     if !valid_client_id(value) {
         return Err(
-            "Client ID inválido: use o identificador da OAuth App (20 caracteres hexadecimais) ou do \
-             GitHub App (`Iv1.` seguido de hexadecimal). Não cole um token de acesso aqui."
+            "Client ID inválido: use o identificador da OAuth App (40 caracteres hexadecimais, ou `Iv1.` seguido de \
+             hexadecimal num GitHub App). Não cole token de acesso nem Client secret aqui."
                 .into(),
         );
     }
@@ -199,10 +203,22 @@ fn error_for(code: u16) -> &'static str {
     match code {
         401 => "a sessão do GitHub expirou ou o token foi revogado; reconecte a conta",
         403 => "o GitHub recusou a chamada (limite de requisições estourado ou escopo insuficiente)",
-        404 => "o GitHub não encontrou esse recurso para a conta conectada",
+        404 => "o GitHub não reconhece o que foi enviado",
         422 => "o GitHub validou os dados e recusou (nome de repositório inválido ou já em uso)",
         _ => "a API do GitHub respondeu com erro",
     }
+}
+
+/// O que o GitHub escreveu no corpo, nas três formas que ele usa: `message` na
+/// API REST, `error_description`/`error` nos endpoints OAuth. Sem isto, um 404
+/// do fluxo de dispositivo virava texto genérico e a pessoa não descobria que
+/// era o Client ID que não existe.
+fn detalhe_do_corpo(v: &Value) -> Option<String> {
+    ["error_description", "message", "error"]
+        .iter()
+        .find_map(|chave| str_field(v, chave))
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty())
 }
 
 /// Converte o erro do ureq em mensagem legível, sempre incluindo o que a API
@@ -210,11 +226,9 @@ fn error_for(code: u16) -> &'static str {
 fn describe(err: ureq::Error) -> String {
     match err {
         ureq::Error::Status(code, resp) => {
-            let api_message = read_json(resp)
-                .ok()
-                .and_then(|v| str_field(&v, "message").filter(|m| !m.trim().is_empty()));
-            match api_message {
-                Some(m) => format!("{} (GitHub: {m})", error_for(code)),
+            let detalhe = read_json(resp).ok().and_then(|v| detalhe_do_corpo(&v));
+            match detalhe {
+                Some(d) => format!("{} (GitHub: {d})", error_for(code)),
                 None => error_for(code).to_string(),
             }
         }
@@ -289,12 +303,30 @@ fn require_token(state: &GitHubState) -> Result<String, String> {
 
 // -------------------------------------------------------------- dispositivo
 
+/// Um 404 no endpoint de dispositivo tem uma causa só: o Client ID enviado não
+/// existe no GitHub. Confirmado contra o endpoint real — um ID que existe devolve
+/// 200 com o código, um ID inventado devolve 404 `{"error":"Not Found"}`. A frase
+/// diz o que está salvo sem expor o valor inteiro.
+fn dica_do_client_id(erro: &str, id: &str) -> String {
+    if !erro.contains("não reconhece") {
+        return erro.to_string();
+    }
+    let prefixo: String = id.chars().take(6).collect();
+    format!(
+        "{erro} O valor guardado neste aplicativo começa com `{prefixo}` e tem {} caracteres. Um 404 nesse endpoint \
+         significa que aquele identificador não existe: ou é o **Client secret** copiado no lugar do Client ID (os dois \
+         têm 40 hexadecimais, o formato não distingue), ou é um app que foi apagado. Abra \
+         github.com/settings/developers → OAuth Apps → o seu app: o campo **Client ID** no topo da página é o que vai \
+         aqui. Se você salvou o secret sem querer, gere um secret novo nessa página — o antigo ficou no banco local em \
+         texto puro até você substituir o valor.",
+        id.chars().count()
+    )
+}
+
 pub fn connect_start(conn: &Connection, state: &GitHubState) -> Result<DeviceFlow, String> {
     let id = client_id(conn)?;
-    let body = post_json(
-        DEVICE_ENDPOINT,
-        json!({ "client_id": id, "scope": OAUTH_SCOPE }),
-    )?;
+    let body = post_json(DEVICE_ENDPOINT, json!({ "client_id": id.clone(), "scope": OAUTH_SCOPE }))
+        .map_err(|e| dica_do_client_id(&e, &id))?;
     if let Some(err) = str_field(&body, "error") {
         return Err(format!("o GitHub recusou a iniciação do fluxo: {err}"));
     }
@@ -351,11 +383,12 @@ pub fn connect_poll(conn: &Connection, state: &GitHubState) -> Result<ConnectRes
     let body = post_form(
         TOKEN_ENDPOINT,
         &[
-            ("client_id", id),
+            ("client_id", id.clone()),
             ("device_code", pending.device_code.clone()),
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code".to_string()),
         ],
-    )?;
+    )
+    .map_err(|e| dica_do_client_id(&e, &id))?;
 
     if let Some(token) = str_field(&body, "access_token") {
         // O token foi concedido pelo github.com e passa a valer antes mesmo de
@@ -791,8 +824,45 @@ mod tests {
     fn erro_http_vira_mensagem_em_portugues() {
         assert!(error_for(401).contains("reconecte"));
         assert!(error_for(403).contains("escopo"));
+        assert!(error_for(404).contains("não reconhece"));
         assert!(error_for(422).contains("recusou"));
         assert!(error_for(500).contains("API do GitHub"));
+    }
+
+    #[test]
+    fn o_que_o_github_escreveu_no_corpo_nao_se_perde() {
+        // As três formas que o GitHub usa: `message` na API REST,
+        // `error_description`/`error` nos endpoints OAuth.
+        let rest: Value = serde_json::from_str(r#"{"message":"Not Found"}"#).unwrap();
+        assert_eq!(detalhe_do_corpo(&rest).as_deref(), Some("Not Found"));
+        let oauth: Value = serde_json::from_str(
+            r#"{"error":"invalid_client","error_description":"Client ID not found"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            detalhe_do_corpo(&oauth).as_deref(),
+            Some("Client ID not found"),
+            "a descrição é mais específica que o código"
+        );
+        let so_codigo: Value = serde_json::from_str(r#"{"error":"Not Found"}"#).unwrap();
+        assert_eq!(detalhe_do_corpo(&so_codigo).as_deref(), Some("Not Found"));
+        let vazio: Value = serde_json::from_str(r#"{"error":"   "}"#).unwrap();
+        assert_eq!(detalhe_do_corpo(&vazio), None, "branco não é diagnóstico");
+    }
+
+    #[test]
+    fn client_id_inexistente_diz_o_que_esta_salvo() {
+        let id = "Iv1.abcd1234ef567890";
+        let dica = dica_do_client_id(error_for(404), id);
+        assert!(dica.contains("Iv1.ab"), "prefixo: {dica}");
+        assert!(dica.contains("20 caracteres"), "tamanho: {dica}");
+        assert!(dica.contains("github.com/settings/developers"));
+        assert!(dica.contains("Client secret"), "nomeia a confusão: {dica}");
+        // nenhum outro erro é reescrito
+        assert_eq!(
+            dica_do_client_id(error_for(401), id),
+            error_for(401).to_string()
+        );
     }
 
     #[test]
