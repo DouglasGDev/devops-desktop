@@ -8,7 +8,7 @@
 
 use std::{
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::AtomicBool,
     time::Duration,
@@ -47,6 +47,10 @@ pub struct StatusFile {
 pub struct RepoStatus {
     pub branch: Option<String>,
     pub detached_at: Option<String>,
+    /// Operação que o Git tem parada no meio, lida dos arquivos de controle do
+    /// `.git`. `None` é o estado comum. Não é deduzido da cabeça detached: uma
+    /// cabeça avulsa pode ser checkout de um commit, não uma operação.
+    pub operation: Option<String>,
     pub upstream: Option<String>,
     pub ahead: i64,
     pub behind: i64,
@@ -163,6 +167,19 @@ pub struct FileContent {
     pub text: Option<String>,
     pub note: Option<String>,
     pub truncated: bool,
+}
+
+/// Um trabalho guardado pelo Git. O endereço vem da lista do próprio git
+/// (`stash@{0}` é o mais recente) e a interface usa o índice numérico.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StashEntry {
+    pub index: usize,
+    pub selector: String,
+    pub sha: String,
+    /// data do commit do guardado, no formato ISO curto do git
+    pub date: String,
+    pub subject: String,
 }
 
 // ---------- execução ----------
@@ -312,6 +329,11 @@ fn describe_failure(args: &[&str], stderr: &[u8], stdout: &[u8]) -> String {
     }
     if lower.contains("would be overwritten by merge") || lower.contains("local changes would be overwritten") {
         return "alterações locais seriam perdidas — confirme e trate-as antes (a aplicação não descarta mudanças por conta própria)".into();
+    }
+    if lower.contains("is now empty") {
+        return format!(
+            "não sobrou mudança nenhuma para aplicar: este commit já está aplicado aqui. Cancele a operação ou pule este passo. Detalhe: {raw}"
+        );
     }
     if lower.contains("conflict") || lower.contains("merge conflict") {
         return format!("há conflitos para resolver antes de continuar. Detalhe: {raw}");
@@ -487,6 +509,48 @@ pub fn ensure_ignored(dir: &Path, path: &str) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Onde o Git guarda os arquivos de controle desta pasta. Num repositório comum
+/// é o `.git`; numa pasta de worktree o `.git` é um arquivo apontando para a
+/// pasta real — e é essa que tem as marcas de operação.
+fn git_dir(dir: &Path) -> Option<PathBuf> {
+    let ponto = dir.join(".git");
+    if ponto.is_dir() {
+        return Some(ponto);
+    }
+    let texto = std::fs::read_to_string(&ponto).ok()?;
+    let bruto = texto.trim().strip_prefix("gitdir:")?.trim();
+    if bruto.is_empty() {
+        return None;
+    }
+    let apontado = PathBuf::from(bruto);
+    Some(if apontado.is_absolute() {
+        apontado
+    } else {
+        dir.join(apontado)
+    })
+}
+
+/// A operação que o Git deixou parada no meio, lida dos arquivos de controle do
+/// `.git`. Cada uma dessas marcas existe só enquanto a operação espera resolução,
+/// então isto não é suposição: é o que o git gravou.
+pub fn operation_in_progress(dir: &Path) -> Option<String> {
+    let git = git_dir(dir)?;
+    let ha = |nome: &str| git.join(nome).exists();
+    if git.join("rebase-merge").is_dir() || git.join("rebase-apply").is_dir() {
+        return Some("rebase".into());
+    }
+    if ha("MERGE_HEAD") {
+        return Some("merge".into());
+    }
+    if ha("CHERRY_PICK_HEAD") {
+        return Some("cherry-pick".into());
+    }
+    if ha("REVERT_HEAD") {
+        return Some("revert".into());
+    }
+    None
+}
+
 pub fn status(dir: &Path) -> Result<RepoStatus, String> {
     let raw = run(dir, &["status", "--porcelain=v2", "-z"])?;
     let files = parse_status(&raw);
@@ -513,6 +577,7 @@ pub fn status(dir: &Path) -> Result<RepoStatus, String> {
     Ok(RepoStatus {
         branch,
         detached_at,
+        operation: operation_in_progress(dir),
         upstream,
         ahead,
         behind,
@@ -1143,16 +1208,46 @@ pub fn rebase(dir: &Path, upstream: &str) -> Result<String, String> {
     run(dir, &["rebase", upstream])
 }
 
-pub fn abort_merge(dir: &Path) -> Result<(), String> {
-    run(dir, &["merge", "--abort"]).map(|_| ())
+/// As operações que podem ficar paradas esperando resolução de conflito. O nome
+/// é o mesmo que `operation_in_progress` devolve, então a interface cancela e
+/// continua exatamente o que o Git tem em andamento — nunca um palpite.
+const OPERACOES: &[&str] = &["merge", "rebase", "cherry-pick", "revert"];
+
+fn operacao(kind: &str) -> Result<&'static str, String> {
+    OPERACOES
+        .iter()
+        .find(|o| *o == &kind)
+        .copied()
+        .ok_or_else(|| format!("operação desconhecida: {kind}"))
 }
 
-pub fn abort_rebase(dir: &Path) -> Result<(), String> {
-    run(dir, &["rebase", "--abort"]).map(|_| ())
+/// Cancela a operação e devolve a pasta ao estado de antes dela.
+pub fn abort_operation(dir: &Path, kind: &str) -> Result<(), String> {
+    let sub = operacao(kind)?;
+    run(dir, &[sub, "--abort"]).map(|_| ())
 }
 
-pub fn continue_rebase(dir: &Path) -> Result<String, String> {
-    run(dir, &["rebase", "--continue"])
+/// Retoma a operação depois de resolver os conflitos. O git quer escrever a
+/// mensagem do commit e chamaria um editor que não existe aqui; `core.editor=true`
+/// aceita a mensagem que o próprio git já preparou no `.git`.
+pub fn continue_operation(dir: &Path, kind: &str) -> Result<String, String> {
+    let sub = operacao(kind)?;
+    if sub == "merge" {
+        // merge não tem "--continue": o que fecha a operação é o commit normal.
+        return Err("para concluir o merge, marque os conflitos como resolvidos e faça o commit".into());
+    }
+    run(dir, &["-c", "core.editor=true", sub, "--continue"])
+}
+
+/// Abandona o passo parado (commit já aplicado em cherry-pick/rebase, por
+/// exemplo) sem gravar nada dele. Usado quando o git avisa que não sobrou
+/// mudança nenhuma para aplicar.
+pub fn skip_operation(dir: &Path, kind: &str) -> Result<String, String> {
+    let sub = operacao(kind)?;
+    if sub == "merge" {
+        return Err("o merge não tem etapa para pular — cancele ou faça o commit".into());
+    }
+    run(dir, &[sub, "--skip"])
 }
 
 /// Resolve um conflito com o lado escolhido e marca como resolvido.
@@ -1175,22 +1270,45 @@ fn parent_count(dir: &Path, id: &str) -> usize {
         .unwrap_or(1)
 }
 
+/// Commit de merge tem mais de um pai e o git exige escolher qual deles continua.
+/// A checagem acontece antes de chamar o git para a resposta vir em português.
+fn pai_para_continuar(dir: &Path, id: &str, mainline: Option<i64>) -> Result<Option<i64>, String> {
+    let parents = parent_count(dir, id);
+    if let Some(main) = mainline {
+        if main < 1 || main as usize > parents {
+            return Err(format!("pai inválido: este commit tem {parents} pais"));
+        }
+        return Ok(Some(main));
+    }
+    if parents > 1 {
+        return Err(format!(
+            "este commit é um merge com {parents} pais; escolha qual deles continua (o pai 1 é o ramo que recebeu o merge)"
+        ));
+    }
+    Ok(None)
+}
+
 /// Desfaz um commit gravando um commit novo com as mudanças invertidas. O
 /// histórico existente não é reescrito, então isto funciona mesmo em ramo que
 /// já foi publicado — o `push` posterior propaga a reversão.
 pub fn revert(dir: &Path, id: &str, mainline: Option<i64>) -> Result<String, String> {
     validate_id(id)?;
-    let parents = parent_count(dir, id);
-    if parents > 1 && mainline.is_none() {
-        return Err(format!(
-            "este commit é um merge com {parents} pais; escolha qual deles continua (o pai 1 é o ramo que recebeu o merge)"
-        ));
-    }
     let mut args: Vec<String> = vec!["revert".into(), "--no-edit".into()];
-    if let Some(main) = mainline {
-        if main < 1 || main as usize > parents {
-            return Err(format!("pai inválido: este commit tem {parents} pais"));
-        }
+    if let Some(main) = pai_para_continuar(dir, id, mainline)? {
+        args.push("-m".into());
+        args.push(main.to_string());
+    }
+    args.push(id.to_string());
+    run(dir, &args)
+}
+
+/// Reproduz aqui um commit que existe em outro ramo, gravando um commit novo. O
+/// ramo de origem não é tocado e nada vai ao remoto por aqui. Como no revert, um
+/// commit de merge só passa com o pai escolhido.
+pub fn cherry_pick(dir: &Path, id: &str, mainline: Option<i64>) -> Result<String, String> {
+    validate_id(id)?;
+    let mut args: Vec<String> = vec!["cherry-pick".into()];
+    if let Some(main) = pai_para_continuar(dir, id, mainline)? {
         args.push("-m".into());
         args.push(main.to_string());
     }
@@ -1223,6 +1341,115 @@ fn short_head(dir: &Path) -> String {
     run(dir, &["rev-parse", "--short", "HEAD"])
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "desconhecida".to_string())
+}
+
+// ---------- trabalho guardado ----------
+
+const STASH_FORMAT: &str = "%gd\u{1f}%h\u{1f}%ci\u{1f}%s";
+
+/// O que está guardado, na ordem do git (`stash@{0}` é o mais recente). Sem
+/// guardados a lista volta vazia.
+pub fn stash_list(dir: &Path) -> Result<Vec<StashEntry>, String> {
+    let raw = run(dir, &["stash", "list", &format!("--format={STASH_FORMAT}")])?;
+    Ok(raw
+        .lines()
+        .filter_map(|linha| {
+            let campo: Vec<&str> = linha.split(SEP).collect();
+            if campo.len() < 4 {
+                return None;
+            }
+            let indice = campo[0].strip_prefix("stash@{")?.strip_suffix('}')?.parse().ok()?;
+            Some(StashEntry {
+                index: indice,
+                selector: campo[0].to_string(),
+                sha: campo[1].to_string(),
+                date: campo[2].to_string(),
+                subject: campo[3].to_string(),
+            })
+        })
+        .collect())
+}
+
+/// O endereço do guardado escolhido, conferido na lista atual. O git responderia
+/// com um "fatal" em inglês sobre um índice que a tela mostrava existir.
+fn stash_endereco(dir: &Path, index: usize) -> Result<String, String> {
+    let lista = stash_list(dir)?;
+    if lista.is_empty() {
+        return Err("não há trabalho guardado neste repositório".into());
+    }
+    lista
+        .iter()
+        .find(|e| e.index == index)
+        .map(|e| e.selector.clone())
+        .ok_or_else(|| {
+            format!(
+                "o guardado {index} não existe mais: a lista atual tem {} entrada(s). Atualize a lista.",
+                lista.len()
+            )
+        })
+}
+
+/// Guarda o trabalho em andamento e deixa a pasta limpa, para se poder trocar de
+/// ramo sem perder nada. `include_untracked` leva também os arquivos que o git
+/// ainda não conhece — sem essa opção eles ficam na pasta.
+pub fn stash_push(dir: &Path, message: Option<&str>, include_untracked: bool) -> Result<String, String> {
+    let atual = status(dir)?;
+    if atual.conflict_count > 0 {
+        return Err(format!(
+            "há {} arquivo(s) em conflito — resolva ou cancele a operação antes de guardar",
+            atual.conflict_count
+        ));
+    }
+    let mut args: Vec<String> = vec!["stash".into(), "push".into()];
+    if include_untracked {
+        args.push("--include-untracked".into());
+    }
+    let recado = message.map(str::trim).filter(|m| !m.is_empty());
+    if let Some(texto) = recado {
+        args.push("-m".into());
+        args.push(texto.to_string());
+    }
+    let saida = run(dir, &args)?;
+    // Sem alteração o git sai com código 0 e avisa no stdout: nada foi guardado,
+    // e é isso que a pessoa precisa ler.
+    if saida.to_lowercase().contains("no local changes") {
+        return Ok("nada para guardar: não há alteração em trabalho nem no índice".into());
+    }
+    Ok(saida.trim().to_string())
+}
+
+/// Traz o guardado de volta para a pasta. `pop` também o retira da lista, mas
+/// quando há conflito o git **mantém** a entrada — dito aqui em vez de escondido.
+pub fn stash_apply(dir: &Path, index: usize, pop: bool) -> Result<String, String> {
+    let endereco = stash_endereco(dir, index)?;
+    let acao = if pop { "pop" } else { "apply" };
+    let feito = run(dir, &["stash", acao, &endereco]);
+    let conflitos = status(dir).map(|s| s.conflict_count).unwrap_or(0);
+    if let Err(e) = feito {
+        // Conflito na aplicação é um resultado, não uma pane: o git sai com
+        // código diferente de zero para avisar, e a pasta fica em conflito.
+        if conflitos == 0 {
+            return Err(e);
+        }
+    }
+    if conflitos > 0 {
+        return Ok(
+            "aplicado com conflito na pasta: o guardado ficou na lista. Resolva os conflitos para ficar com as duas mudanças.".into(),
+        );
+    }
+    Ok(if pop {
+        "trabalho aplicado e o guardado saiu da lista".into()
+    } else {
+        "trabalho aplicado — o guardado continua na lista".into()
+    })
+}
+
+/// Exclui um guardado. O conteúdo dele não entra na pasta antes, então isto perde
+/// o trabalho: a interface pede confirmação e a auditoria registra.
+pub fn stash_drop(dir: &Path, index: usize) -> Result<String, String> {
+    let endereco = stash_endereco(dir, index)?;
+    let saida = run(dir, &["stash", "drop", &endereco])?;
+    Ok(saida.trim().to_string())
 }
 
 // ---------- sincronização ----------
@@ -2146,6 +2373,214 @@ mod tests {
         assert!(!dir.join("c.txt").exists(), "revert do merge tira o que o paralelo trouxe");
         assert!(dir.join("d.txt").exists(), "o trabalho do ramo principal permanece");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Guardar trabalho é a única forma de trocar de ramo sem perder o que está
+    /// na mão. O teste confere no git real: o que sai da pasta, o que a lista
+    /// mostra, o que volta, e que sem nada alterado nada é guardado.
+    #[test]
+    fn guardar_e_trazer_o_trabalho_em_andamento() {
+        let dir = temp_repo("guardar");
+        write(&dir, "a.txt", "um\n");
+        stage(&dir, &["a.txt".into()]).unwrap();
+        commit(&dir, "base", false).unwrap();
+
+        assert!(stash_list(&dir).unwrap().is_empty(), "repositório novo não tem guardado");
+
+        write(&dir, "a.txt", "um\ndois\n");
+        write(&dir, "novo.txt", "ainda não entra no git\n");
+        stash_push(&dir, Some("tentativa do a"), false).unwrap();
+
+        // o modificado voltou ao commit; o não rastreado ficou na pasta, porque
+        // sem `include_untracked` é isso que o git faz.
+        assert!(read_status(&dir).unwrap().files.iter().all(|f| f.path != "a.txt"));
+        assert!(dir.join("novo.txt").exists());
+
+        let lista = stash_list(&dir).unwrap();
+        assert_eq!(lista.len(), 1, "{lista:?}");
+        assert_eq!(lista[0].index, 0);
+        assert_eq!(lista[0].selector, "stash@{0}");
+        assert!(lista[0].subject.contains("tentativa do a"), "{:?}", lista[0].subject);
+        assert!(!lista[0].sha.is_empty());
+
+        // nada alterado: o git avisa no stdout com código 0, e nada entra na lista.
+        let aviso = stash_push(&dir, None, false).unwrap();
+        assert!(aviso.contains("nada para guardar"), "{aviso}");
+        assert_eq!(stash_list(&dir).unwrap().len(), 1, "nada novo foi guardado");
+
+        // apply copia para a pasta e mantém a entrada.
+        let aplicado = stash_apply(&dir, 0, false).unwrap();
+        assert!(aplicado.contains("continua na lista"), "{aplicado}");
+        assert!(blob_at(&dir, "stash@{0}", "a.txt").is_some(), "o guardado tem o arquivo");
+
+        // para o `pop` valer, a pasta precisa estar limpa de novo.
+        reset(&dir, "hard", "HEAD").unwrap();
+        let trazido = stash_apply(&dir, 0, true).unwrap();
+        assert!(trazido.contains("saiu da lista"), "{trazido}");
+        assert!(stash_list(&dir).unwrap().is_empty());
+
+        stash_push(&dir, Some("segunda"), true).unwrap();
+        assert!(!dir.join("novo.txt").exists(), "com -u o não rastreado também sai da pasta");
+        // índice que a lista não tem é recusado antes de falar com o git.
+        let erro = stash_apply(&dir, 4, false).unwrap_err();
+        assert!(erro.contains("não existe mais"), "{erro}");
+        stash_drop(&dir, 0).unwrap();
+        assert!(stash_list(&dir).unwrap().is_empty());
+        let erro = stash_drop(&dir, 0).unwrap_err();
+        assert!(erro.contains("não há trabalho guardado"), "{erro}");
+
+        // com conflito na pasta, guardar é recusado em vez de embolar o git.
+        write(&dir, "a.txt", "um\nconflito aqui\n");
+        stage(&dir, &["a.txt".into()]).unwrap();
+        commit(&dir, "mexeu no a", false).unwrap();
+        checkout(&dir, "paralelo", true, None).unwrap();
+        write(&dir, "a.txt", "do paralelo\n");
+        stage(&dir, &["a.txt".into()]).unwrap();
+        commit(&dir, "muda no paralelo", false).unwrap();
+        checkout(&dir, "main", false, None).unwrap();
+        write(&dir, "a.txt", "um\noutro meio\n");
+        stage(&dir, &["a.txt".into()]).unwrap();
+        commit(&dir, "muda no main", false).unwrap();
+        let _ = merge(&dir, "paralelo");
+        let meio = read_status(&dir).unwrap();
+        assert!(meio.conflict_count > 0, "o merge deveria estar em conflito");
+        assert_eq!(meio.operation.as_deref(), Some("merge"), "{:?}", meio.operation);
+        let erro = stash_push(&dir, Some("no meio do conflito"), false).unwrap_err();
+        assert!(erro.contains("em conflito"), "{erro}");
+        abort_operation(&dir, "merge").unwrap();
+        assert_eq!(read_status(&dir).unwrap().operation, None, "cancelou, acabou");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reproduzir um commit de outro ramo grava um commit novo aqui e, quando o
+    /// git trava no meio, a tela sabe qual operação está parada — merge, rebase,
+    /// cherry-pick e revert deixam marcas diferentes no `.git`.
+    #[test]
+    fn reproduzir_commit_e_a_operacao_que_ficou_parada() {
+        let dir = temp_repo("reproduzir");
+        write(&dir, "a.txt", "um\n");
+        stage(&dir, &["a.txt".into()]).unwrap();
+        commit(&dir, "base", false).unwrap();
+        assert_eq!(read_status(&dir).unwrap().operation, None);
+
+        checkout(&dir, "feature", true, None).unwrap();
+        write(&dir, "b.txt", "do feature\n");
+        stage(&dir, &["b.txt".into()]).unwrap();
+        let limpo = commit(&dir, "traz o b", false).unwrap();
+        checkout(&dir, "main", false, None).unwrap();
+
+        cherry_pick(&dir, &limpo, None).unwrap();
+        assert!(tracked_files(&dir).unwrap().contains(&"b.txt".to_string()));
+        assert_eq!(
+            String::from_utf8_lossy(&blob_at(&dir, "HEAD", "b.txt").unwrap()),
+            "do feature\n"
+        );
+        // o ramo de origem não foi mexido: a cabeça dele continua a dele.
+        checkout(&dir, "feature", false, None).unwrap();
+        assert_eq!(run(&dir, &["rev-parse", "HEAD"]).unwrap().trim(), limpo);
+
+        // mesmo arquivo dos dois lados: o git para no meio e diz o que é.
+        checkout(&dir, "feature", false, None).unwrap();
+        write(&dir, "b.txt", "do feature, mudado\n");
+        stage(&dir, &["b.txt".into()]).unwrap();
+        let conflitante = commit(&dir, "mexe no b", false).unwrap();
+        checkout(&dir, "main", false, None).unwrap();
+        write(&dir, "b.txt", "o que o main tem\n");
+        stage(&dir, &["b.txt".into()]).unwrap();
+        commit(&dir, "divergiu", false).unwrap();
+
+        let erro = cherry_pick(&dir, &conflitante, None).unwrap_err();
+        assert!(erro.contains("conflitos"), "{erro}");
+        let meio = read_status(&dir).unwrap();
+        assert!(meio.conflict_count > 0);
+        assert_eq!(meio.operation.as_deref(), Some("cherry-pick"), "{meio:?}");
+
+        // cancelar devolve a pasta ao antes da operação.
+        abort_operation(&dir, "cherry-pick").unwrap();
+        let depois = read_status(&dir).unwrap();
+        assert_eq!(depois.operation, None);
+        assert_eq!(depois.conflict_count, 0);
+        assert_eq!(
+            String::from_utf8_lossy(&blob_at(&dir, "HEAD", "b.txt").unwrap()),
+            "o que o main tem\n"
+        );
+
+        // resolver com o lado do commit reproduzido e continuar fecha a operação.
+        let erro = cherry_pick(&dir, &conflitante, None).unwrap_err();
+        assert!(erro.contains("conflitos"), "{erro}");
+        let em_conflito = read_status(&dir)
+            .unwrap()
+            .files
+            .into_iter()
+            .find(|f| f.conflict)
+            .expect("o cherry-pick deixou conflito");
+        resolve_conflict(&dir, &em_conflito.path, "theirs").unwrap();
+        continue_operation(&dir, "cherry-pick").unwrap();
+        let fechado = read_status(&dir).unwrap();
+        assert_eq!(fechado.operation, None, "continuar conclui o passo");
+        assert_eq!(
+            String::from_utf8_lossy(&blob_at(&dir, "HEAD", "b.txt").unwrap()),
+            "do feature, mudado\n"
+        );
+
+        // um commit já aplicado não sobra: o git avisa e o passo pode ser pulado.
+        let repetido = cherry_pick(&dir, &conflitante, None);
+        assert!(repetido.is_err(), "não há o que aplicar de novo");
+        assert_eq!(read_status(&dir).unwrap().operation.as_deref(), Some("cherry-pick"));
+        skip_operation(&dir, "cherry-pick").unwrap();
+        assert_eq!(read_status(&dir).unwrap().operation, None);
+
+        // commit de merge só passa com o pai escolhido, igual ao revert.
+        checkout(&dir, "para-merge", true, None).unwrap();
+        write(&dir, "c.txt", "c\n");
+        stage(&dir, &["c.txt".into()]).unwrap();
+        commit(&dir, "no para-merge", false).unwrap();
+        checkout(&dir, "main", false, None).unwrap();
+        write(&dir, "d.txt", "d\n");
+        stage(&dir, &["d.txt".into()]).unwrap();
+        commit(&dir, "no main", false).unwrap();
+        merge(&dir, "para-merge").unwrap();
+        let cabeca = run(&dir, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        assert!(cherry_pick(&dir, &cabeca, None).unwrap_err().contains("merge com 2 pais"));
+        assert!(cherry_pick(&dir, &cabeca, Some(7)).unwrap_err().contains("pai inválido"));
+
+        // operação que não existe não é mandada ao git.
+        assert!(continue_operation(&dir, "inventada").is_err());
+        assert!(abort_operation(&dir, "inventada").is_err());
+        assert!(
+            continue_operation(&dir, "merge").is_err(),
+            "merge fecha com commit, não com --continue"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `parse_status` não conhece a operação em andamento — quem sabe são os
+    /// arquivos do `.git`. Este teste fixa o nome que a interface usa para cada
+    /// marca, sem depender de um git em conflito para isso.
+    #[test]
+    fn as_marcas_de_operacao_do_git_viram_nome() {
+        let dir = temp_repo("marcas");
+        write(&dir, "a.txt", "um\n");
+        stage(&dir, &["a.txt".into()]).unwrap();
+        commit(&dir, "base", false).unwrap();
+        let git = dir.join(".git");
+        assert_eq!(operation_in_progress(&dir), None);
+        for (marca, nome) in [
+            ("MERGE_HEAD", "merge"),
+            ("CHERRY_PICK_HEAD", "cherry-pick"),
+            ("REVERT_HEAD", "revert"),
+        ] {
+            std::fs::write(git.join(marca), "deadbeef\n").expect("escrever a marca");
+            assert_eq!(operation_in_progress(&dir).as_deref(), Some(nome), "{marca}");
+            std::fs::remove_file(git.join(marca)).unwrap();
+        }
+        std::fs::create_dir_all(git.join("rebase-merge")).unwrap();
+        assert_eq!(operation_in_progress(&dir).as_deref(), Some("rebase"));
+        std::fs::remove_dir_all(git.join("rebase-merge")).unwrap();
+        assert_eq!(operation_in_progress(&dir), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

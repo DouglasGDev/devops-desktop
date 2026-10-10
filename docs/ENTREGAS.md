@@ -9,7 +9,7 @@ cada parte e o que ainda não existe**. Escrito em 2026-10-10 sobre o commit `a5
 ```bash
 node ./node_modules/typescript/bin/tsc --noEmit     # tipos do frontend
 npm run build                                        # tsc + bundle
-(cd src-tauri && cargo test)                         # 184 testes de backend
+(cd src-tauri && cargo test)                         # 187 testes de backend
 (cd src-tauri && cargo clippy --all-targets -- -D warnings)
 node scripts/confira-repo.ts                         # o comparador remoto↔pasta, 9 formas reais de URL
 ```
@@ -33,11 +33,12 @@ Armadilhas já conhecidas nesta máquina:
 | Checagem | Resultado real |
 | --- | --- |
 | `tsc --noEmit` | saída vazia, código 0 |
-| `npm run build` | `✓ built in 3.32s`; 81 módulos; único aviso é o de chunk > 500 kB (bundle único de ~833 kB) |
-| `cargo test` (todos os alvos) | `184 passed; 0 failed; 0 ignored` em `devops_desktop_lib`; `main.rs` e doc-tests com 0 testes |
+| `npm run build` | `✓ built in 3.15s`; 82 módulos; único aviso é o de chunk > 500 kB (bundle único de 839,78 kB) |
+| `cargo test` (todos os alvos) | `187 passed; 0 failed; 0 ignored` em `devops_desktop_lib`; `main.rs` e doc-tests com 0 testes |
 | `cargo clippy --all-targets -- -D warnings` | `Finished` sem aviso (com `-D warnings`, qualquer aviso derrubaria o comando) |
 | `node scripts/confira-repo.ts` | `todas as 9 formas conferem`, código 0 |
-| Executando | `devops-desktop.exe` (PID 3840) com `MainWindowTitle = "DevOps Desktop - Central de SSH, Git e Deploy"`, `Responding = True` |
+| Instalador | `npm run tauri build` → `DevOps Desktop_0.1.0_x64-setup.exe` (4,60 MiB) e `.msi` (6,63 MiB) |
+| Executando | `devops-desktop.exe` (PID 16324) com `MainWindowTitle = "DevOps Desktop - Central de SSH, Git e Deploy"`, `Responding = True` |
 | Git | `main` em sincronia com `origin/main`; público em <https://github.com/DouglasGDev/devops-desktop> |
 
 O que isso **não** cobre: não há runner de teste de interface. As telas são conferidas por quem usa — a suíte automática
@@ -52,7 +53,7 @@ O que isso **não** cobre: não há runner de teste de interface. As telas são 
 | 3. Teste de conexão e gerenciamento | diagnóstico por camada (DNS, porta, autenticação, host key), cadastro/edição/exclusão, ambiente por servidor | `src-tauri/src/ssh_test.rs`, `auth.rs` | **Servidores → Testar** |
 | 4. Terminal SSH | PTY múltiplo, redimensionamento, histórico de comandos local, rotinas salvas | `src-tauri/src/terminal.rs`, comandos `*_terminal_session`, `*_routine` | **Terminal** |
 | 5. Gerenciador de arquivos remoto | listar, criar pasta, renomear, chmod, ler/editar texto, subir/descarregar arquivo e pasta com progresso e cancelamento | `src-tauri/src/files.rs`, `files_transfer.rs` | **Arquivos** |
-| 6. Git completo | status, stage por arquivo e por hunk, diff linha a linha, commit/amend, gráfico, árvore rastreada + conteúdo do HEAD, ramos, tags, remotos, merge/rebase com conflito por lado, revert/reset, fetch/pull/push, clone, abrir no editor | `src-tauri/src/git.rs`, `src/views/GitView.tsx`, `src/components/git/*` | **Git** (abas Alterações, Árvore, Histórico, Ramos, Tags, Remotos, Segredos) |
+| 6. Git completo | status, stage por arquivo e por hunk, diff linha a linha, commit/amend, gráfico, árvore rastreada + conteúdo do HEAD, ramos, tags, remotos, merge/rebase com conflito por lado, revert/reset/cherry-pick, guardar e recuperar trabalho em andamento (`stash`), fetch/pull/push, clone, abrir no editor | `src-tauri/src/git.rs`, `src/views/GitView.tsx`, `src/components/git/*` | **Git** (abas Alterações, Árvore, Histórico, Guardados, Ramos, Tags, Remotos, Segredos) |
 | 7. Projetos e perfis de deploy | cadastro de pasta com sondagem real de git, perfil por projeto/estratégia | `src-tauri/src/git_probe.rs`, `deploy.rs`, `commands.rs` (`*_deploy_profile`) | **Projetos**, **Deploy** |
 | 8. Motor de deploy com pipeline visual | estratégias A–E, preflight de ferramentas no servidor, etapas com comando/duração/código de saída, cancelamento cooperativo, rollback | `src-tauri/src/deploy.rs`, `sshexec.rs` | **Deploy** |
 | 9. Segredos e proteção de commit | varredura do conteúdo **que o Git publicaria** (`git show :path` / `HEAD:path`), bloqueio antes de commit e push, `git rm --cached` assistido, regras extras | `src-tauri/src/security.rs` | **Git → Segredos**; o bloqueio aparece ao commitar/pushar |
@@ -72,10 +73,14 @@ O que isso **não** cobre: não há runner de teste de interface. As telas são 
   `dono/repo` do que o git respondeu (host-agnóstico) e mostra o caminho exato + **Mostrar a pasta** no Explorador.
 - **Máquina** (`src-tauri/src/tools.rs`, `src/components/MachineAccess.tsx`): detecta `ssh`/`git`/`gh`/`ssh-add`,
   identidade do git, chaves no agente, editores no disco, e diz se esta máquina já está liberada para publicar.
+- **Operação parada lida das marcas do `.git`** (`git::operation_in_progress`): `rebase-merge`/`rebase-apply`,
+  `MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD` viram `status.operation`, e a barra de conflitos só oferece
+  *Cancelar* / *Continuar* / *Pular este passo* coerentes com o que o Git realmente está fazendo. Antes a tela adivinhava
+  "rebase" por cabeça detached — o que levava a um *Cancelar o merge* que falharia num cherry-pick ou numa reversão.
 - **Senha por prompt, nunca salva** (`src-tauri/src/auth.rs`, `PasswordPrompt.tsx`): `SSH_ASKPASS` por operação.
 
-Total da superfície: **118 comandos Tauri registrados**, 21 arquivos Rust em `src-tauri/src`, 10 views,
-30.302 linhas de TS/TSX/Rust.
+Total da superfície: **124 comandos Tauri registrados**, 21 arquivos Rust em `src-tauri/src`, 10 views,
+31.240 linhas de TS/TSX/Rust.
 
 Persistência (SQLite local, migrações em `src-tauri/src/db.rs`) — as nove tabelas que existem hoje:
 `settings`, `servers`, `projects`, `audit_log`, `routines`, `terminal_history`, `deploy_profiles`, `deploy_runs`,
@@ -108,14 +113,15 @@ Estas vieram do SPEC e de correções explícitas do Douglas; reverter qualquer 
 | 3 | **Passada de visual (prioridade quando ele chamar)** | Só depois das funções; começar pelo print da tela que incomoda. Não refazer estilo por conta própria junto de feature |
 | 4 | **Pacotes Linux** | Os alvos `deb`/`rpm`/`AppImage` nunca foram gerados aqui. Rodar `npm run tauri build` numa imagem Linux e ajustar `bundle.targets` + paths (o código já usa `dirs`/caminhos relativos, mas isso precisa ser provado, não suposto) |
 | 5 | **Teste de interface automatizado** | Não há runner hoje. Se um dia entrar, o mínimo é o fluxo do SPEC §17; por ora, a cobertura real é `tsc` + suíte Rust + `scripts/confira-repo.ts` |
-| 6 | **Aceite visual das últimas entregas** | `Git → Árvore` e `GitHub → repositório → Local` ainda não foram vistos por ele nesta máquina |
+| 6 | **Aceite visual das últimas entregas** | `Git → Árvore`, `GitHub → repositório → Local`, `Git → Guardados` e os botões *Reproduzir este commit* / *Reverter este commit* / *Voltar para este commit* ainda não foram vistos por ele nesta máquina |
 
 ## 7. Lacunas honestas do "canivete suíço" (ainda NÃO existe)
 
 Listadas para escolher a próxima frente — nada aqui está implementado, e nada aqui foi inventado como "quase pronto":
 
-**Git** — `stash` (guardar trabalho em andamento), `cherry-pick`, `bisect`, `blame` por linha, busca no histórico por
-autoria/texto, `submodule`, `worktree` múltiplo por projeto, assinatura de commit (`gpg.sign`), `git fsck`/manutenção.
+**Git** — `bisect`, `blame` por linha, busca no histórico por autoria/texto, `submodule`, `worktree` múltiplo por projeto,
+assinatura de commit (`gpg.sign`), `git fsck`/manutenção. (`stash` e `cherry-pick` saíram desta lista em 2026-10-10:
+estão na aba **Guardados** e no card de detalhe do commit, com os comandos `git_stash_*` e `git_cherry_pick`.)
 
 **SSH / servidor** — túnel e redirecionamento de porta (`LocalForward`), gerência de `authorized_keys`, gestão de serviço
 (`systemctl`), visualizador de logs remotos (`journalctl`), cron/`at`, Docker "ao vivo" (listar/parar containers) fora do

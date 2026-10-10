@@ -4,6 +4,7 @@ import type {
   BranchInfo,
   GitActionOutcome,
   GitIdentity,
+  GitOperation,
   GraphRow,
   PullStrategy,
   RemoteAccess,
@@ -11,12 +12,21 @@ import type {
   RepoStatus,
   ResetMode,
   SecretFinding,
+  StashEntry,
   TagInfo,
 } from "../types";
 
 export type GitNotify = (kind: "success" | "error" | "info", message: string) => void;
 
 const HISTORY_LIMIT = 200;
+
+/** Como a barra de status nomeia cada operação que o Git pode ter parada. */
+const NOME_OPERACAO: Record<GitOperation, string> = {
+  merge: "o merge",
+  rebase: "o rebase",
+  "cherry-pick": "o cherry-pick",
+  revert: "a reversão",
+};
 
 export interface GitRepo {
   status: RepoStatus | null;
@@ -25,6 +35,8 @@ export interface GitRepo {
   tags: TagInfo[];
   remotes: RemoteInfo[];
   history: GraphRow[];
+  /** Trabalhos guardados (`git stash`), na ordem do git. */
+  stash: StashEntry[];
   /** Rótulo da operação em andamento, exibido na barra de status. */
   busy: string | null;
   error: string | null;
@@ -44,10 +56,19 @@ export interface GitRepo {
   deleteBranch: (name: string, force: boolean) => Promise<BranchInfo[] | null>;
   merge: (branch: string) => Promise<GitActionOutcome | null>;
   rebase: (upstream: string) => Promise<GitActionOutcome | null>;
-  abort: (kind: "merge" | "rebase") => Promise<RepoStatus | null>;
-  continueRebase: () => Promise<GitActionOutcome | null>;
+  /** Cancela a operação que o status reporta — o kind vem de `status.operation`. */
+  abort: (kind: GitOperation) => Promise<RepoStatus | null>;
+  continuePending: (kind: GitOperation) => Promise<GitActionOutcome | null>;
+  skipPending: (kind: GitOperation) => Promise<GitActionOutcome | null>;
   resolveConflict: (path: string, side: "ours" | "theirs") => Promise<RepoStatus | null>;
   revert: (commitId: string, mainline?: number | null) => Promise<GitActionOutcome | null>;
+  cherryPick: (commitId: string, mainline?: number | null) => Promise<GitActionOutcome | null>;
+  /** Grava o trabalho em andamento na lista do git e limpa a pasta. */
+  stashPush: (message: string | null, includeUntracked: boolean) => Promise<GitActionOutcome | null>;
+  /** `pop` também retira da lista; em conflito o git mantém a entrada. */
+  stashApply: (index: number, pop: boolean) => Promise<GitActionOutcome | null>;
+  stashDrop: (index: number) => Promise<GitActionOutcome | null>;
+  reloadStash: () => Promise<StashEntry[] | null>;
   reset: (mode: ResetMode, target: string) => Promise<GitActionOutcome | null>;
   fetch: (remote?: string | null) => Promise<GitActionOutcome | null>;
   pull: (strategy: PullStrategy) => Promise<GitActionOutcome | null>;
@@ -88,6 +109,7 @@ export function useGitRepo(projectId: number | null, notify: GitNotify): GitRepo
   const [tags, setTags] = useState<TagInfo[]>([]);
   const [remotes, setRemotes] = useState<RemoteInfo[]>([]);
   const [history, setHistory] = useState<GraphRow[]>([]);
+  const [stash, setStash] = useState<StashEntry[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const alive = useRef(true);
@@ -150,6 +172,15 @@ export function useGitRepo(projectId: number | null, notify: GitNotify): GitRepo
     [guard],
   );
 
+  const loadStash = useCallback(
+    () =>
+      guard("Lendo os trabalhos guardados", (id) => api.gitStashList(id)).then((list) => {
+        if (list && alive.current) setStash(list);
+        return list;
+      }),
+    [guard],
+  );
+
   const reload = useCallback(async () => {
     if (projectId == null) {
       setStatus(null);
@@ -158,6 +189,7 @@ export function useGitRepo(projectId: number | null, notify: GitNotify): GitRepo
       setTags([]);
       setRemotes([]);
       setHistory([]);
+      setStash([]);
       return;
     }
     const snapshot = await guard("Lendo o repositório", (id) =>
@@ -168,16 +200,18 @@ export function useGitRepo(projectId: number | null, notify: GitNotify): GitRepo
         api.gitTags(id),
         api.gitRemotes(id),
         api.gitGraph(id, HISTORY_LIMIT, true),
+        api.gitStashList(id),
       ]),
     );
     if (!snapshot || !alive.current) return;
-    const [st, id, br, tg, rm, hist] = snapshot;
+    const [st, id, br, tg, rm, hist, guardados] = snapshot;
     setStatus(st);
     setIdentity(id);
     setBranches(br);
     setTags(tg);
     setRemotes(rm);
     setHistory(hist);
+    setStash(guardados);
   }, [guard, projectId]);
 
   useEffect(() => {
@@ -321,16 +355,20 @@ export function useGitRepo(projectId: number | null, notify: GitNotify): GitRepo
   );
 
   const abort = useCallback(
-    (kind: "merge" | "rebase") =>
-      statusAction(kind === "merge" ? "Cancelando o merge" : "Cancelando o rebase", (id) =>
-        api.gitAbort(id, kind),
-      ),
+    (kind: GitOperation) => statusAction(`Cancelando ${NOME_OPERACAO[kind]}`, (id) => api.gitAbort(id, kind)),
     [statusAction],
   );
 
-  const continueRebase = useCallback(() => reloadAfter("Continuando o rebase", (id) => api.gitContinueRebase(id)), [
-    reloadAfter,
-  ]);
+  const continuePending = useCallback(
+    (kind: GitOperation) =>
+      reloadAfter(`Concluindo ${NOME_OPERACAO[kind]}`, (id) => api.gitContinuePending(id, kind)),
+    [reloadAfter],
+  );
+
+  const skipPending = useCallback(
+    (kind: GitOperation) => reloadAfter(`Pulando o passo de ${kind}`, (id) => api.gitSkipPending(id, kind)),
+    [reloadAfter],
+  );
 
   const resolveConflict = useCallback(
     (path: string, side: "ours" | "theirs") =>
@@ -345,9 +383,36 @@ export function useGitRepo(projectId: number | null, notify: GitNotify): GitRepo
     [reloadAfter],
   );
 
+  /** Reproduz aqui um commit de outro ramo, gravando um commit novo. O ramo de
+   * origem fica como está e nada é enviado ao remoto. */
+  const cherryPick = useCallback(
+    (commitId: string, mainline?: number | null) =>
+      reloadAfter(`Reproduzindo ${commitId.slice(0, 9)}`, (id) => api.gitCherryPick(id, commitId, mainline ?? null)),
+    [reloadAfter],
+  );
+
+  const stashPush = useCallback(
+    (message: string | null, includeUntracked: boolean) =>
+      reloadAfter("Guardando o trabalho", (id) => api.gitStashPush(id, message, includeUntracked)),
+    [reloadAfter],
+  );
+
+  const stashApply = useCallback(
+    (index: number, pop: boolean) =>
+      reloadAfter(pop ? "Aplicando e tirando da lista" : "Aplicando o trabalho guardado", (id) =>
+        api.gitStashApply(id, index, pop),
+      ),
+    [reloadAfter],
+  );
+
+  /** Excluir o guardado perde aquele trabalho: a interface confirma antes. */
+  const stashDrop = useCallback(
+    (index: number) => reloadAfter(`Excluindo o guardado ${index}`, (id) => api.gitStashDrop(id, index)),
+    [reloadAfter],
+  );
+
   /** Move a cabeça do ramo. `hard` descarta trabalho, por isso chega aqui só
-   * depois da confirmação da interface. */
-  const reset = useCallback(
+   * depois da confirmação da interface. */  const reset = useCallback(
     (mode: ResetMode, target: string) =>
       reloadAfter(`Movendo a cabeça do ramo (--${mode})`, (id) => api.gitReset(id, mode, target)),
     [reloadAfter],
@@ -458,10 +523,12 @@ export function useGitRepo(projectId: number | null, notify: GitNotify): GitRepo
     tags,
     remotes,
     history,
+    stash,
     busy,
     error,
     reload,
     loadHistory,
+    reloadStash: loadStash,
     refreshStatus,
     stage,
     unstage,
@@ -477,9 +544,14 @@ export function useGitRepo(projectId: number | null, notify: GitNotify): GitRepo
     merge,
     rebase,
     abort,
-    continueRebase,
+    continuePending,
+    skipPending,
     resolveConflict,
     revert,
+    cherryPick,
+    stashPush,
+    stashApply,
+    stashDrop,
     reset,
     fetch,
     pull,

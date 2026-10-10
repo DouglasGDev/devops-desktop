@@ -266,14 +266,28 @@ export interface FileContent {
   truncated: boolean;
 }
 
+/** Operação que o Git deixou parada no meio, lida das marcas do `.git`. */
+export type GitOperation = "merge" | "rebase" | "cherry-pick" | "revert";
+
 export interface RepoStatus {
   branch: string | null;
   detachedAt: string | null;
+  operation: GitOperation | null;
   upstream: string | null;
   ahead: number;
   behind: number;
   files: StatusFile[];
   conflictCount: number;
+}
+
+/** Um trabalho guardado pelo Git. `index` é a posição na lista do git, onde 0 é
+ *  o mais recente. */
+export interface StashEntry {
+  index: number;
+  selector: string;
+  sha: string;
+  date: string;
+  subject: string;
 }
 
 export type DiffLineKind = "add" | "del" | "ctx";

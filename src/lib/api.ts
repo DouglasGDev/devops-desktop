@@ -17,6 +17,7 @@ import type {
   FileDiff,
   GitActionOutcome,
   GitIdentity,
+  GitOperation,
   GitHubConnectResult,
   GitHubDeviceFlow,
   GitHubInbox,
@@ -41,6 +42,7 @@ import type {
   RoutineInput,
   SearchResults,
   SecretFinding,
+  StashEntry,
   Server,
   ServerInput,
   ServerMetrics,
@@ -284,13 +286,29 @@ export const api = {
     invoke<GitActionOutcome>("git_merge", { projectId, branch }),
   gitRebase: (projectId: number, upstream: string) =>
     invoke<GitActionOutcome>("git_rebase", { projectId, upstream }),
-  gitAbort: (projectId: number, kind: "merge" | "rebase") => invoke<RepoStatus>("git_abort", { projectId, kind }),
-  gitContinueRebase: (projectId: number) =>
-    invoke<GitActionOutcome>("git_continue_rebase", { projectId }),
+  gitAbort: (projectId: number, kind: GitOperation) => invoke<RepoStatus>("git_abort", { projectId, kind }),
+  gitContinuePending: (projectId: number, kind: GitOperation) =>
+    invoke<GitActionOutcome>("git_continue_pending", { projectId, kind }),
+  gitSkipPending: (projectId: number, kind: GitOperation) =>
+    invoke<GitActionOutcome>("git_skip_pending", { projectId, kind }),
   gitResolveConflict: (projectId: number, path: string, side: "ours" | "theirs") =>
     invoke<RepoStatus>("git_resolve_conflict", { projectId, path, side }),
   gitRevert: (projectId: number, commit: string, mainline?: number | null) =>
     invoke<GitActionOutcome>("git_revert", { projectId, commit, mainline: mainline ?? null }),
+  gitCherryPick: (projectId: number, commit: string, mainline?: number | null) =>
+    invoke<GitActionOutcome>("git_cherry_pick", { projectId, commit, mainline: mainline ?? null }),
+  // O guardado é endereçado pela posição na lista do git, nunca por caminho.
+  gitStashList: (projectId: number) => invoke<StashEntry[]>("git_stash_list", { projectId }),
+  gitStashPush: (projectId: number, message?: string | null, includeUntracked?: boolean) =>
+    invoke<GitActionOutcome>("git_stash_push", {
+      projectId,
+      message: message ?? null,
+      includeUntracked: includeUntracked ?? false,
+    }),
+  gitStashApply: (projectId: number, index: number, pop?: boolean) =>
+    invoke<GitActionOutcome>("git_stash_apply", { projectId, index, pop: pop ?? false }),
+  gitStashDrop: (projectId: number, index: number) =>
+    invoke<GitActionOutcome>("git_stash_drop", { projectId, index }),
   gitReset: (projectId: number, mode: ResetMode, target: string) =>
     invoke<GitActionOutcome>("git_reset", { projectId, mode, target }),
   gitFetch: (projectId: number, remote?: string | null) =>

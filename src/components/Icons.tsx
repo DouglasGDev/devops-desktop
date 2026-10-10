@@ -242,3 +242,11 @@ export const MergeIcon = makeIcon(
     <path d="M6 21V9a9 9 0 0 0 9 9" />
   </>,
 );
+
+export const ArchiveIcon = makeIcon(
+  <>
+    <rect x="2" y="4" width="20" height="5" rx="1" />
+    <path d="M4 9v10a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V9" />
+    <path d="M10 13h4" />
+  </>,
+);

@@ -1,8 +1,16 @@
 import { useMemo, useState } from "react";
 import type { GitRepo } from "../../lib/useGitRepo";
-import type { RepoStatus, SecretFinding, StatusFile } from "../../types";
+import type { GitOperation, RepoStatus, SecretFinding, StatusFile } from "../../types";
 import { AlertTriangleIcon, CheckIcon, PlusIcon, RefreshIcon, TrashIcon, XIcon } from "../Icons";
 import { Badge, Button, Card, Checkbox, Confirm, EmptyState, Field, Textarea } from "../ui";
+
+/** Nome com artigo, para a frase da barra de operação. */
+const ROTULO_OPERACAO: Record<GitOperation, string> = {
+  merge: "o merge",
+  rebase: "o rebase",
+  "cherry-pick": "o cherry-pick",
+  revert: "a reversão",
+};
 
 export const KIND_TONES: Record<string, "success" | "error" | "warning" | "accent" | "neutral"> = {
   adicionado: "success",
@@ -182,7 +190,8 @@ export function ChangesPanel({
     [status.files],
   );
   const conflictFiles = useMemo(() => status.files.filter((f) => f.conflict), [status.files]);
-  const inRebase = status.branch === null && status.detachedAt !== null;
+  const operation = status.operation;
+  const nomeOperacao = operation === null ? null : ROTULO_OPERACAO[operation];
 
   const runCommit = async (allowSecrets = false) => {
     setCommitting(true);
@@ -219,28 +228,33 @@ export function ChangesPanel({
 
   return (
     <div className="space-y-3">
-      {conflictFiles.length > 0 ? (
+      {conflictFiles.length > 0 || operation !== null ? (
         <Card className="border-amber-300/60 bg-amber-50/60 p-3 dark:border-amber-900/60 dark:bg-amber-950/20">
           <p className="flex items-center gap-2 text-xs font-medium text-amber-800 dark:text-amber-300">
             <AlertTriangleIcon className="size-4" />
-            {conflictFiles.length} arquivo(s) em conflito — {inRebase ? "rebase" : "merge"} em andamento.
+            {conflictFiles.length > 0
+              ? `${conflictFiles.length} arquivo(s) em conflito${nomeOperacao ? ` — ${nomeOperacao} em andamento.` : "."}`
+              : `${nomeOperacao} parado: não há conflito na pasta.`}
           </p>
           <p className="mt-1 text-[11px] text-amber-800/80 dark:text-amber-300/80">
-            Escolha o lado de cada arquivo, marque como resolvido e faça o commit. Para desistir sem deixar nada
-            aplicado, cancele a operação — nada é enviado a um remoto por aqui.
+            {operation === null
+              ? "Nada foi cancelado por conta própria: o conflito veio da aplicação de um trabalho guardado, que continua na lista."
+              : "Escolha o lado de cada arquivo e conclua a operação. Para desistir sem deixar nada aplicado, cancele — nada é enviado a um remoto por aqui."}
           </p>
           <div className="mt-2 flex gap-2">
-            <Button
-              size="sm"
-              variant="danger"
-              disabled={busy}
-              onClick={() => void git.abort(inRebase ? "rebase" : "merge")}
-            >
-              Cancelar {inRebase ? "o rebase" : "o merge"}
-            </Button>
-            {inRebase ? (
-              <Button size="sm" disabled={busy} onClick={() => void git.continueRebase()}>
-                Continuar o rebase
+            {operation !== null ? (
+              <Button size="sm" variant="danger" disabled={busy} onClick={() => void git.abort(operation)}>
+                Cancelar {nomeOperacao}
+              </Button>
+            ) : null}
+            {operation !== null && operation !== "merge" ? (
+              <Button size="sm" disabled={busy} onClick={() => void git.continuePending(operation)}>
+                Continuar {nomeOperacao}
+              </Button>
+            ) : null}
+            {operation !== null && operation !== "merge" && conflictFiles.length === 0 ? (
+              <Button size="sm" disabled={busy} onClick={() => void git.skipPending(operation)}>
+                Pular este passo
               </Button>
             ) : null}
           </div>

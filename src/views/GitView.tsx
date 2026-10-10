@@ -43,10 +43,11 @@ import { HistoryPanel } from "../components/git/HistoryPanel";
 import { PublishDialog } from "../components/git/PublishDialog";
 import { RemotesPanel } from "../components/git/RemotesPanel";
 import { SecretsPanel } from "../components/git/SecretsPanel";
+import { StashPanel } from "../components/git/StashPanel";
 import { TagsPanel } from "../components/git/TagsPanel";
 import { ConteudoArquivo, TreePanel } from "../components/git/TreePanel";
 
-type Tab = "changes" | "tree" | "history" | "branches" | "tags" | "remotes" | "secrets";
+type Tab = "changes" | "tree" | "history" | "stash" | "branches" | "tags" | "remotes" | "secrets";
 
 /** O que cada modo de `git reset` faz, do jeito que os testes do backend
  * verificam: soft preserva o índice, mixed solta o índice, hard substitui o
@@ -67,6 +68,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "changes", label: "Alterações" },
   { id: "tree", label: "Árvore" },
   { id: "history", label: "Histórico" },
+  { id: "stash", label: "Guardados" },
   { id: "branches", label: "Ramos" },
   { id: "tags", label: "Tags" },
   { id: "remotes", label: "Remotos" },
@@ -115,6 +117,7 @@ export function GitView({
   const [pushBlock, setPushBlock] = useState<SecretFinding[] | null>(null);
   const [publishing, setPublishing] = useState(false);
   const [revertAsk, setRevertAsk] = useState<CommitDetail | null>(null);
+  const [pickAsk, setPickAsk] = useState<CommitDetail | null>(null);
   const [resetAsk, setResetAsk] = useState<{ commit: string; subject: string; mode: ResetMode } | null>(null);
   const [acesso, setAcesso] = useState<RemoteAccess | null>(null);
   const [abrindo, setAbrindo] = useState(false);
@@ -228,6 +231,15 @@ export function GitView({
     // merge tem dois pais: o git exige dizer qual deles continua.
     const mainline = detail.commit.parents.length > 1 ? 1 : null;
     await git.revert(detail.commit.id, mainline);
+  };
+
+  /** Reproduz o commit escolhido neste ramo, gravando um commit novo. */
+  const doCherryPick = async (detail: CommitDetail) => {
+    setPickAsk(null);
+    const mainline = detail.commit.parents.length > 1 ? 1 : null;
+    const feito = await git.cherryPick(detail.commit.id, mainline);
+    // o commit reproduzido é o topo do ramo: o diff aberto do anterior fica velho.
+    if (feito) setTarget(null);
   };
 
   const doReset = async (ask: { commit: string; mode: ResetMode }) => {
@@ -534,6 +546,8 @@ export function GitView({
             />
           ) : null}
 
+          {tab === "stash" && projectId !== null ? <StashPanel git={git} projectId={projectId} /> : null}
+
           {tab === "history" ? (
             <div className="space-y-2">
               <div className="flex items-center gap-2">
@@ -620,6 +634,15 @@ export function GitView({
                   size="sm"
                   variant="ghost"
                   disabled={git.busy !== null}
+                  onClick={() => setPickAsk(detail)}
+                  title="git cherry-pick — grava um commit novo neste ramo com as mudanças deste"
+                >
+                  <CommitIcon className="size-3.5" /> Reproduzir este commit
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={git.busy !== null}
                   onClick={() => setResetAsk({ commit: detail.commit.id, subject: detail.commit.subject, mode: "mixed" })}
                   title="git reset — move a cabeça do ramo de volta para este commit"
                 >
@@ -684,6 +707,27 @@ export function GitView({
         busy={git.busy !== null}
         onConfirm={() => revertAsk && void doRevert(revertAsk)}
         onClose={() => setRevertAsk(null)}
+      />
+
+      <Confirm
+        open={pickAsk !== null}
+        title="Reproduzir este commit"
+        message={
+          pickAsk
+            ? `Será criado um commit novo no ramo ${branch ?? "(sem nome)"} com as mudanças de “${pickAsk.commit.subject}” (${pickAsk.commit.shortId}). ` +
+              `O ramo de origem não é modificado e nada é enviado ao remoto.` +
+              (pickAsk.commit.parents.length > 1
+                ? ` Como é um merge, a reprodução segue o pai 1 — o ramo que recebeu a mesclagem.`
+                : ``) +
+              (dirty > 0
+                ? ` Há ${dirty} alteração(ões) em andamento; se elas se sobrepuserem ao que o commit toca, o git pára no meio e os conflitos aparecem aqui para você resolver.`
+                : ``)
+            : ""
+        }
+        confirmLabel="Reproduzir"
+        busy={git.busy !== null}
+        onConfirm={() => pickAsk && void doCherryPick(pickAsk)}
+        onClose={() => setPickAsk(null)}
       />
 
       <Confirm

@@ -293,8 +293,19 @@ no histórico local (opcional) para reutilização e auditoria. Fechar a janela 
   `git show HEAD:<caminho>`. Arquivo binário, texto fora de UTF-8 e conteúdo acima de 512 KiB são ditos como estados na
   tela — não há texto inventado no lugar. Dali, *Abrir no editor* chama o editor configurado com aquele arquivo.
 - **Commit**: mensagem livre, `amend` com aviso de reescrita de histórico (nunca feito automaticamente).
+- **Guardados** (`git stash`): o que está na mão sai da pasta e fica endereçado pelo próprio Git, para você trocar de
+  ramo ou puxar sem conflito. *Guardar* aceita um nome opcional e a opção de levar também os arquivos ainda não
+  rastreados; sem alteração na pasta o botão fica desabilitado e, se mesmo assim o Git responder "no local changes", a
+  frase dele é mostrada e nada entra na lista. Cada linha da lista traz o endereço (`stash@{0}` é o mais recente), o
+  assunto, o `sha` e a data que o Git gravou, e quatro ações: *ver o que há dentro* (o diff do guardado, lido com o mesmo
+  parser do diff local, antes de aplicar), *Aplicar* (o conteúdo vem e a entrada continua na lista), *Aplicar e tirar*
+  (`pop`) e *Excluir* (confirmação, porque o conteúdo não é aplicado antes). Conflito na aplicação não é escondido: a
+  pasta fica em conflito, o Git **mantém** a entrada e a barra de estado diz exatamente isso. O guardado é local — nada
+  vai a um remoto por aqui.
 - **Histórico**: gráfico de commits com branches e tags, detalhe do commit, diff entre dois commits/branches.
-- **Reversão**: no detalhe de um commit há duas ações distintas. *Reverter este commit* grava um commit novo com as
+- **Reversão**: no detalhe de um commit há três ações distintas. *Reproduzir este commit* grava um commit novo neste ramo
+  com as mudanças daquele (`git cherry-pick`) — o ramo de origem não é modificado e nada é enviado ao remoto; um merge
+  precisa dizer qual pai continua (a confirmação já assume o pai 1 e avisa). *Reverter este commit* grava um commit novo com as
   mudanças invertidas (`git revert --no-edit`) — o histórico não é reescrito, então funciona até em ramo já publicado,
   e um merge exige dizer qual pai continua. *Voltar para este commit* move a cabeça do ramo (`git reset`) e a confirmação
   mostra os três modos com o efeito real de cada um: `soft` mantém o índice como está, `mixed` solta o índice e preserva
@@ -303,7 +314,12 @@ no histórico local (opcional) para reutilização e auditoria. Fechar a janela 
   divergência com o branch acompanhado, o próprio Git recusa o envio comum, e reescrever histórico remoto é algo que a
   aplicação não faz sozinha.
 - **Branches**: criar, alternar, renomear, excluir (com confirmação), remotas visíveis.
-- **Merge/Rebase**: executados com saída do Git tratada; conflito abre a escolha de lado por arquivo.
+- **Merge/Rebase**: executados com saída do Git tratada; conflito abre a escolha de lado por arquivo. A barra de operação
+  em andamento diz **qual** operação o Git tem parada, lida das marcas do `.git` (`MERGE_HEAD`, `rebase-merge`,
+  `CHERRY_PICK_HEAD`, `REVERT_HEAD`) — não é suposição deduzida da cabeça avulsa. Ela oferece *Cancelar* (volta ao estado
+  de antes), *Continuar* (conclui o passo com a mensagem que o próprio Git preparou) e, quando o passo não tem conflito
+  nenhum — por exemplo um commit que já está aplicado e não deixou mudança — *Pular este passo*. Merge não tem
+  `--continue`: ele se conclui com o commit normal, e a barra diz isso em vez de oferecer botão que falharia.
 - **Remotos**: listar, adicionar, mudar URL, remover; fetch/pull (merge ou rebase)/push com rastreio de branch.
 - **Publicar (canivete, sem servidor)**: o botão *Publicar* na barra do Git abre uma janela que executa, nesta ordem e
   só depois do clique, a checagem de segredos do que o remoto ainda não tem, os comandos locais digitados (um por
@@ -483,9 +499,17 @@ cd src-tauri
 cargo test --lib
 ```
 
-Cobertura atual do backend (184 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
+Cobertura atual do backend (187 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
 timeout e cancelamento, sessões PTY, ciclo completo de Git em repositório temporário (status, stage por hunk, commit,
-log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), a árvore e o conteúdo que o
+log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), trabalho guardado e
+reprodução de commit no git real (`stash push` tira a alteração da pasta e `stash list` mostra exatamente a entrada que o
+git criou com o assunto e o `sha` dele; sem nada alterado o git avisa e **nada** entra na lista; `apply` deixa a entrada e
+`pop` a retira; `pop` em conflito mantém a entrada, e é isso que a frase devolvida diz; guardar com conflito na pasta é
+recusado antes de falar com o git; índice que a lista não tem devolve o motivo em português; `cherry-pick` grava o commit
+novo sem tocar no ramo de origem, em conflito a operação fica parada e `status.operation` responde `cherry-pick`,
+`cancelar` devolve a pasta ao antes, `resolver + continuar` conclui e o passo que não tem mudança nenhuma é pulado com
+`--skip`; `MERGE_HEAD`/`CHERRY_PICK_HEAD`/`REVERT_HEAD`/`rebase-merge` viram respectivamente merge/cherry-pick/revert/
+rebase, e commit de merge só se reproduz com o pai escolhido), a árvore e o conteúdo que o
 Git guarda (`git_tree` devolve exatamente o `ls-files` — nada de andar no disco, e um arquivo que só existe na pasta fica
 de fora até entrar no índice; em `git_file_content` o texto vem de `git show HEAD:<caminho>`, mexer no disco não troca o
 que é lido, binário é dito como binário em vez de imprimir bytes, texto fora de UTF-8 e caminho que o HEAD não tem
@@ -569,6 +593,9 @@ barra final, forquilha de outra pessoa (não conta como o seu clone) e host inte
 | **Árvore** fica em "lendo o índice do git…" ou traz uma linha vermelha | O `git ls-files` daquela pasta não respondeu — índice travado (`index.lock`), pasta que deixou de ser repositório, ou o prazo de 30 s do git estourado. | O ícone de atualizar da seção relê o índice. A árvore nunca mostra uma lista velha como se fosse a atual. |
 | O arquivo abre com uma faixa âmbar em vez de texto | É o estado lido do Git, não um erro de tela: **arquivo binário** (não há texto para mostrar), **não está em UTF-8**, ou **conteúdo cortado** acima de 512 KiB. | *Abrir no editor* mostra o arquivo inteiro. O aplicativo não reimprime na tela bytes que não são texto. |
 | A aba **Local** abre mostrando "Nenhum repositório aberto" | A pasta mapeada deixou de ser um repositório Git (ou saiu do disco) — a seção Git embutida lê o que está lá e diz o que não está. | *Projetos* → atualizar a detecção daquela pasta, ou **Mapear pasta local** de novo na aba Visão geral. |
+| *Guardar* está apagado, ou responde "nada para guardar" | A pasta não tem alteração (`git status` limpo), ou há conflito esperando resolução — com conflito, guardar é recusado antes de falar com o Git. | A barra de **Alterações** mostra o que está em andamento. Resolva ou cancele aquilo; o botão reabilita quando o Git reporta alteração. |
+| *Aplicar e tirar* deixou a pasta em conflito e o guardado **continua** na lista | É o que o Git faz de propósito: aplicação com conflito não descarta a entrada, para você não perder o trabalho. | Escolha o lado de cada arquivo e conclua. Quando a pasta estiver como você quer, *Excluir* o guardado — a barra diz que aquilo não é merge nem rebase, então não há o que cancelar. |
+| *Reproduzir este commit* parou e a barra diz "o cherry-pick em andamento" | O commit toca as mesmas linhas que este ramo já tem, ou já está aplicado e não sobrou mudança nenhuma. | *Continuar* depois de escolher o lado de cada arquivo, *Cancelar* para voltar ao estado de antes, ou *Pular este passo* quando o Git avisa que não há mudança a aplicar. |
 | Acesso diz que o remoto "não aponta para um repositório acessível" | URL do remoto errada, ou repositório privado sem liberação. | Confira **Remotos** (o nome aparece no veredito, nunca a URL) e refaça o teste. |
 | Painel mostra "ssh-agent ... sem nenhuma chave carregada" | O agente está rodando, mas vazio. | `ssh-add ~/.ssh/id_ed25519`. Sem chave no agente, todo remoto SSH pede credencial que a aplicação não pode digitar por você. |
 | Teste falha com "Chave de host desconhecida ou alterada" | O host ainda não está no `known_hosts` (ou a chave dele mudou). | Abra uma sessão desse servidor no **terminal integrado**: o OpenSSH pergunta dentro da sessão e, se você confirmar, a chave entra no `known_hosts`. Depois repita o teste. A aplicação nunca aceita a chave sozinha — se a chave *mudou*, investigue antes de aceitar. |

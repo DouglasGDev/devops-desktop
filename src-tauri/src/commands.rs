@@ -1300,6 +1300,8 @@ async fn git_rebase(
     .await
 }
 
+/// Cancela a operação que o Git tem parada no meio. O `kind` vem do
+/// `RepoStatus.operation`, então a interface cancela exatamente o que existe.
 #[tauri::command]
 async fn git_abort(
     state: State<'_, AppState>,
@@ -1307,31 +1309,43 @@ async fn git_abort(
     kind: String,
 ) -> Result<git::RepoStatus, String> {
     let db = state.db.clone();
-    let merge = match kind.as_str() {
-        "merge" => true,
-        "rebase" => false,
-        other => return Err(format!("operação a cancelar desconhecida: {other}")),
-    };
-    let detail = format!("cancelamento do {}", if merge { "merge" } else { "rebase" });
+    let detail = format!("cancelamento da operação {kind}");
     git_write(db, project_id, "git_abort", detail, move |dir| {
-        if merge {
-            git::abort_merge(dir)?;
-        } else {
-            git::abort_rebase(dir)?;
-        }
+        git::abort_operation(dir, &kind)?;
         git::status(dir)
     })
     .await
 }
 
+/// Retoma a operação depois de resolver os conflitos, usando a mensagem que o
+/// próprio git preparou — nada é commitado por conta própria além do passo que
+/// já estava em andamento.
 #[tauri::command]
-async fn git_continue_rebase(
+async fn git_continue_pending(
     state: State<'_, AppState>,
     project_id: i64,
+    kind: String,
 ) -> Result<GitActionOutcome, String> {
     let db = state.db.clone();
-    git_write(db, project_id, "git_continue_rebase", "continuação do rebase".into(), move |dir| {
-        git::continue_rebase(dir).map(outcome)
+    let detail = format!("continuação da operação {kind}");
+    git_write(db, project_id, "git_continue_pending", detail, move |dir| {
+        git::continue_operation(dir, &kind).map(outcome)
+    })
+    .await
+}
+
+/// Abandona o passo parado sem gravar nada dele, quando o git avisa que não
+/// sobrou mudança nenhuma a aplicar.
+#[tauri::command]
+async fn git_skip_pending(
+    state: State<'_, AppState>,
+    project_id: i64,
+    kind: String,
+) -> Result<GitActionOutcome, String> {
+    let db = state.db.clone();
+    let detail = format!("pular o passo da operação {kind}");
+    git_write(db, project_id, "git_skip_pending", detail, move |dir| {
+        git::skip_operation(dir, &kind).map(outcome)
     })
     .await
 }
@@ -1370,6 +1384,102 @@ async fn git_revert(
     );
     git_write(db, project_id, "git_revert", detail, move |dir| {
         git::revert(dir, &commit, mainline).map(outcome)
+    })
+    .await
+}
+
+/// Reproduz um commit de outro ramo gravando um novo aqui. Nada do ramo de
+/// origem muda e nada vai ao remoto por conta própria.
+#[tauri::command]
+async fn git_cherry_pick(
+    state: State<'_, AppState>,
+    project_id: i64,
+    commit: String,
+    mainline: Option<i64>,
+) -> Result<GitActionOutcome, String> {
+    let db = state.db.clone();
+    let detail = format!(
+        "reprodução do commit {commit}{}",
+        mainline.map(|m| format!(" (pai {m} do merge)")).unwrap_or_default()
+    );
+    git_write(db, project_id, "git_cherry_pick", detail, move |dir| {
+        git::cherry_pick(dir, &commit, mainline).map(outcome)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn git_stash_list(
+    state: State<'_, AppState>,
+    project_id: i64,
+) -> Result<Vec<git::StashEntry>, String> {
+    let db = state.db.clone();
+    git_read(db, project_id, git::stash_list).await
+}
+
+#[tauri::command]
+async fn git_stash_push(
+    state: State<'_, AppState>,
+    project_id: i64,
+    message: Option<String>,
+    include_untracked: Option<bool>,
+) -> Result<GitActionOutcome, String> {
+    let db = state.db.clone();
+    let inclui = include_untracked.unwrap_or(false);
+    let recado = trim_opt(message);
+    // A auditoria guarda só o assunto, nunca o texto inteiro digitado.
+    let detail = format!(
+        "guardar trabalho{}",
+        recado.as_deref().map(|m| format!(": {}", subject_line(m))).unwrap_or_default()
+    );
+    let nota = if inclui { " (com não rastreados)" } else { "" };
+    git_write(
+        db,
+        project_id,
+        "git_stash_push",
+        format!("{detail}{nota}"),
+        move |dir| git::stash_push(dir, recado.as_deref(), inclui).map(outcome),
+    )
+    .await
+}
+
+/// `pop` retira o guardado da lista depois de aplicar; `apply` deixa lá. Em
+/// conflito o git mantém a entrada dos dois jeitos, e a frase devolvida diz isso.
+#[tauri::command]
+async fn git_stash_apply(
+    state: State<'_, AppState>,
+    project_id: i64,
+    index: i64,
+    pop: Option<bool>,
+) -> Result<GitActionOutcome, String> {
+    if index < 0 {
+        return Err("índice de guardado inválido".into());
+    }
+    let indice = index as usize;
+    let aplicar = pop.unwrap_or(false);
+    let db = state.db.clone();
+    let detail = format!(
+        "{} do guardado {indice}",
+        if aplicar { "aplicar e retirar" } else { "aplicar" }
+    );
+    git_write(db, project_id, "git_stash_apply", detail, move |dir| {
+        git::stash_apply(dir, indice, aplicar).map(outcome)
+    })
+    .await
+}
+
+/// Excluir um guardado descarta aquele trabalho — a interface confirma antes e
+/// nada aqui apaga sozinho.
+#[tauri::command]
+async fn git_stash_drop(state: State<'_, AppState>, project_id: i64, index: i64) -> Result<GitActionOutcome, String> {
+    if index < 0 {
+        return Err("índice de guardado inválido".into());
+    }
+    let indice = index as usize;
+    let db = state.db.clone();
+    let detail = format!("excluir o guardado {indice}");
+    git_write(db, project_id, "git_stash_drop", detail, move |dir| {
+        git::stash_drop(dir, indice).map(outcome)
     })
     .await
 }
@@ -2880,9 +2990,15 @@ pub fn register_all(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri
         git_merge,
         git_rebase,
         git_abort,
-        git_continue_rebase,
+        git_continue_pending,
+        git_skip_pending,
         git_resolve_conflict,
         git_revert,
+        git_cherry_pick,
+        git_stash_list,
+        git_stash_push,
+        git_stash_apply,
+        git_stash_drop,
         git_reset,
         git_fetch,
         git_pull,
