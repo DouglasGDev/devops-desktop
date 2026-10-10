@@ -29,6 +29,9 @@ servidor ou no repositório. Quando uma etapa obrigatória falha, a interface mo
 - [Solução de problemas](#13-solução-de-problemas)
 - [Contribuição e licença](#14-contribuição-e-licença)
 
+O registro por etapa do que já está entregue, onde está o código, como se prova cada parte e o que falta para retomar
+está em [docs/ENTREGAS.md](docs/ENTREGAS.md).
+
 ---
 
 ## 2. O que o aplicativo faz
