@@ -1184,6 +1184,23 @@ pub fn fetch(dir: &Path, remote: Option<&str>) -> Result<String, String> {
     }
 }
 
+/// Traz a cabeça de um pull request para o repositório local e muda para uma
+/// branch de leitura (`github/pr-<n>`). O refspec `refs/pull/<n>/head` é público
+/// e só de leitura: nada é escrito no remoto. A branch usa `-B` porque pode
+/// existir de uma leitura anterior e deve apontar para o que acabou de chegar.
+pub fn checkout_pull(dir: &Path, remote: &str, number: i64) -> Result<String, String> {
+    validate_id(remote)?;
+    if number <= 0 {
+        return Err("número de pull request inválido".into());
+    }
+    let branch = format!("github/pr-{number}");
+    run(dir, &["fetch", remote, &format!("refs/pull/{number}/head")])
+        .map_err(|e| format!("não foi possível buscar o pull request #{number}: {e}"))?;
+    run(dir, &["checkout", "-B", &branch, "FETCH_HEAD"])
+        .map_err(|e| format!("o pull request #{number} foi buscado, mas a mudança para {branch} falhou: {e}"))?;
+    Ok(branch)
+}
+
 /// `--ff-only` por padrão: nunca cria merge automático sem o usuário pedir.
 pub fn pull(dir: &Path, strategy: &str) -> Result<String, String> {
     let flag = match strategy {
@@ -2122,6 +2139,31 @@ mod tests {
         let pull_msg = pull(&destino, "ff-only").unwrap();
         assert!(pull_msg.contains("Already up to date") || pull_msg.contains("atualizado"));
         assert!(pull(&destino, "esquisita").is_err());
+
+        let _ = std::fs::remove_dir_all(&pais);
+        let _ = std::fs::remove_dir_all(&origem);
+    }
+
+    #[test]
+    fn buscar_um_pull_request_inexistente_nao_cria_branch_fantasma() {
+        let origem = temp_repo("pr-origem");
+        write(&origem, "a.txt", "a\n");
+        stage(&origem, &["a.txt".into()]).unwrap();
+        commit(&origem, "primeiro", false).unwrap();
+        let pais = temp_dir("prclonede");
+        let destino = pais.join("work");
+        clone(&pais, &url(&origem), Some("work"), None).unwrap();
+
+        // Um repositório local não publica refs/pull/*: a falha é devolvida como
+        // falha, e nenhuma branch de leitura é criada.
+        let erro = checkout_pull(&destino, "origin", 7).unwrap_err();
+        assert!(erro.contains("pull request #7"), "mensagem: {erro}");
+        assert!(
+            run(&destino, &["show-ref", "--verify", "refs/heads/github/pr-7"]).is_err(),
+            "criou a branch mesmo com o fetch tendo falhado"
+        );
+        assert!(checkout_pull(&destino, "origin", 0).is_err());
+        assert!(checkout_pull(&destino, "origin com espaço", 1).is_err());
 
         let _ = std::fs::remove_dir_all(&pais);
         let _ = std::fs::remove_dir_all(&origem);

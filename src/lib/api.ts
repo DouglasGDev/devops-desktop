@@ -18,9 +18,15 @@ import type {
   GitIdentity,
   GitHubConnectResult,
   GitHubDeviceFlow,
+  GitHubInbox,
+  GitHubIssue,
   GitHubPull,
+  GitHubPullDetail,
   GitHubRepo,
+  GitHubRun,
   GitHubStatus,
+  MergeMethod,
+  ReviewEvent,
   GraphRow,
   ImportSshHost,
   Project,
@@ -370,5 +376,33 @@ export const api = {
         private: params.private,
         description: params.description ?? null,
       },
+    }),
+  githubInbox: () => invoke<GitHubInbox>("github_inbox"),
+  githubPullDetail: (repo: string, number: number) =>
+    invoke<GitHubPullDetail>("github_pull_detail", { input: { repo, number } }),
+  githubPullFiles: (repo: string, number: number) =>
+    invoke<FileDiff[]>("github_pull_files", { input: { repo, number } }),
+  githubIssues: (repo: string) => invoke<GitHubIssue[]>("github_issues", { repo }),
+  githubRuns: (repo: string) => invoke<GitHubRun[]>("github_runs", { repo }),
+  githubCreateIssue: (params: { repo: string; title: string; body?: string | null }) =>
+    invoke<GitHubIssue>("github_create_issue", {
+      input: { repo: params.repo, title: params.title, body: params.body ?? null },
+    }),
+  githubComment: (params: { repo: string; number: number; body: string }) =>
+    invoke<void>("github_comment", { input: params }),
+  githubCloseIssue: (repo: string, number: number) =>
+    invoke<void>("github_close_issue", { input: { repo, number } }),
+  githubReview: (params: { repo: string; number: number; event: ReviewEvent; body?: string | null }) =>
+    invoke<void>("github_review", {
+      input: { repo: params.repo, number: params.number, event: params.event, body: params.body ?? null },
+    }),
+  githubMerge: (params: { repo: string; number: number; method: MergeMethod; sha: string }) =>
+    invoke<string>("github_merge", { input: params }),
+  githubRerun: (repo: string, runId: number) => invoke<void>("github_rerun", { input: { repo, runId } }),
+  gitCheckoutPull: (projectId: number, number: number, remote?: string | null) =>
+    invoke<GitActionOutcome>("git_checkout_pull", {
+      projectId,
+      number,
+      remote: remote ?? null,
     }),
 };

@@ -202,3 +202,36 @@ export const UndoIcon = makeIcon(
 export const StarIcon = makeIcon(
   <path d="m12 2 3.09 6.26L22 9.27l-5 4.87L18.18 21 12 17.27 5.82 21 7 14.14l-5-4.87 6.91-1.01L12 2z" />,
 );
+
+export const InboxIcon = makeIcon(
+  <>
+    <polyline points="22 12 16 12 14 15 10 15 8 12 2 12" />
+    <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+  </>,
+);
+
+export const IssueIcon = makeIcon(
+  <>
+    <circle cx="12" cy="12" r="9" />
+    <circle cx="12" cy="12" r="2.5" />
+  </>,
+);
+
+export const ChecksIcon = makeIcon(
+  <>
+    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+    <path d="m22 4-10 10.01-3-3" />
+  </>,
+);
+
+export const CommentIcon = makeIcon(
+  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+);
+
+export const MergeIcon = makeIcon(
+  <>
+    <circle cx="18" cy="18" r="3" />
+    <circle cx="6" cy="6" r="3" />
+    <path d="M6 21V9a9 9 0 0 0 9 9" />
+  </>,
+);

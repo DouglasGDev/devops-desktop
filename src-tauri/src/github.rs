@@ -645,6 +645,618 @@ pub struct CreateRepoInput {
     pub description: Option<String>,
 }
 
+// ------------------------------------------------------------- workspace
+//
+// As rotas abaixo são o que faz a seção GitHub ser um posto de trabalho e não
+// uma lista: a bandeja com o que é meu, o pull request com o diff real e as
+// ações de revisar/mergear, as issues, e o estado do CI. Os métodos HTTP são
+// literais deste arquivo; o que vem da interface é no máximo o `dono/repo`
+// (validado por `parse_slug`) e números, então nenhuma URL é montada a partir
+// de texto livre.
+
+/// Chama a API autenticada. Rotas de escrita respondem 201/204 sem corpo — ali
+/// o corpo vazio é sucesso, não erro de leitura.
+fn api_json(method: &str, url: &str, token: &str, body: Option<Value>) -> Result<Value, String> {
+    let req = ureq::request(method, url)
+        .timeout(REQUEST_TIMEOUT)
+        .set("Accept", "application/vnd.github+json")
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("X-GitHub-Api-Version", "2022-11-28");
+    let resp = match body {
+        Some(b) => req.send_json(b),
+        None => req.call(),
+    }
+    .map_err(describe)?;
+    let codigo = resp.status();
+    match read_json(resp) {
+        Ok(v) => Ok(v),
+        Err(_) if codigo == 201 || codigo == 204 => Ok(json!({ "ok": true })),
+        Err(e) => Err(e),
+    }
+}
+
+/// `https://api.github.com/repos/<dono>/<nome><rota>`, com o slug validado e
+/// cada segmento codificado.
+fn repo_url(slug: &str, rota: &str) -> Result<String, String> {
+    let (owner, name) = parse_slug(slug)?;
+    Ok(format!(
+        "{API_BASE}/repos/{}/{}{rota}",
+        urlencoded(&owner),
+        urlencoded(&name)
+    ))
+}
+
+fn corpo_texto(body: &str, limite: usize, o_que: &str) -> Result<String, String> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return Err(format!("escreva {o_que} antes de enviar"));
+    }
+    if trimmed.len() > limite || trimmed.contains('\0') {
+        return Err(format!("{o_que} deve ter no máximo {limite} caracteres"));
+    }
+    Ok(trimmed.to_string())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubSearchItem {
+    pub number: i64,
+    pub title: String,
+    /// `dono/repo` — vem embutido na resposta da busca.
+    pub repo: String,
+    pub author: Option<String>,
+    pub state: String,
+    pub is_pull_request: bool,
+    pub draft: bool,
+    pub url: String,
+    pub updated_at: Option<String>,
+}
+
+fn parse_search_item(v: &Value) -> Option<GitHubSearchItem> {
+    let number = v.get("number").and_then(Value::as_i64)?;
+    let repo = v.get("repository").and_then(|r| str_field(r, "full_name"))?;
+    Some(GitHubSearchItem {
+        number,
+        title: str_field(v, "title").unwrap_or_else(|| "(sem título)".to_string()),
+        repo,
+        author: v.get("user").and_then(|u| str_field(u, "login")),
+        state: str_field(v, "state").unwrap_or_else(|| "open".to_string()),
+        is_pull_request: e_pull_request(v),
+        draft: v.get("draft").and_then(Value::as_bool).unwrap_or(false),
+        url: str_field(v, "html_url").unwrap_or_default(),
+        updated_at: str_field(v, "updated_at"),
+    })
+}
+
+fn search(state: &GitHubState, query: &str) -> Result<Vec<GitHubSearchItem>, String> {
+    let token = require_token(state)?;
+    let url = format!(
+        "{API_BASE}/search/issues?per_page=30&sort=updated&order=desc&q={}",
+        urlencoded(query)
+    );
+    let body = get_json(&url, &token)?;
+    let items = body
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "a busca do GitHub veio em formato inesperado".to_string())?;
+    Ok(items.iter().filter_map(parse_search_item).collect())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubInbox {
+    pub review_requests: Vec<GitHubSearchItem>,
+    pub my_pulls: Vec<GitHubSearchItem>,
+    pub my_issues: Vec<GitHubSearchItem>,
+}
+
+/// A bandeja da conta: o que pediram para você revisar, o que você abriu e o
+/// que está atribuído a você. As três leituras são da API de busca no momento;
+/// um item sem `repository` na resposta é descartado, porque sem o repositório
+/// não há onde abri-lo.
+pub fn inbox(state: &GitHubState) -> Result<GitHubInbox, String> {
+    Ok(GitHubInbox {
+        review_requests: search(state, "is:pr review-requested:@me state:open")?,
+        my_pulls: search(state, "is:pr author:@me state:open")?,
+        my_issues: search(state, "is:issue assignees:@me state:open")?,
+    })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullDetail {
+    pub number: i64,
+    pub title: String,
+    pub state: String,
+    pub author: Option<String>,
+    pub head_ref: String,
+    pub base_ref: String,
+    /// SHA da cabeça no momento da leitura: é o commit que vai entrar no merge,
+    /// e a interface mergeia exatamente ele.
+    pub head_sha: String,
+    pub draft: bool,
+    /// `None` enquanto o GitHub ainda calcula — a tela diz isso em vez de
+    /// afirmar que dá (ou não) para mergear.
+    pub mergeable: Option<bool>,
+    pub mergeable_state: Option<String>,
+    pub additions: i64,
+    pub deletions: i64,
+    pub changed_files: i64,
+    pub body: Option<String>,
+    pub updated_at: Option<String>,
+    pub url: String,
+}
+
+fn parse_pull_detail(v: &Value) -> Result<PullDetail, String> {
+    let number = v
+        .get("number")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "o pull request veio sem número na resposta".to_string())?;
+    Ok(PullDetail {
+        number,
+        title: str_field(v, "title").unwrap_or_else(|| "(sem título)".to_string()),
+        state: str_field(v, "state").unwrap_or_else(|| "open".to_string()),
+        author: v.get("user").and_then(|u| str_field(u, "login")),
+        head_ref: v.get("head").and_then(|h| str_field(h, "ref")).unwrap_or_default(),
+        base_ref: v.get("base").and_then(|b| str_field(b, "ref")).unwrap_or_default(),
+        head_sha: v.get("head").and_then(|h| str_field(h, "sha")).unwrap_or_default(),
+        draft: v.get("draft").and_then(Value::as_bool).unwrap_or(false),
+        mergeable: v.get("mergeable").and_then(Value::as_bool),
+        mergeable_state: str_field(v, "mergeable_state"),
+        additions: v.get("additions").and_then(Value::as_i64).unwrap_or(0),
+        deletions: v.get("deletions").and_then(Value::as_i64).unwrap_or(0),
+        changed_files: v.get("changed_files").and_then(Value::as_i64).unwrap_or(0),
+        body: str_field(v, "body").filter(|b| !b.trim().is_empty()),
+        updated_at: str_field(v, "updated_at"),
+        url: str_field(v, "html_url").unwrap_or_default(),
+    })
+}
+
+pub fn pull_detail(state: &GitHubState, slug: &str, number: i64) -> Result<PullDetail, String> {
+    let token = require_token(state)?;
+    let url = repo_url(slug, &format!("/pulls/{number}"))?;
+    let body = get_json(&url, &token)?;
+    parse_pull_detail(&body)
+}
+
+/// O que o GitHub chama de status vira o caractere que a tela de diff já usa.
+fn letra_do_status(status: &str) -> char {
+    match status {
+        "added" => 'A',
+        "removed" => 'D',
+        "renamed" => 'R',
+        "copied" => 'C',
+        _ => 'M',
+    }
+}
+
+/// O GitHub manda o patch **sem** o cabeçalho `diff --git`, então ele é
+/// recomposto para o arquivo passar pelo mesmo parser do diff local: a revisão
+/// de um pull request usa exatamente a mesma tela de um diff da própria pasta.
+pub fn diff_de_arquivo_de_pr(item: &Value) -> Option<Vec<crate::git::FileDiff>> {
+    let filename = str_field(item, "filename")?;
+    let status = str_field(item, "status").unwrap_or_else(|| "modified".to_string());
+    let mut texto = format!("diff --git a/{filename} b/{filename}\n");
+    if let Some(anterior) = str_field(item, "previous_filename") {
+        texto.push_str(&format!("rename from {anterior}\nrename to {filename}\n"));
+    }
+    match str_field(item, "patch") {
+        Some(p) => {
+            texto.push_str(&p);
+            texto.push('\n');
+        }
+        // Sem patch o GitHub não devolve conteúdo (arquivo binário ou grande
+        // demais): mostra o arquivo com a mudança anotada, sem hunks.
+        None => texto.push_str("Binary files differ\n"),
+    }
+    let letra = letra_do_status(&status);
+    let mut arquivos = crate::git::parse_diff(&texto);
+    for f in arquivos.iter_mut() {
+        f.status_char = letra;
+    }
+    Some(arquivos)
+}
+
+pub fn pull_files(state: &GitHubState, slug: &str, number: i64) -> Result<Vec<crate::git::FileDiff>, String> {
+    let token = require_token(state)?;
+    let url = format!(
+        "{}?per_page=100",
+        repo_url(slug, &format!("/pulls/{number}/files"))?
+    );
+    let body = get_json(&url, &token)?;
+    let itens = body
+        .as_array()
+        .ok_or_else(|| "a lista de arquivos do pull request veio em formato inesperado".to_string())?;
+    let mut out = Vec::new();
+    for item in itens {
+        if let Some(mut partes) = diff_de_arquivo_de_pr(item) {
+            out.append(&mut partes);
+        }
+    }
+    Ok(out)
+}
+
+/// O SHA que pode ir no merge: `>= 7` hex, lido do detalhe do pull request.
+fn sha_suficiente(sha: &str) -> bool {
+    sha.len() >= 7 && sha.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Na API do GitHub todo pull request também é uma issue. Isto diz quando o
+/// objeto é um PR — a lista de issues da tela não mostra pull request.
+fn e_pull_request(v: &Value) -> bool {
+    v.get("pull_request").is_some()
+}
+
+/// A descrição vem na própria lista da API. Vazio não vira linha na tela e o
+/// texto gigante é cortado no fim de uma char, com aviso de que há mais.
+fn descricao_da_lista(v: &Value, limite: usize) -> Option<String> {
+    let bruta = v.get("body").and_then(Value::as_str)?.trim();
+    if bruta.is_empty() {
+        return None;
+    }
+    let mut texto = bruta.to_string();
+    if texto.len() > limite {
+        let mut fim = limite;
+        while !texto.is_char_boundary(fim) {
+            fim -= 1;
+        }
+        texto.truncate(fim);
+        texto.push_str("… (descrição cortada; abra no site para ler inteira)");
+    }
+    Some(texto)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubIssue {
+    pub number: i64,
+    pub title: String,
+    pub state: String,
+    pub author: Option<String>,
+    pub labels: Vec<String>,
+    pub comments: i64,
+    pub body: Option<String>,
+    pub updated_at: Option<String>,
+    pub url: String,
+}
+
+fn parse_issue(v: &Value) -> Option<GitHubIssue> {
+    let number = v.get("number").and_then(Value::as_i64)?;
+    let labels = v
+        .get("labels")
+        .and_then(Value::as_array)
+        .map(|l| {
+            l.iter()
+                .filter_map(|x| str_field(x, "name"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some(GitHubIssue {
+        number,
+        title: str_field(v, "title").unwrap_or_else(|| "(sem título)".to_string()),
+        state: str_field(v, "state").unwrap_or_else(|| "open".to_string()),
+        author: v.get("user").and_then(|u| str_field(u, "login")),
+        labels,
+        comments: v.get("comments").and_then(Value::as_i64).unwrap_or(0),
+        body: descricao_da_lista(v, 4000),
+        updated_at: str_field(v, "updated_at"),
+        url: str_field(v, "html_url").unwrap_or_default(),
+    })
+}
+
+/// A rota `/issues` do GitHub devolve pull requests misturados (todo PR é uma
+/// issue). Eles são filtrados aqui: a aba de issues mostra issues.
+pub fn issues(state: &GitHubState, slug: &str) -> Result<Vec<GitHubIssue>, String> {
+    let token = require_token(state)?;
+    let url = format!(
+        "{}?state=open&per_page=50&sort=updated",
+        repo_url(slug, "/issues")?
+    );
+    let body = get_json(&url, &token)?;
+    let itens = body
+        .as_array()
+        .ok_or_else(|| "a lista de issues veio em formato inesperado".to_string())?;
+    Ok(itens
+        .iter()
+        .filter(|v| !e_pull_request(v))
+        .filter_map(parse_issue)
+        .collect())
+}
+
+pub fn create_issue(
+    conn: &Connection,
+    state: &GitHubState,
+    slug: &str,
+    title: &str,
+    body: Option<&str>,
+) -> Result<GitHubIssue, String> {
+    let token = require_token(state)?;
+    let title = corpo_texto(title, 256, "o título da issue")?;
+    let url = repo_url(slug, "/issues")?;
+    let resposta = api_json(
+        "POST",
+        &url,
+        &token,
+        Some(json!({
+            "title": title,
+            "body": body.map(str::trim).filter(|b| !b.is_empty()),
+        })),
+    )?;
+    let issue = parse_issue(&resposta).ok_or_else(|| "a issue criada não veio completa na resposta".to_string())?;
+    audit::log(
+        conn,
+        "warning",
+        "github",
+        "Issue aberta no GitHub",
+        None,
+        None,
+        None,
+        Some(&format!("{} · #{}", issue.number, slug_para_log(slug))),
+    )?;
+    Ok(issue)
+}
+
+/// Comentário em issue **ou** pull request: é a mesma rota do GitHub (todo PR é
+/// uma issue), por isso uma função só.
+pub fn comment(
+    conn: &Connection,
+    state: &GitHubState,
+    slug: &str,
+    number: i64,
+    body: &str,
+) -> Result<(), String> {
+    let token = require_token(state)?;
+    let body = corpo_texto(body, 65_000, "o comentário")?;
+    let url = repo_url(slug, &format!("/issues/{number}/comments"))?;
+    api_json("POST", &url, &token, Some(json!({ "body": body })))?;
+    audit::log(
+        conn,
+        "info",
+        "github",
+        "Comentário publicado no GitHub",
+        None,
+        None,
+        None,
+        Some(&format!("#{number} · {}", slug_para_log(slug))),
+    )
+}
+
+pub fn close_issue(conn: &Connection, state: &GitHubState, slug: &str, number: i64) -> Result<(), String> {
+    let token = require_token(state)?;
+    let url = repo_url(slug, &format!("/issues/{number}"))?;
+    api_json("PATCH", &url, &token, Some(json!({ "state": "closed" })))?;
+    audit::log(
+        conn,
+        "warning",
+        "github",
+        "Issue fechada no GitHub",
+        None,
+        None,
+        None,
+        Some(&format!("#{number} · {}", slug_para_log(slug))),
+    )
+}
+
+/// Os três eventos que a API aceita para revisão de pull request.
+fn valid_event_review(event: &str) -> Result<&'static str, String> {
+    match event {
+        "APPROVE" => Ok("APPROVE"),
+        "REQUEST_CHANGES" => Ok("REQUEST_CHANGES"),
+        "COMMENT" => Ok("COMMENT"),
+        other => Err(format!("tipo de revisão inválido: {other}")),
+    }
+}
+
+/// Os três métodos de merge do GitHub. `sha` é a cabeça lida no detalhe do PR:
+/// mergear sem ele poderia incluir commits que chegaram depois da revisão.
+fn valid_metodo_merge(method: &str) -> Result<&'static str, String> {
+    match method {
+        "merge" => Ok("merge"),
+        "squash" => Ok("squash"),
+        "rebase" => Ok("rebase"),
+        other => Err(format!("método de merge inválido: {other}")),
+    }
+}
+
+pub fn review_pull(
+    conn: &Connection,
+    state: &GitHubState,
+    slug: &str,
+    number: i64,
+    event: &str,
+    body: Option<&str>,
+) -> Result<(), String> {
+    let token = require_token(state)?;
+    let event = valid_event_review(event)?;
+    let url = repo_url(slug, &format!("/pulls/{number}/reviews"))?;
+    api_json(
+        "POST",
+        &url,
+        &token,
+        Some(json!({
+            "event": event,
+            "body": body.map(str::trim).filter(|b| !b.is_empty()),
+        })),
+    )?;
+    let o_que = match event {
+        "APPROVE" => "Pull request aprovado no GitHub",
+        "REQUEST_CHANGES" => "Alterações pedidas no GitHub",
+        _ => "Revisão comentada no GitHub",
+    };
+    audit::log(
+        conn,
+        "warning",
+        "github",
+        o_que,
+        None,
+        None,
+        None,
+        Some(&format!("#{number} · {}", slug_para_log(slug))),
+    )
+}
+
+pub fn merge_pull(
+    conn: &Connection,
+    state: &GitHubState,
+    slug: &str,
+    number: i64,
+    method: &str,
+    sha: &str,
+) -> Result<String, String> {
+    let token = require_token(state)?;
+    let method = valid_metodo_merge(method)?;
+    if !sha_suficiente(sha) {
+        return Err("o commit que seria mergido não foi lido do GitHub; atualize o pull request".into());
+    }
+    let url = repo_url(slug, &format!("/pulls/{number}/merge"))?;
+    let resposta = api_json(
+        "PUT",
+        &url,
+        &token,
+        Some(json!({ "sha": sha, "merge_method": method })),
+    )?;
+    let mensagem = str_field(&resposta, "message").unwrap_or_else(|| "merge aceito".to_string());
+    audit::log(
+        conn,
+        "warning",
+        "github",
+        "Pull request mesclado no GitHub",
+        None,
+        None,
+        None,
+        Some(&format!("#{number} · {method} · {}", slug_para_log(slug))),
+    )?;
+    Ok(mensagem)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubRun {
+    pub id: i64,
+    pub name: String,
+    pub display_title: String,
+    pub head_branch: String,
+    pub event: String,
+    /// "queued" | "in_progress" | "completed" …
+    pub status: String,
+    /// Só existe quando o trabalho terminou: success, failure, cancelled…
+    pub conclusion: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub url: String,
+}
+
+fn parse_run(v: &Value) -> Option<GitHubRun> {
+    let id = v.get("id").and_then(Value::as_i64)?;
+    Some(GitHubRun {
+        id,
+        name: str_field(v, "name").unwrap_or_else(|| "(sem nome)".to_string()),
+        display_title: str_field(v, "display_title").unwrap_or_default(),
+        head_branch: str_field(v, "head_branch").unwrap_or_default(),
+        event: str_field(v, "event").unwrap_or_default(),
+        status: str_field(v, "status").unwrap_or_else(|| "desconhecido".to_string()),
+        conclusion: str_field(v, "conclusion"),
+        created_at: str_field(v, "created_at"),
+        updated_at: str_field(v, "updated_at"),
+        url: str_field(v, "html_url").unwrap_or_default(),
+    })
+}
+
+/// As execuções de workflow do repositório — o que costuma ser a primeira
+/// pergunta de quem faz deploy: o que rodou, o que passou, o que quebrou.
+pub fn runs(state: &GitHubState, slug: &str) -> Result<Vec<GitHubRun>, String> {
+    let token = require_token(state)?;
+    let url = format!("{}?per_page=25", repo_url(slug, "/actions/runs")?);
+    let body = get_json(&url, &token)?;
+    let itens = body
+        .get("workflow_runs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "a lista de execuções do Actions veio em formato inesperado".to_string())?;
+    Ok(itens.iter().filter_map(parse_run).collect())
+}
+
+pub fn rerun(conn: &Connection, state: &GitHubState, slug: &str, run_id: i64) -> Result<(), String> {
+    let token = require_token(state)?;
+    let url = repo_url(slug, &format!("/actions/runs/{run_id}/reruns"))?;
+    api_json("POST", &url, &token, None)?;
+    audit::log(
+        conn,
+        "warning",
+        "github",
+        "Execução do Actions reexecutada",
+        None,
+        None,
+        None,
+        Some(&format!("run {run_id} · {}", slug_para_log(slug))),
+    )
+}
+
+/// O log nunca recebe o slug cru com o que o usuário digitou: só o que já foi
+/// validado como `dono/repo`.
+fn slug_para_log(slug: &str) -> String {
+    match parse_slug(slug) {
+        Ok((owner, name)) => format!("{owner}/{name}"),
+        Err(_) => "repositório?".to_string(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullNumberInput {
+    pub repo: String,
+    pub number: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentInput {
+    pub repo: String,
+    pub number: i64,
+    pub body: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewInput {
+    pub repo: String,
+    pub number: i64,
+    pub event: String,
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeInput {
+    pub repo: String,
+    pub number: i64,
+    pub method: String,
+    pub sha: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewIssueInput {
+    pub repo: String,
+    pub title: String,
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseIssueInput {
+    pub repo: String,
+    pub number: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RerunInput {
+    pub repo: String,
+    pub run_id: i64,
+}
+
 impl ConnectResult {
     fn pending() -> Self {
         Self {
@@ -871,6 +1483,162 @@ mod tests {
             dica_do_client_id(error_for(401), id),
             error_for(401).to_string()
         );
+    }
+
+    #[test]
+    fn a_bandeja_so_tem_item_se_a_busca_diz_o_repositorio() {
+        let completo: Value = serde_json::from_str(
+            r#"{"number":7,"title":"Ajuste","state":"open","html_url":"https://github.com/a/b/pull/7",
+                "draft":false,"updated_at":"2026-10-10T12:00:00Z","user":{"login":"douglas"},
+                "pull_request":{"url":"https://api.github.com/x"},"repository":{"full_name":"a/b"}}"#,
+        )
+        .unwrap();
+        let item = parse_search_item(&completo).expect("item com repositório");
+        assert_eq!(item.repo, "a/b");
+        assert!(item.is_pull_request, "a busca marca o que é pull request");
+        assert_eq!(item.author.as_deref(), Some("douglas"));
+
+        // Um item sem `repository` não tem onde ser aberto: é descartado, e a
+        // tela não recebe linha morta.
+        let sem_repo: Value = serde_json::from_str(r#"{"number":8,"title":"X"}"#).unwrap();
+        assert!(parse_search_item(&sem_repo).is_none());
+    }
+
+    #[test]
+    fn o_detalhe_do_pr_nao_inventa_que_da_para_mergear() {
+        // O GitHub responde `mergeable: null` enquanto calcula. Ler isso como
+        // "falso" faria a tela bloquear um merge que está liberado.
+        let calculando: Value = serde_json::from_str(
+            r#"{"number":3,"title":"t","state":"open","head":{"ref":"x","sha":"abc1234"},
+                "base":{"ref":"main"},"mergeable":null,"additions":4,"deletions":1,"changed_files":2}"#,
+        )
+        .unwrap();
+        let d = parse_pull_detail(&calculando).unwrap();
+        assert_eq!(d.mergeable, None, "null não é false");
+        assert_eq!(d.head_sha, "abc1234");
+        assert_eq!((d.additions, d.deletions, d.changed_files), (4, 1, 2));
+
+        let liberado: Value = serde_json::from_str(
+            r#"{"number":3,"title":"t","mergeable":true,"mergeable_state":"clean","draft":false,
+                "head":{"ref":"x","sha":"abc1234"},"base":{"ref":"main"}}"#,
+        )
+        .unwrap();
+        let d = parse_pull_detail(&liberado).unwrap();
+        assert_eq!(d.mergeable, Some(true));
+        assert_eq!(d.mergeable_state.as_deref(), Some("clean"));
+
+        // corpo em branco não vira texto para mostrar
+        let sem_corpo: Value =
+            serde_json::from_str(r#"{"number":4,"title":"t","body":"   ","head":{},"base":{}}"#).unwrap();
+        assert_eq!(parse_pull_detail(&sem_corpo).unwrap().body, None);
+    }
+
+    #[test]
+    fn o_patch_do_pr_passa_pelo_mesmo_parser_do_diff_local() {
+        let novo: Value = serde_json::from_str(
+            r#"{"filename":"src/app.ts","status":"added","patch":"@@ -0,0 +1,2 @@\n+oi\n+tchau"}"#,
+        )
+        .unwrap();
+        let arquivos = diff_de_arquivo_de_pr(&novo).unwrap();
+        assert_eq!(arquivos.len(), 1);
+        assert_eq!(arquivos[0].path, "src/app.ts");
+        assert_eq!(arquivos[0].status_char, 'A');
+        assert_eq!(arquivos[0].hunks[0].lines.len(), 2);
+        assert_eq!(arquivos[0].hunks[0].lines[0].text, "oi");
+
+        // renomeado: o nome anterior vem à esquerda do diff como no git local
+        let renomeado: Value = serde_json::from_str(
+            r#"{"filename":"novo.ts","previous_filename":"velho.ts","status":"renamed","patch":"@@ -1 +1 @@\n-a\n+b"}"#,
+        )
+        .unwrap();
+        let arquivos = diff_de_arquivo_de_pr(&renomeado).unwrap();
+        assert_eq!(arquivos[0].status_char, 'R');
+        assert_eq!(arquivos[0].old_path.as_deref(), Some("velho.ts"));
+
+        // sem patch (binário ou grande demais) o arquivo aparece, mas sem hunks
+        // inventados.
+        let binario: Value = serde_json::from_str(r#"{"filename":"logo.png","status":"added"}"#).unwrap();
+        let arquivos = diff_de_arquivo_de_pr(&binario).unwrap();
+        assert!(arquivos[0].hunks.is_empty(), "sem patch não há linhas para mostrar");
+        assert!(arquivos[0].binary);
+
+        let removido: Value =
+            serde_json::from_str(r#"{"filename":"x.ts","status":"removed","patch":"@@ -1 +0,0 @@\n-y"}"#).unwrap();
+        assert_eq!(diff_de_arquivo_de_pr(&removido).unwrap()[0].status_char, 'D');
+    }
+
+    #[test]
+    fn issue_e_pull_request_se_distinguem_pelo_que_o_github_manda() {
+        let pr: Value = serde_json::from_str(r#"{"number":9,"title":"t","pull_request":{"url":"x"}}"#).unwrap();
+        let issue: Value = serde_json::from_str(
+            r#"{"number":10,"title":"t","state":"open","labels":[{"name":"bug"},{"name":"good first issue"}],"comments":2}"#,
+        )
+        .unwrap();
+        assert!(e_pull_request(&pr));
+        assert!(!e_pull_request(&issue));
+        let lida = parse_issue(&issue).unwrap();
+        assert_eq!(lida.labels, vec!["bug".to_string(), "good first issue".to_string()]);
+        assert_eq!(lida.comments, 2);
+        assert_eq!(lida.body, None, "sem body na resposta não pode virar linha vazia");
+        // a rota /issues devolve PR também; a tela de issues usa este filtro.
+        assert!(parse_issue(&pr).is_some(), "PR é um objeto issue válido para a API");
+
+        let com_corpo: Value =
+            serde_json::from_str(r#"{"number":11,"title":"t","body":"  texto da  issue  "}"#).unwrap();
+        assert_eq!(parse_issue(&com_corpo).unwrap().body.as_deref(), Some("texto da  issue"));
+        let gigante: Value =
+            serde_json::from_str(&format!(r#"{{"number":12,"title":"t","body":"{}"}}"#, "aé".repeat(3000))).unwrap();
+        let cortada = parse_issue(&gigante).unwrap().body.unwrap();
+        assert!(cortada.ends_with("(descrição cortada; abra no site para ler inteira)"));
+        assert!(cortada.chars().count() < 4100, "corte não respeitou o limite");
+    }
+
+    #[test]
+    fn revisar_e_mergear_so_aceitam_o_que_o_github_conhece() {
+        assert_eq!(valid_event_review("APPROVE").unwrap(), "APPROVE");
+        assert_eq!(valid_event_review("REQUEST_CHANGES").unwrap(), "REQUEST_CHANGES");
+        assert_eq!(valid_event_review("COMMENT").unwrap(), "COMMENT");
+        for inventado in ["approve ", "MERGE", "REJECT", ""] {
+            assert!(valid_event_review(inventado).is_err(), "aceitou {inventado:?}");
+        }
+        for metodo in ["merge", "squash", "rebase"] {
+            assert_eq!(valid_metodo_merge(metodo).unwrap(), metodo);
+        }
+        assert!(valid_metodo_merge("fast-forward").is_err());
+    }
+
+    #[test]
+    fn o_commit_do_merge_vem_lido_e_nao_chutado() {
+        assert!(sha_suficiente("abc1234"));
+        assert!(sha_suficiente(
+            "0e3f5a7b9c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f"
+        ));
+        assert!(!sha_suficiente("abc12"), "curto demais para identificar o commit");
+        assert!(!sha_suficiente("main"), "nome de ramo não é commit");
+        assert!(!sha_suficiente("abc123456789012345678901234567890123456789g"));
+    }
+
+    #[test]
+    fn o_log_do_repositorio_nao_leva_o_que_digitaram() {
+        assert_eq!(slug_para_log("DouglasGDev/devops-desktop"), "DouglasGDev/devops-desktop");
+        // texto que não é `dono/repo` nunca chega ao histórico
+        assert_eq!(slug_para_log("máquina/../caminho livre"), "repositório?");
+    }
+
+    #[test]
+    fn o_url_da_rota_sai_do_slug_validado() {
+        let url = repo_url("a/b", "/pulls/12").unwrap();
+        assert_eq!(url, "https://api.github.com/repos/a/b/pulls/12");
+        assert!(repo_url("qualquer coisa solta", "/issues").is_err());
+        assert!(repo_url("a/b", "/issues").unwrap().ends_with("/repos/a/b/issues"));
+    }
+
+    #[test]
+    fn texto_vazio_ou_enorme_nao_vira_comentario() {
+        assert_eq!(corpo_texto("  ola  ", 100, "o comentário").unwrap(), "ola");
+        assert!(corpo_texto("   ", 100, "o comentário").is_err());
+        assert!(corpo_texto(&"a".repeat(200), 100, "o comentário").is_err());
+        assert!(corpo_texto("com \0 dentro", 100, "o comentário").is_err());
     }
 
     #[test]

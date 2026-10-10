@@ -44,7 +44,7 @@ function Shell() {
                   <GitView onNavigate={setView} />
                 </div>
               ) : null}
-              {view === "github" ? <GitHubView /> : null}
+              {view === "github" ? <GitHubView onNavigate={setView} /> : null}
               {view === "history" ? <HistoryView /> : null}
               {view === "settings" ? <SettingsView /> : null}
             </>

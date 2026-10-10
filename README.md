@@ -215,7 +215,7 @@ aplicação, e por isso pode ficar no banco local.
    sem porta aberta.
 2. Marque **Enable Device Flow**, salve e copie o **Client ID** que aparece no topo da página do app. O **Client
    secret** existe só para o fluxo de website com backend e ele **não** vai para nenhum lugar desta aplicação.
-3. No aplicativo, em **GitHub → Client ID da aplicação OAuth**, cole o identificador e salve. O campo aceita os três
+3. No aplicativo, em **GitHub → Configuração → Client ID da OAuth App**, cole o identificador e salve. O campo aceita os três
    formatos que o GitHub já emitiu para um Client ID — os atuais, base62 de ~20 caracteres com maiúsculas e minúsculas
    (`Ov23li…`), os antigos hexadecimais (20 ou 40), e `Iv1.` + hexadecimal de um GitHub App. Token de acesso é recusado
    de propósito (tem `_` ou `-`), para ninguém persistir um segredo nesse campo. **Cuidado com um ponto**: o *Client
@@ -326,19 +326,37 @@ forma cooperativa e registra a execução como cancelada. **Se uma etapa obrigat
 
 ### 9.7 GitHub
 
-Depois de configurar o [Client ID](#85-conta-github-opcional):
+A aba **GitHub** é um posto de trabalho, não uma listagem: tudo que aparece vem de uma chamada autenticada a
+`api.github.com` feita naquele instante, e uma lista vazia é mostrada como vazia.
 
-1. **GitHub → Conectar conta** — digite o código exibido em `github.com/login/device` e autorize. A tela mostra o
-   progresso da espera e o login quando conseguir.
-2. **Repositórios da conta** — lista lida de `api.github.com` no momento (nome, visibilidade, branch padrão, linguagem,
-   tamanho, último push). Em cada linha: **Pull requests** (abre os PRs abertos reais daquele repositório) e **Abrir**
-   (leva ao site).
-3. **Vincular um projeto local a um repositório** — escolha o projeto cadastrado e o repositório; a aplicação cria
-   `origin` (ou substitui a URL existente, depois de avisar). Nenhuma outra coisa muda: sem commit, sem push.
-4. **Criar repositório novo** — nome, descrição opcional e visibilidade. Há confirmação explícita porque a ação é
-   externa e continua visível depois; repositório público é lido por qualquer pessoa.
+1. **Conta** — **Conectar conta** inicia o fluxo de dispositivo do OAuth; digite o código em
+   `github.com/login/device`. O token fica apenas na memória do processo (nunca no SQLite, nos logs ou no disco) e
+   desaparece ao desconectar ou fechar o aplicativo.
+2. **Bandeja** — três leituras da API de busca, cada uma só com o que é seu: *pediram sua revisão*,
+   *seus pull requests* e *issues atribuídas a você*. Clicar num item leva direto ao repositório e à aba certa
+   (pull request ou issue) com aquele número já aberto.
+3. **Repositório** — a coluna da esquerda lista os repositórios da conta com filtro por nome. Ao escolher um, as abas
+   são **Visão geral**, **Pull requests**, **Issues** e **Verificações**.
+   - **Visão geral** mostra o que a API devolveu (visibilidade, branch padrão, linguagem, tamanho, último push) e liga
+     o remoto com a máquina: **Clonar para pasta local** (HTTPS ou SSH), quais projetos já cadastrados apontam para
+     aquele repositório (lido de `git remote` local, não deduzido) e **Vincular como origin**, que grava só a URL e
+     pede confirmação quando já existe um `origin`.
+   - **Pull requests** abre o diff real do PR com o mesmo leitor de patch usado no Git local. Ações: comentar, aprovar,
+     pedir alterações e **Mesclar** — esta última com escolha de método (merge, squash, rebase) e sempre com o SHA que
+     foi lido do detalhe do PR. Enquanto o GitHub estiver calculando a viabilidade, a tela diz isso em vez de afirmar
+     que dá para mesclar. **Buscar ramo do PR** faz `git fetch` de `refs/pull/<n>/head` e cria `github/pr-<n>` no
+     projeto escolhido; um PR inexistente não deixa branch fantasma.
+   - **Issues** lista as abertas (pull requests ficam de fora, porque na API do GitHub todo PR também é issue), mostra a
+     descrição que veio na resposta, cria issue nova, comenta e fecha — fechamento com confirmação explícita.
+   - **Verificações** lê as execuções do Actions com status e conclusão reais, reexecuta um workflow depois de avisar
+     que quem decide os passos é o YAML do repositório, e abre o log no site.
+4. **Novo repositório** — nome, descrição opcional e visibilidade, com confirmação explícita porque a ação é externa e
+   fica visível depois; repositório público é lido por qualquer pessoa.
 
-Se a conta não estiver conectada, a listagem fica vazia com a orientação de conectar — nunca uma tabela de exemplo.
+Escrever no GitHub (comentar, revisar, mesclar, criar/fechar issue, reexecutar) nunca é automático: cada uma dessas
+ações é um botão que você aperta, e todas deixam registro na auditoria sem corpo de mensagem nem token.
+
+Se a conta não estiver conectada, a aba mostra só a conta e o Client ID — nenhuma tabela de exemplo.
 
 ---
 
@@ -443,7 +461,7 @@ cd src-tauri
 cargo test --lib
 ```
 
-Cobertura atual do backend (171 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
+Cobertura atual do backend (181 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
 timeout e cancelamento, sessões PTY, ciclo completo de Git em repositório temporário (status, stage por hunk, commit,
 log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), publicação por Git em clone
 de um remoto `bare` real (`push_tag` leva a tag até o remoto, `delete_remote_tag` tira só a referência de lá, o ramo e a
@@ -475,7 +493,13 @@ integração GitHub: validação de Client ID
 resposta de repositórios, mensagem de erro por status HTTP e **o que o GitHub escreveu no corpo** (`message` na API REST,
 `error_description`/`error` nos endpoints OAuth — sem isso um 404 do fluxo de dispositivo virava frase genérica), o fato
 de que nenhum token aparece na resposta para a
-interface. Nenhum teste de rede é feito: as rotas que falam com o GitHub são exercitadas só na máquina, com dados de
+interface, o workspace do GitHub (a bandeja só ganha item se a busca disser o repositório; o detalhe do pull request
+não afirma que dá para mesclar enquanto o `mergeable` do GitHub for `null`; o patch do PR entra pelo **mesmo** parser do
+diff local, com o cabeçalho `diff --git` que a API não manda; issue e pull request se separam pelo que a própria API
+marca; `APPROVE`/`REQUEST_CHANGES`/`COMMENT` e `merge`/`squash`/`rebase` são os únicos valores aceitos; o SHA do merge é
+o que foi lido no detalhe, com pelo menos sete dígitos hex; o `dono/repo` usado no log de auditoria vem do slug validado,
+nunca do que foi digitado; corpo vazio ou enorme não vira comentário), e a busca do ramo de um pull request no git local —
+um PR que não existe no remoto **não** deixa branch fantasma criado. Nenhum teste de rede é feito: as rotas que falam com o GitHub são exercitadas só na máquina, com dados de
 resposta fixos dentro do próprio teste.
 
 Esses testes usam os binários **reais** do sistema: é requisito da aplicação (e da suíte) ter `git` e `ssh` no `PATH`.
@@ -498,6 +522,11 @@ O frontend é verificado por `npm run build`, que roda `tsc --noEmit` antes do b
 | Linha vermelha no card **Conta GitHub** | A frase vermelha é a resposta do próprio GitHub, não uma falha genérica. **"o GitHub não reconhece o que foi enviado"** = o valor salvo não é um Client ID existente — o caso mais comum é o **Client secret** colado no lugar (ele é hexadecimal, o Client ID dos apps atuais não). As outras duas causas reais são código expirado e `api.github.com` bloqueado por proxy. | Compare com o campo **Client ID** no topo da página do app em `github.com/settings/developers` e cole de novo. Expirou → *Conectar conta* de novo (o código dura ~15 min). Proxy → "sem rede, proxy ou DNS", e a autorização em si fica guardada. Se você salvou o secret, gere um secret novo no GitHub. |
 | "Client ID inválido" para um identificador que existe | O campo aceita os formatos que o GitHub emite como Client ID (`Ov23li…` base62, hex antigo de 20/40, `Iv1.` + hex de GitHub App) e recusa o que tem `_` ou `-` — ou seja, token de acesso. | Confira se copiou o **Client ID** e não um token (`ghp_…`, `github_pat_…`). Um identificador com hífen (UUID) não é Client ID de app nenhum. |
 | *Testar acesso* diz "sem liberação" | O remoto não aceita a credencial desta máquina (chave fora do agente, token revogado, chave não adicionada ao repositório). | Coloque a chave no agente (`ssh-add`), ou use **Liberar pelo navegador** na mesma tela, ou rode `gh auth login` num terminal. Depois repita o teste — é o `git ls-remote` que afirma o resultado, não a interface. |
+| A bandeja vem vazia mas eu tenho pull request aberto | A busca do GitHub devolve só o que é seu: revisão pedida a você, PRs que **você** abriu e issues com **você**. Um PR de outra pessoa, sem pedido de revisão, não aparece aí. | Abra o repositório na coluna da esquerda e veja a aba *Pull requests*, que lista todos os abertos daquele repo. |
+| "o GitHub ainda está calculando se dá para mergear" não sai do lugar | O campo `mergeable` da API vem `null` enquanto o GitHub processa o diff contra o ramo base — a tela diz isso em vez de chutar que dá. | *Atualizar* relê o detalhe; se os ramos divergiram muito, pode ser lento de verdade. O botão **Mesclar** fica desabilitado até o GitHub afirmar. |
+| O pull request abre sem linhas de diff | Arquivo binário, grande demais, ou sem patch na resposta da API. | O cabeçalho do arquivo ainda aparece com a contagem; **Site** leva ao diff completo no navegador. |
+| *Verificações* diz "Nenhuma execução de workflow" | O repositório não tem arquivo em `.github/workflows`, ou nada rodou nele — é a resposta do GitHub, não falha da aplicação. | Confira o workflow no site; a lista é lida de `/actions/runs` do próprio repositório. |
+| "não foi possível buscar o pull request #N" | O número não existe naquele remoto, o projeto escolhido aponta para outro `origin`, ou a rede falhou no `git fetch`. | A mensagem distingue busca do PR da troca de branch. Confira o remoto do projeto em *Git → Remotos* e repita; nenhum branch é criado quando a busca falha. |
 | Acesso diz que o remoto "não aponta para um repositório acessível" | URL do remoto errada, ou repositório privado sem liberação. | Confira **Remotos** (o nome aparece no veredito, nunca a URL) e refaça o teste. |
 | Painel mostra "ssh-agent ... sem nenhuma chave carregada" | O agente está rodando, mas vazio. | `ssh-add ~/.ssh/id_ed25519`. Sem chave no agente, todo remoto SSH pede credencial que a aplicação não pode digitar por você. |
 | Teste falha com "Chave de host desconhecida ou alterada" | O host ainda não está no `known_hosts` (ou a chave dele mudou). | Abra uma sessão desse servidor no **terminal integrado**: o OpenSSH pergunta dentro da sessão e, se você confirmar, a chave entra no `known_hosts`. Depois repita o teste. A aplicação nunca aceita a chave sozinha — se a chave *mudou*, investigue antes de aceitar. |

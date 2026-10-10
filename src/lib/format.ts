@@ -12,6 +12,14 @@ export function formatDateTime(iso: string | null): string {
   });
 }
 
+/** Tempo relativo a partir do ISO do GitHub — `há 3 h`, sem data absoluta. */
+export function formatAgo(iso: string | null): string {
+  if (!iso) return "—";
+  const ms = new Date(iso).getTime();
+  if (Number.isNaN(ms)) return "—";
+  return formatRelative(Math.floor(ms / 1000));
+}
+
 export function formatTimestamp(unixSeconds: number): string {
   if (!Number.isFinite(unixSeconds) || unixSeconds <= 0) return "—";
   return new Date(unixSeconds * 1000).toLocaleString("pt-BR", {

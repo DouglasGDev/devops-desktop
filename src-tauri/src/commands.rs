@@ -2599,6 +2599,188 @@ async fn github_create_repo(
     .await
 }
 
+// ---------- workspace do GitHub: bandeja, PRs, issues e verificações ----------
+
+#[tauri::command]
+async fn github_inbox(gh: State<'_, github::GitHubState>) -> Result<github::GitHubInbox, String> {
+    let gh = (*gh).clone();
+    spawn("github_inbox", move || github::inbox(&gh)).await
+}
+
+#[tauri::command]
+async fn github_pull_detail(
+    gh: State<'_, github::GitHubState>,
+    input: github::PullNumberInput,
+) -> Result<github::PullDetail, String> {
+    let gh = (*gh).clone();
+    spawn("github_pull_detail", move || {
+        github::pull_detail(&gh, &input.repo, input.number)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn github_pull_files(
+    gh: State<'_, github::GitHubState>,
+    input: github::PullNumberInput,
+) -> Result<Vec<git::FileDiff>, String> {
+    let gh = (*gh).clone();
+    spawn("github_pull_files", move || {
+        github::pull_files(&gh, &input.repo, input.number)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn github_issues(
+    gh: State<'_, github::GitHubState>,
+    repo: String,
+) -> Result<Vec<github::GitHubIssue>, String> {
+    let gh = (*gh).clone();
+    spawn("github_issues", move || github::issues(&gh, &repo)).await
+}
+
+#[tauri::command]
+async fn github_runs(
+    gh: State<'_, github::GitHubState>,
+    repo: String,
+) -> Result<Vec<github::GitHubRun>, String> {
+    let gh = (*gh).clone();
+    spawn("github_runs", move || github::runs(&gh, &repo)).await
+}
+
+#[tauri::command]
+async fn github_create_issue(
+    state: State<'_, AppState>,
+    gh: State<'_, github::GitHubState>,
+    input: github::NewIssueInput,
+) -> Result<github::GitHubIssue, String> {
+    let db = state.db.clone();
+    let gh = (*gh).clone();
+    spawn("github_create_issue", move || {
+        let conn = lock_db(&db)?;
+        github::create_issue(
+            &conn,
+            &gh,
+            &input.repo,
+            &input.title,
+            input.body.as_deref(),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn github_comment(
+    state: State<'_, AppState>,
+    gh: State<'_, github::GitHubState>,
+    input: github::CommentInput,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    let gh = (*gh).clone();
+    spawn("github_comment", move || {
+        let conn = lock_db(&db)?;
+        github::comment(&conn, &gh, &input.repo, input.number, &input.body)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn github_close_issue(
+    state: State<'_, AppState>,
+    gh: State<'_, github::GitHubState>,
+    input: github::CloseIssueInput,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    let gh = (*gh).clone();
+    spawn("github_close_issue", move || {
+        let conn = lock_db(&db)?;
+        github::close_issue(&conn, &gh, &input.repo, input.number)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn github_review(
+    state: State<'_, AppState>,
+    gh: State<'_, github::GitHubState>,
+    input: github::ReviewInput,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    let gh = (*gh).clone();
+    spawn("github_review", move || {
+        let conn = lock_db(&db)?;
+        github::review_pull(
+            &conn,
+            &gh,
+            &input.repo,
+            input.number,
+            &input.event,
+            input.body.as_deref(),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn github_merge(
+    state: State<'_, AppState>,
+    gh: State<'_, github::GitHubState>,
+    input: github::MergeInput,
+) -> Result<String, String> {
+    let db = state.db.clone();
+    let gh = (*gh).clone();
+    spawn("github_merge", move || {
+        let conn = lock_db(&db)?;
+        github::merge_pull(
+            &conn,
+            &gh,
+            &input.repo,
+            input.number,
+            &input.method,
+            &input.sha,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn github_rerun(
+    state: State<'_, AppState>,
+    gh: State<'_, github::GitHubState>,
+    input: github::RerunInput,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    let gh = (*gh).clone();
+    spawn("github_rerun", move || {
+        let conn = lock_db(&db)?;
+        github::rerun(&conn, &gh, &input.repo, input.run_id)
+    })
+    .await
+}
+
+/// O pull request vira trabalho local: busca a cabeça do PR e muda para a
+/// branch de leitura. Sem remoto informado, usa o mesmo da publicação.
+#[tauri::command]
+async fn git_checkout_pull(
+    state: State<'_, AppState>,
+    project_id: i64,
+    remote: Option<String>,
+    number: i64,
+) -> Result<GitActionOutcome, String> {
+    let db = state.db.clone();
+    let remoto = trim_opt(remote);
+    let detalhe = format!("leitura do pull request #{number}");
+    git_write(db, project_id, "git_checkout_pull", detalhe, move |dir| {
+        let alvo = match &remoto {
+            Some(r) => r.clone(),
+            None => git::default_remote(dir)?,
+        };
+        git::checkout_pull(dir, &alvo, number).map(outcome)
+    })
+    .await
+}
+
 
 pub fn register_all(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
     builder.invoke_handler(tauri::generate_handler![
@@ -2703,6 +2885,18 @@ pub fn register_all(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri
         github_repos,
         github_pulls,
         github_create_repo,
+        github_inbox,
+        github_pull_detail,
+        github_pull_files,
+        github_issues,
+        github_runs,
+        github_create_issue,
+        github_comment,
+        github_close_issue,
+        github_review,
+        github_merge,
+        github_rerun,
+        git_checkout_pull,
     ])
 }
 #[cfg(test)]

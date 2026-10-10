@@ -577,6 +577,76 @@ export interface GitHubPull {
   htmlUrl: string;
 }
 
+// Workspace do GitHub: cada campo abaixo é lido de uma rota real de
+// api.github.com no momento em que a tela mostra.
+
+export interface GitHubSearchItem {
+  number: number;
+  title: string;
+  /** `dono/repo`, embutido na resposta da busca. */
+  repo: string;
+  author: string | null;
+  state: string;
+  isPullRequest: boolean;
+  draft: boolean;
+  url: string;
+  updatedAt: string | null;
+}
+
+export interface GitHubInbox {
+  reviewRequests: GitHubSearchItem[];
+  myPulls: GitHubSearchItem[];
+  myIssues: GitHubSearchItem[];
+}
+
+export interface GitHubPullDetail {
+  number: number;
+  title: string;
+  state: string;
+  author: string | null;
+  headRef: string;
+  baseRef: string;
+  headSha: string;
+  draft: boolean;
+  /** null enquanto o GitHub calcula; a tela diz isso em vez de afirmar. */
+  mergeable: boolean | null;
+  mergeableState: string | null;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  body: string | null;
+  updatedAt: string | null;
+  url: string;
+}
+
+export interface GitHubIssue {
+  number: number;
+  title: string;
+  state: string;
+  author: string | null;
+  labels: string[];
+  comments: number;
+  body: string | null;
+  updatedAt: string | null;
+  url: string;
+}
+
+export interface GitHubRun {
+  id: number;
+  name: string;
+  displayTitle: string;
+  headBranch: string;
+  event: string;
+  status: string;
+  conclusion: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  url: string;
+}
+
+export type ReviewEvent = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
+export type MergeMethod = "merge" | "squash" | "rebase";
+
 export type ViewId =
   | "dashboard"
   | "servers"

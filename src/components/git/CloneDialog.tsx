@@ -11,10 +11,18 @@ import { Button, Field, Input, Modal } from "../ui";
  * Registrar o projeto continua sendo um passo separado, na seção Projetos: a
  * aplicação não cadastra nada automaticamente depois do clone.
  */
-export function CloneDialog({ open: isOpen, onClose }: { open: boolean; onClose: () => void }) {
+export function CloneDialog({
+  open: isOpen,
+  onClose,
+  initialUrl = "",
+}: {
+  open: boolean;
+  onClose: () => void;
+  initialUrl?: string;
+}) {
   const { reloadProjects, pushToast } = useApp();
   const [parentPath, setParentPath] = useState("");
-  const [url, setUrl] = useState("");
+  const [url, setUrl] = useState(initialUrl);
   const [targetName, setTargetName] = useState("");
   const [branch, setBranch] = useState("");
   const [busy, setBusy] = useState(false);
