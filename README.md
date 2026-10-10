@@ -146,7 +146,7 @@ O comando roda `npm run build`, compila em release e gera os dois pacotes config
 
 ```
 src-tauri/target/release/bundle/
-├── nsis/DevOps Desktop_0.1.0_x64-setup.exe      (4,43 MiB)
+├── nsis/DevOps Desktop_0.1.0_x64-setup.exe      (4,42 MiB)
 └── msi/DevOps Desktop_0.1.0_x64_en-US.msi       (6,33 MiB)
 ```
 
@@ -371,6 +371,11 @@ Resumo do que é garantido pelo código, não só pela interface:
   "Abrir no editor" chama o executável encontrado com o caminho como **argumento separado**, nunca por concatenação de
   string; se ele não abrir, ou se a detecção não achou nenhum (no Windows só conta `.exe` — os scripts sem extensão das
   pastas `bin` do VS Code e do Cursor não são prova de instalação), usa o atalho registrado do programa.
+- **Nenhum `git` sem prazo.** Toda execução do git sai de uma única função, com prazo: 30 s para operação local e 10 min
+  para as que falam com um remoto (`clone`, `fetch`, `pull`, `push`, `ls-remote`). O filho é encerrado ao estourar e a
+  janela recebe uma frase dizendo quanto tempo esperou e o que costuma causar isso (índice travado por outro git, hook
+  parado, antivírus, ou credencial que o git não pode pedir porque `GIT_TERMINAL_PROMPT=0`). Um remoto lento nunca
+  parece um botão quebrado, e um processo preso nunca deixa a tela girando para sempre.
 - **CSP ativa** no `tauri.conf.json`: `default-src 'self'` e `connect-src` só permitem o IPC local (`ipc:`,
   `http://ipc.localhost`) e o servidor de desenvolvimento em `localhost:1420`. A interface não abre conexão de rede
   nenhuma; as chamadas ao GitHub saem do lado Rust, para o host fixo `api.github.com`, e a auditoria registra a operação
@@ -383,6 +388,7 @@ Resumo do que é garantido pelo código, não só pela interface:
 
 ```
 .
+├── assets/brand/           # logotipo do aplicativo (o mesmo usado para gerar os ícones)
 ├── src/                    # React 19 + TypeScript (camada de apresentação)
 │   ├── components/         # UI primitiva, painéis de Git, deploy, ícones
 │   ├── views/              # Dashboard, Servidores, Arquivos, Terminal, Projetos, Git, GitHub, Deploy, Histórico, Configurações
@@ -425,7 +431,7 @@ cd src-tauri
 cargo test --lib
 ```
 
-Cobertura atual do backend (163 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
+Cobertura atual do backend (169 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
 timeout e cancelamento, sessões PTY, ciclo completo de Git em repositório temporário (status, stage por hunk, commit,
 log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), publicação por Git em clone
 de um remoto `bare` real (`push_tag` leva a tag até o remoto, `delete_remote_tag` tira só a referência de lá, o ramo e a
@@ -437,7 +443,13 @@ sessão inativa que **não** conta como liberação, a contagem de chaves do `ss
 texto que as duas builds do OpenSSH imprimem (códigos diferentes entre elas) e a exigência de nome **e** e-mail para a
 identidade do git constar, a sondagem real que devolve *sem resposta* em segundos contra um programa vivo por 40 s e
 *ausente* contra um nome que não existe, e a procura de editores — que só lista o que de fato está no disco, no `PATH`
-ou na pasta-base de instalação), a rota do editor (executável encontrado > atalho registrado > padrão do sistema),
+ou na pasta-base de instalação), a rota do editor (executável encontrado > atalho registrado > padrão do sistema), o
+prazo que cobre **toda** chamada ao git (um hook `pre-commit` que dorme para sempre devolve erro em segundos, com a
+duração e o motivo provável na mensagem, em vez de deixar o botão girando; leitura local tem 30 s e operação de rede tem
+10 min), a listagem SFTP (o `ls` do cliente sftp ecoa o caminho absoluto quando o argumento é absoluto — o nome volta a
+ser só o componente final, então `/var/www` + `/var/www/html` não produz `/var/www//var/www/html`, e a raiz `/` também
+não dobra barra) e o caminho verbatim do Windows (`\\?\C:\…` sai desfeito do cadastro de projeto, porque nenhum outro
+programa o reconhece),
 reversão de commit — o
 commit inverso criado por `revert`, a exigência de escolher o pai em um merge, e os três modos de `reset` verificados no
 sistema de arquivos (`soft` mantém o índice preparado, `mixed` solta o índice sem apagar o disco, `hard` substitui o
@@ -466,6 +478,9 @@ O frontend é verificado por `npm run build`, que roda `tsc --noEmit` antes do b
 | "OpenSSH (ssh) não foi encontrado no PATH" | Cliente SSH não instalado ou fora do `PATH`. | *Configurações → Acesso da máquina → Reverificar* refaz a detecção. Instale o recurso opcional do Windows "Cliente OpenSSH" e reabra o aplicativo. |
 | Uma linha do painel diz "instalado, mas não respondeu dentro do prazo de 5 s" | O programa existe, mas trava quando é chamado (keyring pedindo interação, antivírus segurando o processo). | Rode o mesmo comando num terminal para ver o que ele pede. A janela continua mostrando o que as outras sondas trouxeram — nenhuma ferramenta lenta congela o painel. |
 | O editor não aparece na lista de Configurações | O executável não está no `PATH` nem nas pastas de instalação conhecidas (`%LOCALAPPDATA%\Programs\…`, `%ProgramFiles%\…`). | Use o editor padrão do sistema ou chame o instalador dele uma vez pelo terminal (que registra o comando `code`/`cursor`) e clique *Reverificar*. |
+| "o git não respondeu em 30 s e foi interrompido" | Um `git` local travado: índice com `index.lock` de outro git, hook parado ou antivírus segurando a pasta. | A mensagem diz o prazo e o motivo provável. Feche os outros `git` da pasta e tente de novo; nenhuma operação de git fica girando sem fim. |
+| "o git não respondeu em 10 min e foi interrompido" | Operação de rede lenta de verdade (clone grande) ou o remoto pedindo credencial que o git não pode perguntar (`GIT_TERMINAL_PROMPT=0`). | Rode o mesmo comando num terminal uma vez para liberar a credencial (chave no agente ou gerenciador de credenciais) e repita. |
+| A lista de arquivos remotos mostrava nomes com `//` no meio | O `ls` do cliente sftp devolve o caminho inteiro quando o argumento é absoluto, e o aplicativo juntava a pasta com o caminho todo. | Corrigido: a entrada volta a ser só o nome do arquivo/pasta. Se ainda vir algo estranho, diga o que aparece na coluna **Nome**. |
 | *Testar acesso* diz "sem liberação" | O remoto não aceita a credencial desta máquina (chave fora do agente, token revogado, chave não adicionada ao repositório). | Coloque a chave no agente (`ssh-add`), ou use **Liberar pelo navegador** na mesma tela, ou rode `gh auth login` num terminal. Depois repita o teste — é o `git ls-remote` que afirma o resultado, não a interface. |
 | Acesso diz que o remoto "não aponta para um repositório acessível" | URL do remoto errada, ou repositório privado sem liberação. | Confira **Remotos** (o nome aparece no veredito, nunca a URL) e refaça o teste. |
 | Painel mostra "ssh-agent ... sem nenhuma chave carregada" | O agente está rodando, mas vazio. | `ssh-add ~/.ssh/id_ed25519`. Sem chave no agente, todo remoto SSH pede credencial que a aplicação não pode digitar por você. |

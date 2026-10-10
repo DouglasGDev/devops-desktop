@@ -173,51 +173,97 @@ fn base_cmd(dir: &Path) -> Command {
     cmd
 }
 
-/// Roda `git` na pasta e devolve stdout. Erro traz a mensagem do git traduzida.
-pub fn run<S: AsRef<str>>(dir: &Path, args: &[S]) -> Result<String, String> {
-    let shown: Vec<&str> = args.iter().map(|a| a.as_ref()).collect();
-    let output = base_cmd(dir)
-        .args(&shown)
-        .output()
+/// Prazo de um `git` local. Uma leitura travada não pode segurar a interface
+/// para sempre: sem prazo, o botão fica girando e a pessoa não sabe se o git
+/// pensa ou se morreu.
+const PRAZO_LOCAL: Duration = Duration::from_secs(30);
+/// Prazo de um `git` que fala com um remoto. Clonar um repositório grande leva
+/// minutos, então aqui o prazo é longo o bastante para ser legítimo e curto o
+/// bastante para nunca parecer travado.
+const PRAZO_REDE: Duration = Duration::from_secs(600);
+
+/// O comando vai trafegar pela rede?
+fn pela_rede(args: &[&str]) -> bool {
+    matches!(
+        args.first().copied().unwrap_or(""),
+        "clone" | "fetch" | "pull" | "push" | "ls-remote"
+    )
+}
+
+fn prazo_dos(args: &[&str]) -> Duration {
+    if pela_rede(args) { PRAZO_REDE } else { PRAZO_LOCAL }
+}
+
+/// Texto do prazo que venceu, na unidade que faz sentido para o valor.
+fn prazo_expirado(args: &[&str], prazo: Duration) -> String {
+    let minutos = prazo.as_secs() / 60;
+    let duracao = if minutos >= 1 {
+        format!("{minutos} min")
+    } else {
+        format!("{} s", prazo.as_secs())
+    };
+    let motivo = if pela_rede(args) {
+        "pode ser o remoto lento ou uma credencial que o git não pode pedir (GIT_TERMINAL_PROMPT=0)"
+    } else {
+        "pode ser um índice travado por outro git, um hook parado ou o antivírus segurando a pasta"
+    };
+    format!("o git não respondeu em {duracao} e foi interrompido — {motivo}")
+}
+
+/// Roda o git com prazo. `entrada` alimenta a stdin (pathspecs e patches).
+///
+/// Toda execução de git do aplicativo passa por aqui: um processo que não
+/// termina é interrompido e devolvido como erro legível, nunca como tela
+/// girando para sempre.
+fn executar(dir: &Path, shown: &[&str], prazo: Duration, entrada: Option<&[u8]>) -> Result<String, String> {
+    let mut cmd = base_cmd(dir);
+    if entrada.is_some() {
+        cmd.stdin(Stdio::piped());
+    }
+    let mut child = cmd
+        .args(shown)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => {
                 "o git não foi encontrado no PATH — instale o Git para usar esta seção".to_string()
             }
             _ => format!("não foi possível executar o git: {e}"),
         })?;
-    if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
-    }
-    Err(describe_failure(&shown, &output.stderr, &output.stdout))
-}
-
-/// Roda `git` alimentando a stdin (pathspecs e patches).
-fn run_with_stdin<S: AsRef<str>>(dir: &Path, args: &[S], input: &[u8]) -> Result<String, String> {
-    let shown: Vec<&str> = args.iter().map(|a| a.as_ref()).collect();
-    let mut cmd = base_cmd(dir);
-    cmd.stdin(Stdio::piped());
-    let mut child = cmd
-        .args(&shown)
-        .spawn()
-        .map_err(|e| format!("não foi possível executar o git: {e}"))?;
-    {
+    if let Some(dados) = entrada {
         let stdin = child
             .stdin
             .as_mut()
             .ok_or_else(|| "falha ao abrir a entrada do git".to_string())?;
         stdin
-            .write_all(input)
+            .write_all(dados)
             .map_err(|e| format!("falha ao enviar dados ao git: {e}"))?;
         stdin.flush().ok();
     }
     drop(child.stdin.take());
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("falha ao concluir o git: {e}"))?;
-    if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+    let feito = crate::sshexec::collect(&mut child, prazo, &AtomicBool::new(false));
+    if feito.timed_out {
+        return Err(prazo_expirado(shown, prazo));
     }
-    Err(describe_failure(&shown, &output.stderr, &output.stdout))
+    if feito.exit_code == Some(0) {
+        return Ok(feito.stdout);
+    }
+    Err(describe_failure(shown, feito.stderr.as_bytes(), feito.stdout.as_bytes()))
+}
+
+/// Roda `git` na pasta e devolve stdout. Erro traz a mensagem do git traduzida.
+pub fn run<S: AsRef<str>>(dir: &Path, args: &[S]) -> Result<String, String> {
+    let shown: Vec<&str> = args.iter().map(|a| a.as_ref()).collect();
+    let prazo = prazo_dos(&shown);
+    executar(dir, &shown, prazo, None)
+}
+
+/// Roda `git` alimentando a stdin (pathspecs e patches).
+fn run_with_stdin<S: AsRef<str>>(dir: &Path, args: &[S], input: &[u8]) -> Result<String, String> {
+    let shown: Vec<&str> = args.iter().map(|a| a.as_ref()).collect();
+    let prazo = prazo_dos(&shown);
+    executar(dir, &shown, prazo, Some(input))
 }
 
 /// Mensagens de erro compreensíveis (requisito da etapa de Git).
@@ -1485,15 +1531,20 @@ pub fn clone(dir_parent: &Path, url: &str, target_name: Option<&str>, branch: Op
     }
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     // clone roda no diretório pai, não dentro de um repo existente
-    let mut cmd = base_cmd(dir_parent);
-    let out = cmd
+    let mut child = base_cmd(dir_parent)
         .args(&refs)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("não foi possível executar o git: {e}"))?;
-    if !out.status.success() {
-        return Err(describe_failure(&refs, &out.stderr, &out.stdout));
+    let feito = crate::sshexec::collect(&mut child, prazo_dos(&refs), &AtomicBool::new(false));
+    if feito.timed_out {
+        return Err(prazo_expirado(&refs, prazo_dos(&refs)));
     }
-    Ok(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    if feito.exit_code != Some(0) {
+        return Err(describe_failure(&refs, feito.stderr.as_bytes(), feito.stdout.as_bytes()));
+    }
+    Ok(feito.stderr.trim().to_string())
 }
 
 pub fn identity(dir: &Path) -> Result<(Option<String>, Option<String>), String> {
@@ -1523,6 +1574,46 @@ pub fn is_repo(dir: &Path) -> bool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn so_fala_de_rede_quem_realmente_fala() {
+        assert!(pela_rede(&["clone", "https://x/y"]));
+        assert!(pela_rede(&["push", "origin", "main"]));
+        assert!(pela_rede(&["fetch"]));
+        assert!(pela_rede(&["pull"]));
+        assert!(pela_rede(&["ls-remote", "origin"]));
+        assert!(!pela_rede(&["status", "--porcelain"]));
+        assert!(!pela_rede(&["log", "-n", "50"]));
+        assert!(!pela_rede(&[]));
+    }
+
+    #[test]
+    fn prazo_expirado_diz_quanto_esperou_e_o_que_pode_ser() {
+        let local = prazo_expirado(&["status"], PRAZO_LOCAL);
+        assert!(local.contains("30 s"), "{local}");
+        assert!(local.contains("índice travado"), "{local}");
+        let rede = prazo_expirado(&["push", "origin", "main"], PRAZO_REDE);
+        assert!(rede.contains("10 min"), "{rede}");
+        assert!(rede.contains("credencial"), "{rede}");
+    }
+
+    #[test]
+    fn um_git_que_nao_termina_devolve_erro_em_vezes_de_travar() {
+        // O hook `pre-commit` abaixo nunca devolve o controle. Sem prazo o
+        // commit ficaria girando para sempre na tela; com prazo, a chamada
+        // volta como erro e dentro de poucos segundos.
+        let dir = temp_repo("prazo");
+        std::fs::write(dir.join(".git").join("hooks").join("pre-commit"), "#!/bin/sh\nsleep 60\n")
+            .expect("escrever o hook");
+        write(&dir, "a.txt", &base_file());
+        stage(&dir, &["a.txt".into()]).unwrap();
+        let antes = std::time::Instant::now();
+        let erro = executar(&dir, &["commit", "-m", "nunca termina"], Duration::from_secs(3), None)
+            .expect_err("o hook travado deveria impedir o commit");
+        let decorrido = antes.elapsed();
+        assert!(erro.contains("não respondeu em 3 s"), "mensagem: {erro}");
+        assert!(decorrido < Duration::from_secs(20), "o prazo não valiu: {decorrido:?}");
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()

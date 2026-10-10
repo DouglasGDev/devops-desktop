@@ -151,20 +151,12 @@ export function SettingsView() {
           <p className="mt-2 flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
             <Spinner className="size-3.5" /> Procurando os editores instalados nesta máquina…
           </p>
-        ) : instalados.length > 0 ? (
-          <ul className="mt-2 space-y-1 text-xs text-zinc-500 dark:text-zinc-400">
-            {instalados.map((e) => (
-              <li key={e.id} className="font-mono break-all">
-                {e.nome}: {e.caminho}
-              </li>
-            ))}
-          </ul>
-        ) : (
+        ) : instalados.length === 0 ? (
           <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
             Nenhum editor dos que a aplicação sabe abrir foi encontrado neste computador. Use o editor padrão do sistema
             ou instale um dos suportados — a lista é refeita a cada “Reverificar”.
           </p>
-        )}
+        ) : null}
         {escolhaAusente ? (
           <p className="mt-2 text-xs text-amber-700 dark:text-amber-400">
             A escolha salva não está instalada aqui. O botão “Abrir no editor” ainda tenta o atalho do programa e, se ele
@@ -173,8 +165,7 @@ export function SettingsView() {
         ) : null}
         <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
           O botão “Abrir no editor” das seções de Git usa esta escolha. Com o editor padrão do sistema o caminho é
-          entregue ao próprio sistema; com um editor encontrado pela detecção o aplicativo abre direto no arquivo do
-          repositório, chamando o executável que está listado acima.
+          entregue ao próprio sistema; com um editor detectado o aplicativo abre direto no arquivo do repositório.
         </p>
       </Card>
 

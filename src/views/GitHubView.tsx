@@ -351,31 +351,6 @@ export function GitHubView() {
             </Button>
           </div>
         </Field>
-        <div className="mt-3 rounded-lg border border-zinc-200 p-3 text-xs dark:border-zinc-800">
-          <p className="font-medium">O que preencher no formulário do GitHub</p>
-          <ul className="mt-1.5 space-y-1 text-zinc-600 dark:text-zinc-400">
-            <li>
-              <span className="font-medium">Application name</span> — o nome que você quiser.
-            </li>
-            <li>
-              <span className="font-medium">Homepage URL</span> — qualquer endereço público; o deste repositório serve.
-            </li>
-            <li>
-              <span className="font-medium">Authorization callback URL</span> — o formulário exige um valor, mas o fluxo
-              de dispositivo <span className="font-medium">nunca redireciona para ele</span>: repita o mesmo endereço da
-              Homepage. Você não precisa de domínio, servidor nem porta própria.
-            </li>
-            <li>
-              <span className="font-medium">Enable Device Flow</span> — marque esta caixa; sem ela o GitHub recusa o
-              pedido de código que o aplicativo faz.
-            </li>
-            <li>
-              Depois copie o <span className="font-medium">Client ID</span> (começa com <span className="font-mono">Iv</span>)
-              e cole acima. O <span className="font-medium">Client secret</span> não vai para lugar nenhum: este
-              aplicativo não usa segredo e não tem para onde guardá-lo.
-            </li>
-          </ul>
-        </div>
         <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
           {status?.hasClientId
             ? "Há um Client ID salvo. Por segurança o valor completo não volta para a interface; para trocar, cole o novo."

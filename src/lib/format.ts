@@ -92,8 +92,9 @@ export function formatEta(seconds: number | null | undefined): string {
 }
 
 export function joinRemotePath(dir: string, name: string): string {
-  if (dir === "/" || dir.endsWith("/")) return `${dir}${name}`;
-  return `${dir}/${name}`;
+  const alvo = name.replace(/^\/+/, "");
+  if (dir === "/" || dir.endsWith("/")) return `${dir}${alvo}`;
+  return `${dir}/${alvo}`;
 }
 
 export function parentRemotePath(dir: string): string | null {

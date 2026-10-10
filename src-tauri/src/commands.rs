@@ -1824,9 +1824,11 @@ async fn open_in_editor(
         Some(rel) => {
             validate_file_path(&rel)?;
             let joined = dir.join(&rel);
-            let canon = joined
-                .canonicalize()
-                .map_err(|e| format!("o arquivo {rel} não pôde ser aberto: {e}"))?;
+            let canon = git_probe::simple(
+                &joined
+                    .canonicalize()
+                    .map_err(|e| format!("o arquivo {rel} não pôde ser aberto: {e}"))?,
+            );
             if !canon.starts_with(&dir) {
                 return Err("o caminho solicitado está fora do repositório".into());
             }

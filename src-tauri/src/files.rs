@@ -440,6 +440,13 @@ pub fn parse_ls(raw: &str, dir: &str) -> Vec<RemoteEntry> {
         if name.ends_with('/') {
             name.pop();
         }
+        // O cliente sftp ecoa o caminho completo quando o argumento é absoluto
+        // (`ls -la /var/www` devolve `/var/www/html`); sem reduzir ao nome, o
+        // join abaixo dobraria as barras.
+        let name = match name.rsplit_once('/') {
+            Some((_, leaf)) => leaf.to_string(),
+            None => name,
+        };
         if name == "." || name == ".." || name.is_empty() {
             continue;
         }
@@ -522,6 +529,31 @@ drwxr-xr-x 2 u g 4096 Jan 1 10:00 z-dir\n";
         assert_eq!(entries[0].name, "z-dir");
         assert_eq!(entries[1].name, "a.txt");
         assert_eq!(entries[0].path, "/x/z-dir");
+    }
+
+    #[test]
+    fn parseia_ls_com_caminho_absoluto_devolvido_pelo_sftp() {
+        // `sftp ls -la /var/www` imprime `/var/www/html`, não `html`. Sem
+        // reduzir ao nome, o join produzia /var/www//var/www/html.
+        let raw = "drwxr-xr-x 5 root root 4096 Oct  8 14:32 /var/www/html\n\
+-rw-r--r-- 1 root root 1234 Oct  8 14:32 /var/www/index.php\n";
+        let entries = parse_ls(raw, "/var/www");
+        assert_eq!(entries.len(), 2);
+        let dir = entries.iter().find(|e| e.name == "html").expect("nome reduzido");
+        assert!(dir.is_dir);
+        assert_eq!(dir.path, "/var/www/html");
+        assert_eq!(entries[1].path, "/var/www/index.php");
+        assert!(!entries.iter().any(|e| e.path.contains("//")), "barra dobrada");
+    }
+
+    #[test]
+    fn parseia_ls_da_raiz_sem_dobrar_barra() {
+        let raw = "drwxr-xr-x 5 root root 4096 Oct  8 14:32 usr\n\
+	lrwxrwxrwx 1 root root 11 Oct  8 14:32 tmp -> /var/tmp/\n";
+        let entries = parse_ls(raw, "/");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, "/usr");
+        assert_eq!(entries[1].path, "/tmp");
     }
 
     #[test]
