@@ -144,7 +144,7 @@ O comando roda `npm run build`, compila em release e gera os dois pacotes config
 
 ```
 src-tauri/target/release/bundle/
-├── nsis/DevOps Desktop_0.1.0_x64-setup.exe      (4,42 MiB)
+├── nsis/DevOps Desktop_0.1.0_x64-setup.exe      (4,41 MiB)
 └── msi/DevOps Desktop_0.1.0_x64_en-US.msi       (6,32 MiB)
 ```
 
