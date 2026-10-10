@@ -1729,6 +1729,23 @@ async fn git_remotes(
     .await
 }
 
+/// A árvore que o Git rastreia: os caminhos relativos que o `ls-files` devolve.
+#[tauri::command]
+async fn git_tree(state: State<'_, AppState>, project_id: i64) -> Result<Vec<String>, String> {
+    let db = state.db.clone();
+    git_read(db, project_id, git::tracked_files).await
+}
+
+#[tauri::command]
+async fn git_file_content(
+    state: State<'_, AppState>,
+    project_id: i64,
+    path: String,
+) -> Result<git::FileContent, String> {
+    let db = state.db.clone();
+    git_read(db, project_id, move |dir| git::file_content(dir, &path)).await
+}
+
 #[tauri::command]
 async fn git_add_remote(
     state: State<'_, AppState>,
@@ -2877,6 +2894,8 @@ pub fn register_all(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri
         git_create_tag,
         git_delete_tag,
         git_remotes,
+        git_tree,
+        git_file_content,
         git_add_remote,
         git_set_remote_url,
         git_remove_remote,

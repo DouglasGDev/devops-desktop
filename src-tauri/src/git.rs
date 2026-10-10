@@ -153,6 +153,18 @@ pub struct CommitDetail {
     pub total_deletions: i64,
 }
 
+/// O conteúdo que o Git guarda de um arquivo. `text` vem preenchido quando o
+/// blob é texto; senão é a `nota` que diz por que não há texto — sem inventar
+/// conteúdo nem cortar silencioso.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileContent {
+    pub path: String,
+    pub text: Option<String>,
+    pub note: Option<String>,
+    pub truncated: bool,
+}
+
 // ---------- execução ----------
 
 fn base_cmd(dir: &Path) -> Command {
@@ -333,6 +345,47 @@ fn split_z(raw: &str) -> Vec<String> {
 pub fn tracked_files(dir: &Path) -> Result<Vec<String>, String> {
     let raw = run(dir, &["ls-files", "-z"])?;
     Ok(split_z(&raw))
+}
+
+/// Máximo de texto que a interface recebe de um arquivo de uma vez.
+pub const LIMITE_CONTEUDO: usize = 512 * 1024;
+
+/// O conteúdo que o Git guarda do arquivo (`HEAD:<caminho>`). Não é leitura do
+/// disco: é exatamente o que está commitado, com o próprio git resolvendo o
+/// caminho — por isso um arquivo modificado mostra o texto do commit, e a
+/// diferença aparece no diff.
+pub fn file_content(dir: &Path, path: &str) -> Result<FileContent, String> {
+    let bruto = blob_at(dir, "HEAD", path)
+        .ok_or_else(|| format!("o Git não tem {} no HEAD atual", path))?;
+    if bruto.iter().take(8_000).any(|b| *b == 0) {
+        return Ok(FileContent {
+            path: path.to_string(),
+            text: None,
+            note: Some("arquivo binário — não há texto para mostrar".to_string()),
+            truncated: false,
+        });
+    }
+    let texto = String::from_utf8(bruto).map_err(|_| format!("{} não está em UTF-8", path))?;
+    if texto.len() <= LIMITE_CONTEUDO {
+        return Ok(FileContent {
+            path: path.to_string(),
+            text: Some(texto),
+            note: None,
+            truncated: false,
+        });
+    }
+    let mut fim = LIMITE_CONTEUDO;
+    while !texto.is_char_boundary(fim) {
+        fim -= 1;
+    }
+    let mut cortado = texto[..fim].to_string();
+    cortado.push_str("\n… (conteúdo cortado; abra o arquivo no editor para ler inteiro)");
+    Ok(FileContent {
+        path: path.to_string(),
+        text: Some(cortado),
+        note: None,
+        truncated: true,
+    })
 }
 
 /// O que vai entrar no próximo commit. Sem HEAD ainda (primeiro commit) o
@@ -1913,6 +1966,62 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    #[test]
+    fn a_arvore_e_o_texto_sao_o_que_o_git_guarda() {
+        let dir = temp_repo("arvore");
+        std::fs::create_dir_all(dir.join("src")).expect("criar pasta src");
+        write(&dir, "a.txt", "linha 1\n");
+        write(&dir, "src/mod.rs", "pub fn x() {}\n");
+        stage(&dir, &["a.txt".into(), "src/mod.rs".into()]).unwrap();
+        commit(&dir, "base", false).unwrap();
+
+        // `ls-files` é o índice: os dois entram, com barra de UNIX, e o arquivo
+        // que só existe no disco fica fora até ser adicionado.
+        write(&dir, "so-no-disco.txt", "ainda não entrou no índice\n");
+        let arvore = tracked_files(&dir).unwrap();
+        assert!(arvore.contains(&"a.txt".to_string()), "{arvore:?}");
+        assert!(arvore.contains(&"src/mod.rs".to_string()), "{arvore:?}");
+        assert!(!arvore.contains(&"so-no-disco.txt".to_string()), "{arvore:?}");
+
+        let texto = file_content(&dir, "a.txt").unwrap();
+        assert_eq!(texto.text.as_deref(), Some("linha 1\n"));
+        assert_eq!(texto.note, None);
+        assert!(!texto.truncated);
+
+        // o que muda no disco não troca o conteúdo lido do HEAD
+        write(&dir, "a.txt", "linha 1\nlinha 2 na mão\n");
+        assert_eq!(file_content(&dir, "a.txt").unwrap().text.as_deref(), Some("linha 1\n"));
+
+        // binário é dito como binário, não como texto vazio
+        std::fs::write(dir.join("b.png"), [72u8, 73, 0, 255, 1]).expect("escrever binário");
+        stage(&dir, &["b.png".into()]).unwrap();
+        commit(&dir, "binário", false).unwrap();
+        let bin = file_content(&dir, "b.png").unwrap();
+        assert_eq!(bin.text, None);
+        assert_eq!(bin.note.as_deref(), Some("arquivo binário — não há texto para mostrar"));
+
+        // caminho que o HEAD não tem devolve a resposta do git, não um vazio
+        let erro = file_content(&dir, "nao-existe.txt").unwrap_err();
+        assert!(erro.contains("não tem"), "{erro}");
+
+        // sem NUL mas fora de UTF-8: a tela recebe o motivo, não bytes trocados
+        std::fs::write(dir.join("latin.txt"), [b'o', b'l', 0xE1, b'\n']).expect("escrever não-UTF-8");
+        stage(&dir, &["latin.txt".into()]).unwrap();
+        commit(&dir, "texto em outra codificação", false).unwrap();
+        let erro = file_content(&dir, "latin.txt").unwrap_err();
+        assert!(erro.contains("UTF-8"), "{erro}");
+
+        // arquivo grande chega cortado, e o corte é avisado
+        write(&dir, "gigante.txt", &"a".repeat(LIMITE_CONTEUDO + 4_096));
+        stage(&dir, &["gigante.txt".into()]).unwrap();
+        commit(&dir, "grande", false).unwrap();
+        let grande = file_content(&dir, "gigante.txt").unwrap();
+        assert!(grande.truncated, "{:?}", grande.note);
+        assert!(grande.text.unwrap().contains("conteúdo cortado"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

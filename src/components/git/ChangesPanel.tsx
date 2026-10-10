@@ -4,7 +4,7 @@ import type { RepoStatus, SecretFinding, StatusFile } from "../../types";
 import { AlertTriangleIcon, CheckIcon, PlusIcon, RefreshIcon, TrashIcon, XIcon } from "../Icons";
 import { Badge, Button, Card, Checkbox, Confirm, EmptyState, Field, Textarea } from "../ui";
 
-const KIND_TONES: Record<string, "success" | "error" | "warning" | "accent" | "neutral"> = {
+export const KIND_TONES: Record<string, "success" | "error" | "warning" | "accent" | "neutral"> = {
   adicionado: "success",
   modificado: "accent",
   renomeado: "warning",

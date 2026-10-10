@@ -38,12 +38,12 @@ servidor ou no repositório. Quando uma etapa obrigatória falha, a interface mo
 | **Servidores SSH** | Importar automaticamente os acessos já existentes em `~/.ssh/config`, cadastrar manualmente, organizar por ambiente (dev, staging, produção, banco, Docker), testar conexão com diagnóstico real (DNS, porta, autenticação, chave de host). |
 | **Arquivos remotos (SFTP)** | Navegar, criar pasta, renomear, mudar permissão, ver/editar arquivo de texto, baixar e enviar (inclusive pastas), com progresso, velocidade e cancelamento. |
 | **Terminal** | Sessões PTY múltiplas ligadas a um servidor, com redimensionamento, histórico de comandos local e encerramento limpo ao fechar a janela. |
-| **Git** | Status, stage por arquivo ou por trecho (hunk), diff linha a linha, commit (com amend), gráfico de histórico de commits, branches locais/remotas, criar/renomear/excluir/alternar, merge, rebase, resolução de conflito com lado escolhido, fetch/pull/push, tags, remotes, clone, reverter commit e mover a cabeça do ramo, publicação pelo Git (comandos locais + push + tag), teste de acesso ao remoto e abrir o repositório no editor (VS Code/Cursor/system). Funciona sozinho: nenhuma dessas ações depende de haver um servidor cadastrado. |
+| **Git** | Status, stage por arquivo ou por trecho (hunk), diff linha a linha, commit (com amend), gráfico de histórico de commits, árvore dos arquivos rastreados com o conteúdo que o Git guarda no HEAD, branches locais/remotas, criar/renomear/excluir/alternar, merge, rebase, resolução de conflito com lado escolhido, fetch/pull/push, tags, remotes, clone, reverter commit e mover a cabeça do ramo, publicação pelo Git (comandos locais + push + tag), teste de acesso ao remoto e abrir o repositório no editor (VS Code/Cursor/system). Funciona sozinho: nenhuma dessas ações depende de haver um servidor cadastrado. |
 | **Acesso da máquina** | Detectar o que está instalado (`ssh`, `ssh-add`, `git`, `gh`), quantas chaves o `ssh-agent` tem, a identidade que o git resolve, os editores encontrados no disco e a conta ativa do `gh`; dizer se a máquina já está liberada para publicar e, quando não está, abrir o navegador no fluxo de autorização do GitHub e confirmar `liberado como @login`. |
 | **Deploy** | Cinco estratégias reais: **A** SFTP sincronizado, **B** Git no servidor, **C** build local + artefatos, **D** sequência de scripts, **E** Docker/Compose. Pipeline visual de até 15 etapas com log, código de saída, verificação de ferramentas no servidor antes de executar, cancelamento cooperativo, release anterior preservada e rollback assistido. |
 | **Segurança** | Bloqueio de commit/push quando o conteúdo que o Git publicaria contém segredo, varredura de projeto, regras extras configuráveis, remoção assistida do índice sem apagar o arquivo local. |
 | **Dashboard** | Estado dos servidores, deploys recentes e resultado, falhas do histórico, transferências em andamento, alertas de configuração e métricas reais de CPU, memória, disco, containers e serviços — lidas do servidor só quando você pedir. |
-| **GitHub** (opcional) | Conectar a conta pelo fluxo de dispositivo do OAuth e trabalhar o repositório de dentro do app: bandeja com o que é seu (revisão pedida, seus PRs, suas issues), pull request com diff real, conversa de comentários, revisão (aprovar / pedir alterações) e mesclar com método escolhido, abrir um PR a partir de um ramo desta máquina, issues com descrição e comentários, execuções do Actions com reexecução, visão geral que liga o remoto às pastas locais (clonar, vincular como `origin`) e criação de repositório. Tudo com confirmação nas ações que escrevem; sem conta conectada, a aba mostra só a conta e o Client ID. |
+| **GitHub** (opcional) | Conectar a conta pelo fluxo de dispositivo do OAuth e trabalhar o repositório de dentro do app: bandeja com o que é seu (revisão pedida, seus PRs, suas issues), pull request com diff real, conversa de comentários, revisão (aprovar / pedir alterações) e mesclar com método escolhido, abrir um PR a partir de um ramo desta máquina, mapear a pasta local de um repo publicado — o app mostra o caminho exato e abre a pasta no Explorador — e abrir ali mesmo a seção Git completa daquela pasta (aba **Local**), issues com descrição e comentários, execuções do Actions com reexecução, visão geral que liga o remoto às pastas locais (clonar, vincular como `origin`) e criação de repositório. Tudo com confirmação nas ações que escrevem; sem conta conectada, a aba mostra só a conta e o Client ID. |
 | **Auditoria** | Tudo fica em SQLite local, pesquisável e filtrável por servidor, projeto, tipo, nível e resultado. |
 
 ---
@@ -146,8 +146,8 @@ O comando roda `npm run build`, compila em release e gera os dois pacotes config
 
 ```
 src-tauri/target/release/bundle/
-├── nsis/DevOps Desktop_0.1.0_x64-setup.exe      (4,56 MiB)
-└── msi/DevOps Desktop_0.1.0_x64_en-US.msi       (6,57 MiB)
+├── nsis/DevOps Desktop_0.1.0_x64-setup.exe      (4,57 MiB)
+└── msi/DevOps Desktop_0.1.0_x64_en-US.msi       (6,59 MiB)
 ```
 
 O instalador NSIS é o recomendado para uso individual; o MSI atende implantação por GPO/domínio. O `bundle` já traz
@@ -282,6 +282,13 @@ no histórico local (opcional) para reutilização e auditoria. Fechar a janela 
   a pasta é canonicizada e sondada, e só entra na lista se realmente for um repositório Git — uma pasta comum é
   desfeita na hora e a tela diz isso. O mesmo card oferece *Clonar repositório* para uma pasta do computador.
 - **Alterações**: arquivos staged/unstaged/untracked, diff lado a lado por linha, stage por trecho.
+- **Árvore**: a lista de arquivos que o Git rastreia (`git ls-files`), montada como árvore colapsável a partir dos
+  caminhos — sem caminhar no disco. Cada linha traz o estado lido do `git status` ao lado do nome (adicionado,
+  modificado, removido, renomeado, não rastreado, conflito), e a árvore é relida quando o índice muda: um stage ou
+  commit feito na própria janela já aparece refletido. Clicar num arquivo abre o diff do lado em que ele tem mudança
+  (índice ou disco); sem mudança pendente, o que se abre é o **conteúdo que o Git guarda no HEAD**, lido com
+  `git show HEAD:<caminho>`. Arquivo binário, texto fora de UTF-8 e conteúdo acima de 512 KiB são ditos como estados na
+  tela — não há texto inventado no lugar. Dali, *Abrir no editor* chama o editor configurado com aquele arquivo.
 - **Commit**: mensagem livre, `amend` com aviso de reescrita de histórico (nunca feito automaticamente).
 - **Histórico**: gráfico de commits com branches e tags, detalhe do commit, diff entre dois commits/branches.
 - **Reversão**: no detalhe de um commit há duas ações distintas. *Reverter este commit* grava um commit novo com as
@@ -335,26 +342,32 @@ A aba **GitHub** é um posto de trabalho, não uma listagem: tudo que aparece ve
 2. **Bandeja** — três leituras da API de busca, cada uma só com o que é seu: *pediram sua revisão*,
    *seus pull requests* e *issues atribuídas a você*. Clicar num item leva direto ao repositório e à aba certa
    (pull request ou issue) com aquele número já aberto.
-3. **Repositório** — a coluna da esquerda lista os repositórios da conta com filtro por nome. Ao escolher um, as abas
-   são **Visão geral**, **Pull requests**, **Issues** e **Verificações**.
-   - **Visão geral** mostra o que a API devolveu (visibilidade, branch padrão, linguagem, tamanho, último push) e liga
-     o remoto com a máquina: **Clonar para pasta local** (HTTPS ou SSH), quais projetos já cadastrados apontam para
-     aquele repositório (lido de `git remote` local, não deduzido) e **Vincular como origin**, que grava só a URL e
-     pede confirmação quando já existe um `origin`.
+3. **Repositório** — a coluna da esquerda lista os repositórios da conta com filtro por nome; os que já têm pasta
+   mapeada nesta máquina aparecem com a marca *mapeado*. Ao escolher um, as abas são **Visão geral**,
+   **Pull requests**, **Issues**, **Verificações** e **Local**.
+   - **Visão geral** mostra o que a API devolveu (visibilidade, branch padrão, linguagem, tamanho, último push) e liga o remoto com a máquina: **Mapear pasta local** aponta a pasta que já existe no disco (seletor nativo → o git sonda → cadastro em Projetos), **Clonar para pasta local** (HTTPS ou SSH) cria uma, e a lista **Esta máquina** mostra o caminho exato de cada clone com **Mostrar a pasta** no Explorador. O comparador de remoto entende HTTPS, `git@…:dono/repo.git`, `ssh://`, barra final e host interno — a forquilha de outra pessoa **não** conta como o seu clone. **Vincular como origin** grava só a URL e pede confirmação quando já existe um `origin`.
    - **Pull requests** abre o diff real do PR com o mesmo leitor de patch usado no Git local. Ações: comentar, aprovar,
      pedir alterações e **Mesclar** — esta última com escolha de método (merge, squash, rebase) e sempre com o SHA que
      foi lido do detalhe do PR. Enquanto o GitHub estiver calculando a viabilidade, a tela diz isso em vez de afirmar
      que dá para mesclar. **Conversa** é o fio de comentários do PR, lido na hora; um comentário que você escreve
      aparece na lista sem trocar de aba. **Abrir PR** cria um pull request a partir de um ramo desta máquina: o projeto
-     cadastrado, os ramos locais (do `git branch` real), o ramo de destino lido de `/branches`, título, descrição e se
-     é rascunho. O aplicativo não empurra o ramo — publicar é ação sua, na seção Git — e avisa isso antes do envio.
+     (a pasta mapeada para este repo já vem selecionada), os ramos locais (do `git branch` real, com o estado lido do
+     rastreio — `N à frente` ou `sem remoto`), o ramo de destino lido de `/branches`, título, descrição e se é rascunho.
+     O aplicativo não empurra ramo nenhum: se a origem ainda não está no remoto, é o GitHub que responde, e a frase dele
+     aparece na tela.
      **Buscar ramo do PR** faz `git fetch` de `refs/pull/<n>/head` e cria `github/pr-<n>` no
-     projeto escolhido; um PR inexistente não deixa branch fantasma.
+     projeto escolhido — com a pasta mapeada para aquele repositório já selecionada. Quando não há pasta mapeada, a
+     própria tela oferece **Mapear a pasta deste repo**.
    - **Issues** lista as abertas (pull requests ficam de fora, porque na API do GitHub todo PR também é issue), mostra a
      descrição que veio na resposta, o fio de comentários, cria issue nova, comenta e fecha — fechamento com
      confirmação explícita.
    - **Verificações** lê as execuções do Actions com status e conclusão reais, reexecuta um workflow depois de avisar
      que quem decide os passos é o YAML do repositório, e abre o log no site.
+   - **Local** é a seção Git inteira montada sobre a pasta mapeada daquele repositório: a árvore de arquivos, as
+     alterações com stage por trecho, o commit, o histórico, os ramos, as tags, os remotos, o publicar e a checagem de
+     segredos — os mesmos componentes e os mesmos comandos, lendo e escrevendo o Git real daquela pasta, sem o seletor de
+     repositório (a tela já sabe qual é). Sem pasta mapeada, a aba diz isso e oferece **Mapear pasta local** e o atalho
+     para a seção Git; não há painel de exemplo.
 4. **Novo repositório** — nome, descrição opcional e visibilidade, com confirmação explícita porque a ação é externa e
    fica visível depois; repositório público é lido por qualquer pessoa.
 
@@ -467,9 +480,14 @@ cd src-tauri
 cargo test --lib
 ```
 
-Cobertura atual do backend (183 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
+Cobertura atual do backend (184 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
 timeout e cancelamento, sessões PTY, ciclo completo de Git em repositório temporário (status, stage por hunk, commit,
-log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), publicação por Git em clone
+log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), a árvore e o conteúdo que o
+Git guarda (`git_tree` devolve exatamente o `ls-files` — nada de andar no disco, e um arquivo que só existe na pasta fica
+de fora até entrar no índice; em `git_file_content` o texto vem de `git show HEAD:<caminho>`, mexer no disco não troca o
+que é lido, binário é dito como binário em vez de imprimir bytes, texto fora de UTF-8 e caminho que o HEAD não tem
+devolvem o motivo em erro em vez de vazio, e o conteúdo acima de 512 KiB chega cortado com a nota do corte), publicação
+por Git em clone
 de um remoto `bare` real (`push_tag` leva a tag até o remoto, `delete_remote_tag` tira só a referência de lá, o ramo e a
 tag local permanecem intactos, e referências começando com `-` ou com `..` são recusadas), o teste de acesso da máquina
 (`describe_access` classifica credencial recusada, remoto que não é repositório, rede, prazo estourado e remoto vazio, e
@@ -515,7 +533,11 @@ resposta fixos dentro do próprio teste.
 Esses testes usam os binários **reais** do sistema: é requisito da aplicação (e da suíte) ter `git` e `ssh` no `PATH`.
 Em uma máquina sem essas ferramentas, os testes que as exercitam falham — não são pulados silenciosamente.
 
-O frontend é verificado por `npm run build`, que roda `tsc --noEmit` antes do bundle.
+O frontend é verificado por `npm run build`, que roda `tsc --noEmit` antes do bundle. Não há runner de teste de interface
+no projeto: a comparação entre o origin lido do git e o `dono/repositorio` do GitHub (`src/lib/repo.ts`) foi conferida
+chamando a própria função fora da tela, com as formas reais de URL — HTTPS com `.git`, `git@…:dono/repo.git`, `ssh://`,
+barra final, forquilha de outra pessoa (não conta como o seu clone) e host interno de git (casa por `dono/repo`, não por
+`github.com`).
 
 ---
 
@@ -539,6 +561,11 @@ O frontend é verificado por `npm run build`, que roda `tsc --noEmit` antes do b
 | "não foi possível buscar o pull request #N" | O número não existe naquele remoto, o projeto escolhido aponta para outro `origin`, ou a rede falhou no `git fetch`. | A mensagem distingue busca do PR da troca de branch. Confira o remoto do projeto em *Git → Remotos* e repita; nenhum branch é criado quando a busca falha. |
 | **Conversa** traz uma linha vermelha ou fica em "lendo os comentários…" | O `GET /issues/<n>/comments` falhou (token expirado, repo privado sem acesso, rede). A tela mostra a resposta do GitHub em vez de esconder a seção. | *Atualizar* (o ícone de recarregar da seção) refaz a leitura. Se o token expirou, reconecte a conta — ele vive só na memória do processo. |
 | "Abrir PR" falha dizendo que a base ou o head não existem | O nome do ramo é enviado como o GitHub endereça, mas o **ramo de origem precisa já estar no remoto** — a aplicação não empurra nada por você. | Vá em *Git → Publicar/empurrar* e envie o ramo, depois abra de novo. ramo de origem igual ao de destino é recusado antes de qualquer chamada. |
+| A pasta mapeada não aparece em **Esta máquina** | O origin que o git daquela pasta devolve não é este `dono/repositorio` — pode ser forquilha de outra pessoa, remoto com outro nome ou outro host. O comparador resolve `dono/repo` a partir do que o git respondeu e não chuta. | O aviso diz qual origin foi lido. Se a pasta deve apontar para este repo, use **Vincular como origin** (grava só a URL, com confirmação). |
+| **Mostrar a pasta** não abre nada | O Explorador recusou o caminho: pasta movida, unidade removida ou rede indisponível. | O aviso traz o caminho que está no cadastro; em *Projetos*, o botão de atualizar refaz a detecção de Git daquela pasta. |
+| **Árvore** fica em "lendo o índice do git…" ou traz uma linha vermelha | O `git ls-files` daquela pasta não respondeu — índice travado (`index.lock`), pasta que deixou de ser repositório, ou o prazo de 30 s do git estourado. | O ícone de atualizar da seção relê o índice. A árvore nunca mostra uma lista velha como se fosse a atual. |
+| O arquivo abre com uma faixa âmbar em vez de texto | É o estado lido do Git, não um erro de tela: **arquivo binário** (não há texto para mostrar), **não está em UTF-8**, ou **conteúdo cortado** acima de 512 KiB. | *Abrir no editor* mostra o arquivo inteiro. O aplicativo não reimprime na tela bytes que não são texto. |
+| A aba **Local** abre mostrando "Nenhum repositório aberto" | A pasta mapeada deixou de ser um repositório Git (ou saiu do disco) — a seção Git embutida lê o que está lá e diz o que não está. | *Projetos* → atualizar a detecção daquela pasta, ou **Mapear pasta local** de novo na aba Visão geral. |
 | Acesso diz que o remoto "não aponta para um repositório acessível" | URL do remoto errada, ou repositório privado sem liberação. | Confira **Remotos** (o nome aparece no veredito, nunca a URL) e refaça o teste. |
 | Painel mostra "ssh-agent ... sem nenhuma chave carregada" | O agente está rodando, mas vazio. | `ssh-add ~/.ssh/id_ed25519`. Sem chave no agente, todo remoto SSH pede credencial que a aplicação não pode digitar por você. |
 | Teste falha com "Chave de host desconhecida ou alterada" | O host ainda não está no `known_hosts` (ou a chave dele mudou). | Abra uma sessão desse servidor no **terminal integrado**: o OpenSSH pergunta dentro da sessão e, se você confirmar, a chave entra no `known_hosts`. Depois repita o teste. A aplicação nunca aceita a chave sozinha — se a chave *mudou*, investigue antes de aceitar. |

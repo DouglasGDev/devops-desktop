@@ -1,20 +1,23 @@
 import { useEffect, useMemo, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api } from "../../lib/api";
+import { apontaPara } from "../../lib/repo";
+import { useMapearPasta } from "../../lib/useMapearPasta";
 import { formatAgo, formatKilobytes } from "../../lib/format";
 import { useApp } from "../../store/AppContext";
-import type { GitHubRepo, RemoteInfo, ViewId } from "../../types";
+import type { GitHubRepo, Project, RemoteInfo, ViewId } from "../../types";
 import { CloneDialog } from "../git/CloneDialog";
 import { CloudIcon, ExternalLinkIcon, FolderIcon, GitBranchIcon, TerminalIcon } from "../Icons";
 import { Badge, Button, Card, Confirm, EmptyState, Field, Select, SectionTitle, Spinner } from "../ui";
 
 /**
  * A capa que liga o repositório remoto aos diretórios desta máquina: o que o
- * GitHub devolve sobre o repo, quais projetos cadastrados apontam para ele e a
- * única escrita local que a tela faz — a URL do origin.
+ * GitHub devolve sobre o repo, quais pastas apontam para ele e a única escrita
+ * local que a tela faz — a URL do origin.
  */
 export function RepoOverview({ repo, onNavigate }: { repo: GitHubRepo; onNavigate: (v: ViewId) => void }) {
   const { projects, pushToast } = useApp();
+  const { mapear, mapeando } = useMapearPasta();
 
   const [clonando, setClonando] = useState<string | null>(null);
   const [projetoId, setProjetoId] = useState<number | "">("");
@@ -24,12 +27,20 @@ export function RepoOverview({ repo, onNavigate }: { repo: GitHubRepo; onNavigat
 
   const repositorios = useMemo(() => projects.filter((p) => p.isGitRepo), [projects]);
 
-  // Um projeto aponta para este repo quando o remoto cadastrado carrega o mesmo
+  // Uma pasta é clone deste repo quando o origin dela resolve para o mesmo
   // `dono/repositorio`; a leitura vem do git local, não de suposição.
   const daqui = useMemo(
-    () => projects.filter((p) => (p.gitRemote ?? "").toLowerCase().includes(repo.fullName.toLowerCase())),
+    () => projects.filter((p) => apontaPara(p.gitRemote, repo.fullName)),
     [projects, repo.fullName],
   );
+
+  const mapearPasta = async () => {
+    const p = await mapear(repo.fullName);
+    if (p !== null && apontaPara(p.gitRemote, repo.fullName)) setProjetoId(p.id);
+  };
+
+  const revelar = (p: Project) =>
+    void revealItemInDir(p.localPath).catch(() => pushToast("error", `A pasta é ${p.localPath}`));
 
   useEffect(() => {
     if (projetoId === "") {
@@ -91,7 +102,10 @@ export function RepoOverview({ repo, onNavigate }: { repo: GitHubRepo; onNavigat
           </div>
           <div className="flex flex-wrap items-center gap-1.5">
             <Button size="sm" onClick={() => setClonando(repo.cloneUrl)}>
-              <FolderIcon className="size-3.5" /> Clonar para pasta local
+              <CloudIcon className="size-3.5" /> Clonar para pasta local
+            </Button>
+            <Button size="sm" variant="primary" loading={mapeando} onClick={() => void mapearPasta()}>
+              <FolderIcon className="size-3.5" /> Mapear pasta local
             </Button>
             <Button size="sm" variant="secondary" onClick={() => setClonando(repo.sshUrl)}>
               <TerminalIcon className="size-3.5" /> Clonar via SSH
@@ -118,15 +132,18 @@ export function RepoOverview({ repo, onNavigate }: { repo: GitHubRepo; onNavigat
         {daqui.length === 0 ? (
           <EmptyState
             icon={<FolderIcon className="size-8" />}
-            title={`Nenhum projeto cadastrado aponta para ${repo.fullName}`}
-            description="Clone o repositório, ou abra a pasta que já existe no disco; o vínculo fica na seção Projetos."
+            title={`Nenhuma pasta mapeada para ${repo.fullName}`}
+            description="Clone o repositório, ou aponte para a pasta que já existe no disco; o vínculo fica em Projetos."
           >
             <div className="flex flex-wrap items-center gap-2">
-              <Button size="sm" variant="primary" onClick={() => setClonando(repo.cloneUrl)}>
-                <FolderIcon className="size-3.5" /> Clonar agora
+              <Button size="sm" variant="primary" loading={mapeando} onClick={() => void mapearPasta()}>
+                <FolderIcon className="size-3.5" /> Mapear pasta local
               </Button>
-              <Button size="sm" onClick={() => onNavigate("git")}>
-                <GitBranchIcon className="size-3.5" /> Abrir pasta local
+              <Button size="sm" onClick={() => setClonando(repo.cloneUrl)}>
+                <CloudIcon className="size-3.5" /> Clonar agora
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => onNavigate("projects")}>
+                <GitBranchIcon className="size-3.5" /> Ver Projetos
               </Button>
             </div>
           </EmptyState>
@@ -135,8 +152,16 @@ export function RepoOverview({ repo, onNavigate }: { repo: GitHubRepo; onNavigat
             {daqui.map((p) => (
               <li key={p.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2">
                 <span className="text-sm">{p.name}</span>
-                <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">{p.gitBranch ?? "fora de branch"}</span>
+                <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
+                  {p.gitBranch ?? "fora de branch"}
+                </span>
+                <span className="min-w-0 truncate font-mono text-[11px] text-zinc-400 dark:text-zinc-500" title={p.localPath}>
+                  {p.localPath}
+                </span>
                 <span className="ml-auto flex items-center gap-1.5">
+                  <Button size="sm" variant="ghost" onClick={() => revelar(p)}>
+                    <FolderIcon className="size-3.5" /> Mostrar a pasta
+                  </Button>
                   <Button size="sm" variant="ghost" onClick={() => onNavigate("git")}>
                     <GitBranchIcon className="size-3.5" /> Abrir na seção Git
                   </Button>

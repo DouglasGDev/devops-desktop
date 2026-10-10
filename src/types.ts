@@ -257,6 +257,15 @@ export interface StatusFile {
   kind: string;
 }
 
+/** O que o Git guarda de um arquivo no HEAD: texto, ou a nota dizendo por que
+ *  não há texto. */
+export interface FileContent {
+  path: string;
+  text: string | null;
+  note: string | null;
+  truncated: boolean;
+}
+
 export interface RepoStatus {
   branch: string | null;
   detachedAt: string | null;

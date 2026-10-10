@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "../lib/api";
+import { chaveDoRemoto } from "../lib/repo";
 import { formatAgo } from "../lib/format";
 import type {
   GitHubDeviceFlow,
@@ -8,9 +9,12 @@ import type {
   GitHubRepo,
   GitHubSearchItem,
   GitHubStatus,
+  Project,
   ViewId,
 } from "../types";
 import { useApp } from "../store/AppContext";
+import { useMapearPasta } from "../lib/useMapearPasta";
+import { GitView } from "./GitView";
 import { BandejaPanel } from "../components/github/BandejaPanel";
 import { ChecksPanel } from "../components/github/ChecksPanel";
 import { IssuePanel } from "../components/github/IssuePanel";
@@ -21,6 +25,7 @@ import {
   ChecksIcon,
   CloudIcon,
   ExternalLinkIcon,
+  FolderIcon,
   GitBranchIcon,
   InboxIcon,
   IssueIcon,
@@ -47,17 +52,19 @@ import {
 
 const DEVELOPERS_URL = "https://github.com/settings/developers";
 
-type Aba = "visao" | "pulls" | "issues" | "acoes";
+type Aba = "visao" | "pulls" | "issues" | "acoes" | "local";
 
 const ABAS: { id: Aba; nome: string; icone: typeof GitBranchIcon }[] = [
   { id: "visao", nome: "Visão geral", icone: CloudIcon },
   { id: "pulls", nome: "Pull requests", icone: GitBranchIcon },
   { id: "issues", nome: "Issues", icone: IssueIcon },
   { id: "acoes", nome: "Verificações", icone: ChecksIcon },
+  { id: "local", nome: "Local", icone: FolderIcon },
 ];
 
 export function GitHubView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
-  const { pushToast } = useApp();
+  const { projects, pushToast } = useApp();
+  const { mapear, mapeando } = useMapearPasta();
 
   const [status, setStatus] = useState<GitHubStatus | null>(null);
   const [clientId, setClientId] = useState("");
@@ -264,6 +271,23 @@ export function GitHubView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
     [repos, repoSel],
   );
 
+  // Qual repositório a aplicação já enxerga nesta máquina: uma pasta cadastrada
+  // cujo origin resolve para ele.
+  const pastaPorRepo = useMemo(() => {
+    const mapa = new Map<string, Project>();
+    for (const p of projects) {
+      const chave = chaveDoRemoto(p.gitRemote);
+      if (chave !== null && !mapa.has(chave)) mapa.set(chave, p);
+    }
+    return mapa;
+  }, [projects]);
+
+  // A pasta desta máquina que é o clone do repositório escolhido na sidebar.
+  const pastaDesteRepo = useMemo(
+    () => (repoSel === "" ? null : pastaPorRepo.get(repoSel.toLowerCase()) ?? null),
+    [pastaPorRepo, repoSel],
+  );
+
   const reposVisiveis = useMemo(() => {
     const todos = repos ?? [];
     const termo = filtro.trim().toLowerCase();
@@ -448,6 +472,11 @@ export function GitHubView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
                       <p className="mt-0.5 flex items-center gap-1.5 text-[10px] text-zinc-500 dark:text-zinc-400">
                         <span>{r.private ? "privado" : "público"}</span>
                         <span>{r.pushedAt ? formatAgo(r.pushedAt) : "sem push"}</span>
+                        {pastaPorRepo.get(r.fullName.toLowerCase()) ? (
+                          <span className="ml-auto flex items-center gap-1 text-teal-600 dark:text-teal-400">
+                            <FolderIcon className="size-3" /> mapeado
+                          </span>
+                        ) : null}
                       </p>
                     </button>
                   </li>
@@ -525,6 +554,30 @@ export function GitHubView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
                 ) : null}
                 {aba === "issues" ? <IssuePanel repo={repoSel} numeroInicial={issueAlvo} onNavigate={onNavigate} /> : null}
                 {aba === "acoes" ? <ChecksPanel repo={repoSel} /> : null}
+                {aba === "local" ? (
+                  pastaDesteRepo === null ? (
+                    <Card className="p-5">
+                      <EmptyState
+                        icon={<FolderIcon className="size-8" />}
+                        title="Nenhuma pasta desta máquina para este repositório"
+                        description={
+                          mapeando ? "Escolhendo a pasta…" : "Este repositório ainda não tem uma pasta mapeada nesta máquina."
+                        }
+                      >
+                        <Button variant="primary" disabled={mapeando} onClick={() => void mapear(repoSel)}>
+                          <FolderIcon className="size-4" /> Mapear pasta local
+                        </Button>
+                        <Button disabled={mapeando} onClick={() => onNavigate("git")}>
+                          Abrir na seção Git
+                        </Button>
+                      </EmptyState>
+                    </Card>
+                  ) : (
+                    <div className="h-[46rem]">
+                      <GitView onNavigate={onNavigate} projetoFixo={pastaDesteRepo.id} />
+                    </div>
+                  )
+                ) : null}
               </>
             )}
           </div>

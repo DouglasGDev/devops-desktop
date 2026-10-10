@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "../../lib/api";
+import { apontaPara } from "../../lib/repo";
+import { useMapearPasta } from "../../lib/useMapearPasta";
 import { formatAgo } from "../../lib/format";
 import { useApp } from "../../store/AppContext";
 import type { BranchInfo, FileDiff, GitHubPull, GitHubPullDetail, MergeMethod, ViewId } from "../../types";
@@ -12,6 +14,7 @@ import {
   CommentIcon,
   DownloadIcon,
   ExternalLinkIcon,
+  FolderIcon,
   GitBranchIcon,
   MergeIcon,
   PlusIcon,
@@ -62,6 +65,7 @@ export function PullRequestPanel({
   onNavigate: (v: ViewId) => void;
 }) {
   const { projects, pushToast } = useApp();
+  const { mapear, mapeando } = useMapearPasta();
 
   const [pulls, setPulls] = useState<GitHubPull[] | null>(null);
   const [listaErro, setListaErro] = useState<string | null>(null);
@@ -88,6 +92,19 @@ export function PullRequestPanel({
   const [rascunho, setRascunho] = useState(false);
 
   const repositorios = useMemo(() => projects.filter((p) => p.isGitRepo), [projects]);
+
+  // A pasta mapeada para este repositório é a que as ações locais usam por
+  // padrão: buscar o ramo do PR e abrir PR nascem do lugar certo.
+  const pastaDesteRepo = useMemo(
+    () => projects.find((p) => apontaPara(p.gitRemote, repo)) ?? null,
+    [projects, repo],
+  );
+
+  useEffect(() => {
+    if (pastaDesteRepo === null) return;
+    setProjeto((atual) => (atual === "" ? pastaDesteRepo.id : atual));
+    setNovoProjeto((atual) => (atual === "" ? pastaDesteRepo.id : atual));
+  }, [pastaDesteRepo]);
 
   const lerLista = useCallback(async () => {
     setListaErro(null);
@@ -455,11 +472,15 @@ export function PullRequestPanel({
               <Button size="sm" disabled={projeto === "" || acao !== null} onClick={() => void trazerParaMaquina()}>
                 <DownloadIcon className="size-3.5" /> Buscar ramo do PR
               </Button>
-              {repositorios.length === 0 ? (
-                <Button size="sm" variant="ghost" onClick={() => onNavigate("git")}>
-                  <GitBranchIcon className="size-3.5" /> Abrir pasta local
+              {pastaDesteRepo === null ? (
+                <Button size="sm" variant="secondary" loading={mapeando} onClick={() => void mapear(repo)}>
+                  <FolderIcon className="size-3.5" /> Mapear a pasta deste repo
                 </Button>
-              ) : null}
+              ) : (
+                <Button size="sm" variant="ghost" onClick={() => onNavigate("git")}>
+                  <GitBranchIcon className="size-3.5" /> Abrir na seção Git
+                </Button>
+              )}
             </div>
 
             <div className="border-t border-zinc-200 pt-3 dark:border-zinc-800">

@@ -13,6 +13,7 @@ import type {
   DeployRun,
   LogEvent,
   StepEvent,
+  FileContent,
   FileDiff,
   GitActionOutcome,
   GitIdentity,
@@ -336,6 +337,11 @@ export const api = {
     }),
   gitDeleteTag: (projectId: number, name: string) => invoke<TagInfo[]>("git_delete_tag", { projectId, name }),
   gitRemotes: (projectId: number) => invoke<RemoteInfo[]>("git_remotes", { projectId }),
+  // Árvore lida do índice (`git ls-files`) e conteúdo lido do HEAD — nada de
+  // caminho absoluto: o git responde por caminho relativo dentro do repositório.
+  gitTree: (projectId: number) => invoke<string[]>("git_tree", { projectId }),
+  gitFileContent: (projectId: number, path: string) =>
+    invoke<FileContent>("git_file_content", { projectId, path }),
   // Só lê refs no remoto, com prazo de 25s: prova que esta máquina consegue
   // publicar. Um `ok:false` traz a frase do que falta, não um erro.
   gitCheckRemote: (projectId: number, remote?: string | null) =>

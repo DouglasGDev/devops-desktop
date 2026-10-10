@@ -4,7 +4,7 @@ import { api } from "../lib/api";
 import { useGitRepo } from "../lib/useGitRepo";
 import { formatRelative, formatTimestamp } from "../lib/format";
 import { useApp } from "../store/AppContext";
-import type { CommitDetail, FileDiff, GitEditor, PullStrategy, RemoteAccess, ResetMode, SecretFinding, ViewId } from "../types";
+import type { CommitDetail, FileContent, FileDiff, GitEditor, PullStrategy, RemoteAccess, ResetMode, SecretFinding, ViewId } from "../types";
 import {
   AlertTriangleIcon,
   CheckIcon,
@@ -44,8 +44,9 @@ import { PublishDialog } from "../components/git/PublishDialog";
 import { RemotesPanel } from "../components/git/RemotesPanel";
 import { SecretsPanel } from "../components/git/SecretsPanel";
 import { TagsPanel } from "../components/git/TagsPanel";
+import { ConteudoArquivo, TreePanel } from "../components/git/TreePanel";
 
-type Tab = "changes" | "history" | "branches" | "tags" | "remotes" | "secrets";
+type Tab = "changes" | "tree" | "history" | "branches" | "tags" | "remotes" | "secrets";
 
 /** O que cada modo de `git reset` faz, do jeito que os testes do backend
  * verificam: soft preserva o índice, mixed solta o índice, hard substitui o
@@ -64,6 +65,7 @@ const RESET_HINTS: Record<ResetMode, string> = {
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "changes", label: "Alterações" },
+  { id: "tree", label: "Árvore" },
   { id: "history", label: "Histórico" },
   { id: "branches", label: "Ramos" },
   { id: "tags", label: "Tags" },
@@ -88,12 +90,20 @@ function targetLabel(target: DiffTarget, branch: string | null): string {
   }
 }
 
-export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
+/** `projetoFixo` abre a seção Git sobre um único repositório, sem o seletor. */
+export function GitView({
+  onNavigate,
+  projetoFixo = null,
+}: {
+  onNavigate: (v: ViewId) => void;
+  projetoFixo?: number | null;
+}) {
   const { projects, settings, pushToast, reloadProjects } = useApp();
   const gitProjects = useMemo(() => projects.filter((p) => p.isGitRepo), [projects]);
-  const [projectId, setProjectId] = useState<number | null>(gitProjects[0]?.id ?? null);
+  const [projectId, setProjectId] = useState<number | null>(projetoFixo ?? gitProjects[0]?.id ?? null);
   const [tab, setTab] = useState<Tab>("changes");
   const [target, setTarget] = useState<DiffTarget | null>(null);
+  const [conteudo, setConteudo] = useState<FileContent | null>(null);
   const [diffFiles, setDiffFiles] = useState<FileDiff[]>([]);
   const [diffLoading, setDiffLoading] = useState(false);
   const [detail, setDetail] = useState<CommitDetail | null>(null);
@@ -125,9 +135,19 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
       return;
     }
     if (projectId === null || !gitProjects.some((p) => p.id === projectId)) {
-      setProjectId(gitProjects[0].id);
+      setProjectId(projetoFixo !== null && gitProjects.some((p) => p.id === projetoFixo) ? projetoFixo : gitProjects[0].id);
     }
-  }, [gitProjects, projectId]);
+  }, [gitProjects, projectId, projetoFixo]);
+
+  // O repositório fixo manda: mudando o projeto da tela, o diff e o conteúdo
+  // abertos são de outro repositório e perdem o sentido.
+  useEffect(() => {
+    if (projetoFixo === null || !gitProjects.some((p) => p.id === projetoFixo)) return;
+    if (projetoFixo === projectId) return;
+    setProjectId(projetoFixo);
+    setTarget(null);
+    setConteudo(null);
+  }, [projetoFixo, projectId, gitProjects]);
 
   // O diff é sempre lido do git. Quando o status muda (staging, commit, troca de
   // ramo) a consulta é refeita, para a coluna da direita nunca divergir do índice.
@@ -171,9 +191,13 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
     // status é a assinatura de "alguma coisa mudou no repositório"
   }, [projectId, target, status, pushToast]);
 
-  const openFile = (path: string, staged: boolean) => setTarget({ kind: "file", path, staged });
+  const openFile = (path: string, staged: boolean) => {
+    setConteudo(null);
+    setTarget({ kind: "file", path, staged });
+  };
 
   const openHistoryCommit = (id: string) => {
+    setConteudo(null);
     setTarget({ kind: "commit", id });
   };
 
@@ -247,6 +271,7 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
       await reloadProjects();
       setProjectId(novo.id);
       setTarget(null);
+      setConteudo(null);
       setTab("changes");
       pushToast("success", `Repositório “${novo.name}” aberto.`);
     } catch (e) {
@@ -288,24 +313,27 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
     <div className="flex h-full min-h-0 flex-col gap-3">
       <Card className="p-3">
         <div className="flex flex-wrap items-end gap-3">
-          <div className="min-w-56">
-            <Field label="Repositório">
-              <Select
-                value={projectId ?? ""}
-                onChange={(e) => {
-                  setProjectId(Number(e.target.value));
-                  setTarget(null);
-                  setTab("changes");
-                }}
-              >
-                {gitProjects.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-          </div>
+          {projetoFixo === null ? (
+            <div className="min-w-56">
+              <Field label="Repositório">
+                <Select
+                  value={projectId ?? ""}
+                  onChange={(e) => {
+                    setProjectId(Number(e.target.value));
+                    setTarget(null);
+                    setConteudo(null);
+                    setTab("changes");
+                  }}
+                >
+                  {gitProjects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </div>
+          ) : null}
           {branch !== null || status?.detachedAt ? (
             <div className="flex items-end gap-2 pb-1">
               <Badge tone="accent">
@@ -465,7 +493,7 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
 
       <div className="flex min-h-0 flex-1 gap-4">
         <div className="flex w-[400px] shrink-0 flex-col gap-2 overflow-y-auto pr-1">
-          <div className="flex gap-1">
+          <div className="flex flex-wrap gap-1">
             {TABS.map(({ id, label }) => (
               <button
                 key={id}
@@ -490,6 +518,20 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
 
           {status !== null && tab === "changes" ? (
             <ChangesPanel git={git} status={status} selected={target?.kind === "file" ? { path: target.path, staged: target.staged } : null} onSelectFile={openFile} />
+          ) : null}
+
+          {tab === "tree" && projectId !== null ? (
+            <TreePanel
+              projectId={projectId}
+              status={status}
+              busy={git.busy !== null}
+              selectedPath={target?.kind === "file" ? target.path : null}
+              onSelecionarArquivo={openFile}
+              onConteudo={(arquivo) => {
+                setTarget(null);
+                setConteudo(arquivo);
+              }}
+            />
           ) : null}
 
           {tab === "history" ? (
@@ -517,25 +559,27 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
         </div>
 
         <div className="flex min-w-0 flex-1 flex-col gap-2 overflow-y-auto">
-          <div className="flex flex-wrap items-center gap-2">
-            <SectionTitle>Diff</SectionTitle>
-            {target ? (
-              <>
-                <span className="min-w-0 truncate text-xs text-zinc-500 dark:text-zinc-400" title={targetLabel(target, branch)}>
-                  {targetLabel(target, branch)}
-                </span>
-                <Button size="sm" variant="ghost" className="ml-auto" onClick={() => setTarget(null)} title="Fechar o diff">
-                  <XIcon className="size-3.5" />
-                </Button>
-              </>
-            ) : (
-              <p className="text-xs text-zinc-400 dark:text-zinc-500">
-                Escolha um arquivo, um commit ou compare dois pontos para ver as linhas alteradas.
-              </p>
-            )}
-          </div>
+          {conteudo === null ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <SectionTitle>Diff</SectionTitle>
+              {target ? (
+                <>
+                  <span className="min-w-0 truncate text-xs text-zinc-500 dark:text-zinc-400" title={targetLabel(target, branch)}>
+                    {targetLabel(target, branch)}
+                  </span>
+                  <Button size="sm" variant="ghost" className="ml-auto" onClick={() => setTarget(null)} title="Fechar o diff">
+                    <XIcon className="size-3.5" />
+                  </Button>
+                </>
+              ) : (
+                <p className="text-xs text-zinc-400 dark:text-zinc-500">
+                  Escolha um arquivo, um commit ou compare dois pontos para ver as linhas alteradas.
+                </p>
+              )}
+            </div>
+          ) : null}
 
-          {detail ? (
+          {conteudo === null && detail ? (
             <Card className="p-3">
               <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
                 <CommitIcon className="size-4 text-teal-600" />
@@ -585,7 +629,13 @@ export function GitView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
             </Card>
           ) : null}
 
-          {target === null ? (
+          {conteudo !== null ? (
+            <ConteudoArquivo
+              arquivo={conteudo}
+              onFechar={() => setConteudo(null)}
+              onAbrirNoEditor={openInEditor}
+            />
+          ) : target === null ? (
             <Card className="flex min-h-40 items-center justify-center">
               <EmptyState
                 icon={<CommitIcon className="size-8" />}
