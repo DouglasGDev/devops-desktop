@@ -5,6 +5,40 @@ import type { DeployProfile, DeployProfileInput, DeployStrategy, Project } from 
 import { Button, Checkbox, Field, Modal, Select, STRATEGY_HINTS, STRATEGY_LABELS, Textarea, Input } from "../ui";
 
 const STRATEGIES: DeployStrategy[] = ["sftp", "git", "artifacts", "script", "docker"];
+/** Estratégias que funcionam sem servidor: nada de SFTP, Git remoto ou Docker remoto. */
+const STRATEGIES_LOCAIS: DeployStrategy[] = ["artifacts", "script"];
+/** Valor sentinela do <Select>: o servidor "zero" é a máquina local. */
+const MAQUINA_LOCAL = 0;
+/** No modo sem servidor a estratégia é a mesma, mas o destino muda o texto. */
+const STRATEGY_HINTS_LOCAIS: Record<string, string> = {
+  artifacts: "Compila nesta máquina e copia apenas os artefatos listados. Nem o node_modules nem o código-fonte vão para o destino.",
+  script: "Executa a sequência de comandos que você configurou nesta máquina, com log e código de saída de cada etapa.",
+};
+
+/** O mesmo critério do motor: caminho absoluto de pasta, sem "..". */
+function isLocalAbsolutePath(path: string): boolean {
+  const raw = path.trim();
+  if (raw === "" || raw.length > 512 || raw.includes("\0") || raw.includes("..") || raw.includes("\n") || raw.includes("\r"))
+    return false;
+  const unificado = raw.replace(/\\/g, "/");
+  if (unificado.startsWith("//")) return unificado.split("/").filter((p) => p !== "").length >= 2;
+  if (unificado.startsWith("/")) return unificado.replace(/^\/+|\/+$/g, "") !== "";
+  return /^[A-Za-z]:\/.+/.test(unificado);
+}
+
+function isRemoteAbsolutePath(path: string): boolean {
+  const raw = path.trim();
+  return raw.startsWith("/") && !raw.includes("\n") && !raw.includes("\r");
+}
+
+/** Caminho comparável: barras à frente, sem repetir nem sobrar separador. */
+function normPath(path: string): string {
+  return path
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/{2,}/g, "/")
+    .replace(/\/+$/, "");
+}
 
 function toLines(value: string): string[] {
   return value
@@ -19,7 +53,8 @@ function fromLines(items: string[]): string {
 
 type Draft = {
   name: string;
-  serverId: number;
+  /** `null` é o modo sem servidor: publica nesta máquina. */
+  serverId: number | null;
   strategy: DeployStrategy;
   gitBranch: string;
   remotePath: string;
@@ -65,8 +100,9 @@ function draftFrom(profile: DeployProfile | null, servers: { id: number }[]): Dr
   }
   return {
     name: "",
-    serverId: servers[0]?.id ?? 0,
-    strategy: "sftp",
+    // Sem servidor cadastrado, o único destino possível é esta máquina.
+    serverId: servers[0]?.id ?? null,
+    strategy: servers[0] ? "sftp" : "artifacts",
     gitBranch: "",
     remotePath: "",
     includePaths: "",
@@ -109,17 +145,72 @@ export function ProfileForm({
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
     setDraft((current) => ({ ...current, [key]: value }));
 
+  const localMode = draft.serverId === null;
+  const estrategias = localMode ? STRATEGIES_LOCAIS : STRATEGIES;
+
+  /** Trocar o destino troca também o que faz sentido publicar ali. */
+  const escolherServidor = (id: number) => {
+    setDraft((current) => {
+      const serverId = id === MAQUINA_LOCAL ? null : id;
+      const semHost = serverId === null;
+      return {
+        ...current,
+        serverId,
+        strategy: semHost && !STRATEGIES_LOCAIS.includes(current.strategy) ? "artifacts" : current.strategy,
+        // release por symlink é um mecanismo do servidor
+        releasesEnabled: semHost ? false : current.releasesEnabled,
+      };
+    });
+  };
+
+  /** Trocar de estratégia traz a branch do projeto quando o Git precisa dela. */
+  const escolherEstrategia = (strategy: DeployStrategy) =>
+    setDraft((current) => ({
+      ...current,
+      strategy,
+      gitBranch:
+        strategy === "git" && current.gitBranch.trim() === "" ? project.gitBranch ?? "main" : current.gitBranch,
+    }));
+
   const enviar = async () => {
-    if (servers.length === 0) {
-      setError("cadastre um servidor SSH antes de criar o modelo");
-      return;
-    }
     if (!draft.name.trim()) {
       setError("dê um nome ao modelo (ex.: produção, homologação)");
       return;
     }
-    if (!draft.remotePath.trim().startsWith("/")) {
+    const destino = draft.remotePath.trim();
+    if (localMode) {
+      if (!isLocalAbsolutePath(destino)) {
+        setError("a pasta de destino precisa ser um caminho absoluto nesta máquina, como D:\\publicados\\site");
+        return;
+      }
+      const alvo = normPath(destino);
+      const origem = normPath(project.localPath);
+      if (origem !== "" && (alvo === origem || alvo.startsWith(`${origem}/`))) {
+        setError("a pasta de destino não pode ficar dentro da pasta do projeto — escolha uma pasta separada");
+        return;
+      }
+    } else if (!isRemoteAbsolutePath(destino)) {
       setError("o diretório remoto precisa ser um caminho absoluto, como /var/www/site");
+      return;
+    }
+    if (draft.strategy === "script" && toLines(draft.prepareCommands).length === 0) {
+      setError("um deploy por script precisa de pelo menos um comando de preparação");
+      return;
+    }
+    if (draft.strategy === "git" && draft.gitBranch.trim() === "") {
+      setError("escolha a branch que o servidor vai publicar");
+      return;
+    }
+    if (
+      draft.strategy === "docker" &&
+      toLines(draft.buildCommands).length === 0 &&
+      toLines(draft.restartCommands).length === 0
+    ) {
+      setError("um deploy com Docker precisa de comandos de build ou de reinicialização dos containers");
+      return;
+    }
+    if (draft.stepTimeoutSecs < 10 || draft.stepTimeoutSecs > 7200) {
+      setError("o tempo limite por etapa fica entre 10 e 7200 segundos");
       return;
     }
     const input: DeployProfileInput = {
@@ -129,7 +220,7 @@ export function ProfileForm({
       serverId: draft.serverId,
       strategy: draft.strategy,
       gitBranch: draft.gitBranch.trim() === "" ? null : draft.gitBranch.trim(),
-      remotePath: draft.remotePath.trim(),
+      remotePath: destino,
       includePaths: toLines(draft.includePaths),
       excludePaths: toLines(draft.excludePaths),
       prepareCommands: toLines(draft.prepareCommands),
@@ -140,7 +231,7 @@ export function ProfileForm({
       testCommands: toLines(draft.testCommands),
       secretKeys: toLines(draft.secretKeys),
       backupEnabled: draft.backupEnabled,
-      releasesEnabled: draft.releasesEnabled,
+      releasesEnabled: localMode ? false : draft.releasesEnabled,
       deleteExtras: draft.deleteExtras,
       stepTimeoutSecs: draft.stepTimeoutSecs,
       isDefault: draft.isDefault,
@@ -149,7 +240,10 @@ export function ProfileForm({
     setError(null);
     try {
       const saved = await api.saveDeployProfile(input);
-      pushToast("success", `Modelo “${saved.name}” salvo para ${saved.serverName}.`);
+      pushToast(
+        "success",
+        `Modelo “${saved.name}” salvo${saved.serverName ? ` para ${saved.serverName}` : " para esta máquina"}.`,
+      );
       onSaved(saved);
     } catch (e) {
       setError(String(e));
@@ -183,9 +277,12 @@ export function ProfileForm({
           <Field label="Nome do modelo">
             <Input value={draft.name} onChange={(e) => set("name", e.target.value)} placeholder="produção" />
           </Field>
-          <Field label="Servidor de destino">
-            <Select value={draft.serverId} onChange={(e) => set("serverId", Number(e.target.value))}>
-              {servers.length === 0 ? <option value={0}>Nenhum servidor cadastrado</option> : null}
+          <Field label="Destino">
+            <Select
+              value={draft.serverId ?? MAQUINA_LOCAL}
+              onChange={(e) => escolherServidor(Number(e.target.value))}
+            >
+              <option value={MAQUINA_LOCAL}>Nesta máquina (sem SSH)</option>
               {servers.map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.name} · {s.host}
@@ -195,9 +292,9 @@ export function ProfileForm({
           </Field>
         </div>
 
-        <Field label="Estratégia de publicação" hint={STRATEGY_HINTS[draft.strategy]}>
-          <Select value={draft.strategy} onChange={(e) => set("strategy", e.target.value as DeployStrategy)}>
-            {STRATEGIES.map((s) => (
+        <Field label="Estratégia de publicação" hint={(localMode ? STRATEGY_HINTS_LOCAIS : STRATEGY_HINTS)[draft.strategy]}>
+          <Select value={draft.strategy} onChange={(e) => escolherEstrategia(e.target.value as DeployStrategy)}>
+            {estrategias.map((s) => (
               <option key={s} value={s}>
                 {STRATEGY_LABELS[s]}
               </option>
@@ -206,16 +303,13 @@ export function ProfileForm({
         </Field>
 
         <div className="grid gap-3 sm:grid-cols-2">
-          <Field
-            label="Diretório remoto do projeto"
-            hint="Caminho absoluto no servidor. É para onde os arquivos vão."
-          >
+          <Field label={localMode ? "Pasta de destino nesta máquina" : "Diretório remoto do projeto"}>
             <Input
               spellCheck={false}
               className="font-mono text-xs"
               value={draft.remotePath}
               onChange={(e) => set("remotePath", e.target.value)}
-              placeholder="/var/www/site"
+              placeholder={localMode ? "D:/publicados/site" : "/var/www/site"}
             />
           </Field>
           {draft.strategy === "git" ? (
@@ -271,38 +365,48 @@ export function ProfileForm({
         {lista(
           "prepareCommands",
           "Comandos de preparação",
-          "Executados no servidor antes do envio. Um comando por linha.",
-          "mkdir -p /var/www/site",
+          localMode
+            ? "Executados nesta máquina antes da cópia. Um comando por linha."
+            : "Executados no servidor antes do envio. Um comando por linha.",
+          localMode ? "if not exist \"D:\\publicados\\site\" mkdir \"D:\\publicados\\site\"" : "mkdir -p /var/www/site",
         )}
         {lista(
           "testCommands",
           "Comandos de teste",
-          "Executados no computador antes de qualquer mudança no servidor (etapa 6). Sem itens, a etapa é registrada como não executada.",
+          localMode
+            ? "Executados nesta máquina antes de qualquer mudança no destino (etapa 6). Sem itens, a etapa é registrada como não executada."
+            : "Executados no computador antes de qualquer mudança no servidor (etapa 6). Sem itens, a etapa é registrada como não executada.",
           "npm run test\nnpm run lint",
         )}
         {lista(
           "buildCommands",
           "Comandos de build",
-          "Executados no computador local, antes de enviar qualquer coisa.",
+          localMode
+            ? "Executados nesta máquina, antes de copiar qualquer coisa."
+            : "Executados no computador local, antes de enviar qualquer coisa.",
           "npm ci && npm run build",
         )}
         {lista(
           "restartCommands",
           "Comandos de reinicialização",
-          "Executados no servidor depois do envio (recarregar serviço, limpar cache).",
-          "sudo systemctl reload caddy",
+          localMode
+            ? "Executados nesta máquina depois da cópia (recarregar serviço, limpar cache)."
+            : "Executados no servidor depois do envio (recarregar serviço, limpar cache).",
+          localMode ? "iisreset /restart" : "sudo systemctl reload caddy",
         )}
         {lista(
           "healthChecks",
           "Testes de saúde",
-          "Comandos de leitura executados no servidor ao final. Qualquer falha marca o deploy como fracassado.",
+          localMode
+            ? "Comandos de leitura executados nesta máquina ao final. Qualquer falha marca o deploy como fracassado."
+            : "Comandos de leitura executados no servidor ao final. Qualquer falha marca o deploy como fracassado.",
           "curl -fsS http://127.0.0.1/healthz",
         )}
         {lista(
           "rollbackCommands",
           "Comandos de rollback",
           "Usados pela ação de retorno ao estado anterior.",
-          "ln -sfn /var/www/releases/anterior /var/www/site/current",
+          localMode ? "copy /Y D:\\publicados\\guarda\\* D:\\publicados\\site" : "ln -sfn /var/www/releases/anterior /var/www/site/current",
         )}
 
         {lista(
@@ -316,13 +420,19 @@ export function ProfileForm({
           <Checkbox
             checked={draft.backupEnabled}
             onChange={(v) => set("backupEnabled", v)}
-            label="Criar backup do diretório atual antes de publicar"
+            label={
+              localMode
+                ? "Guardar o que já está no destino antes de sobrescrever (ponto de recuperação)"
+                : "Criar backup do diretório atual antes de publicar"
+            }
           />
-          <Checkbox
-            checked={draft.releasesEnabled}
-            onChange={(v) => set("releasesEnabled", v)}
-            label="Publicar em releases separadas e trocar o symlink ativo (rollback mais seguro)"
-          />
+          {!localMode && (
+            <Checkbox
+              checked={draft.releasesEnabled}
+              onChange={(v) => set("releasesEnabled", v)}
+              label="Publicar em releases separadas e trocar o symlink ativo (rollback mais seguro)"
+            />
+          )}
           <Checkbox
             checked={draft.deleteExtras}
             onChange={(v) => set("deleteExtras", v)}
@@ -330,8 +440,9 @@ export function ProfileForm({
               <span>
                 Apagar no destino os arquivos que não existem na origem
                 <span className="block text-[11px] text-red-600 dark:text-red-400">
-                  Operação destrutiva: só marque se você tem certeza de que o destino não guarda nada além do
-                  conteúdo deste projeto.
+                  {draft.deleteExtras && !draft.backupEnabled && localMode
+                    ? "Sem ponto de recuperação: os arquivos removidos do destino não voltam."
+                    : "Operação destrutiva: só marque se você tem certeza de que o destino não guarda nada além do conteúdo deste projeto."}
                 </span>
               </span>
             }

@@ -390,9 +390,10 @@ export type DeployProfile = {
   id: number;
   projectId: number;
   name: string;
-  serverId: number;
-  serverName: string;
-  serverEnvironment: string;
+  /** `null` é o modo sem servidor: a publicação vai para uma pasta desta máquina. */
+  serverId: number | null;
+  serverName: string | null;
+  serverEnvironment: string | null;
   strategy: DeployStrategy;
   gitBranch: string | null;
   remotePath: string;
@@ -418,7 +419,8 @@ export type DeployProfileInput = {
   id: number | null;
   projectId: number;
   name: string;
-  serverId: number;
+  /** `null` pede o modo sem servidor — só estratégias que não precisam de host. */
+  serverId: number | null;
   strategy: DeployStrategy;
   gitBranch: string | null;
   remotePath: string;
@@ -458,7 +460,8 @@ export interface DeployRun {
   id: number;
   profileId: number;
   projectName: string;
-  serverName: string;
+  /** `null` quando o modelo publica nesta máquina. */
+  serverName: string | null;
   strategy: DeployStrategy;
   status: "running" | "success" | "failed" | "cancelled";
   startedAt: string;

@@ -17,6 +17,7 @@ import {
   Button,
   Card,
   Checkbox,
+  DESTINO_LOCAL,
   EmptyState,
   ENV_TONES,
   Field,
@@ -33,10 +34,10 @@ const LOG_LIMIT = 400;
 
 /**
  * Tela de deploy (capítulo 10). Nada aqui simula resultado: o pipeline roda no
- * motor Rust e esta tela desenha apenas os eventos que chegam do servidor.
+ * motor Rust e esta tela desenha apenas os eventos que chegam dele.
  */
 export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
-  const { servers, pushToast } = useApp();
+  const { pushToast } = useApp();
   const [profiles, setProfiles] = useState<DeployProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [profileId, setProfileId] = useState<number | null>(null);
@@ -157,7 +158,7 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
         pushToast(
           finished.status === "success" ? "success" : "error",
           finished.status === "success"
-            ? `Deploy #${finished.id} concluído em ${finished.serverName}.`
+            ? `Deploy #${finished.id} concluído${finished.serverName ? ` em ${finished.serverName}` : " nesta máquina"}.`
             : `Deploy #${finished.id} terminou como “${finished.status}”: ${finished.detail ?? "sem detalhes"}`,
         );
       });
@@ -256,12 +257,11 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
       <EmptyState
         icon={<RocketIcon className="size-8" />}
         title="Nenhum modelo de deploy cadastrado"
-        description="Um modelo liga um projeto local a um servidor: estratégia, comandos, variáveis e limites. Sem modelo não há o que publicar."
+        description="Um modelo liga um projeto local a um destino — servidor SSH ou pasta desta máquina. Sem modelo não há o que publicar."
       >
         <Button variant="primary" onClick={() => onNavigate("projects")}>
           Cadastrar projeto e modelo
         </Button>
-        {servers.length === 0 ? <Button onClick={() => onNavigate("servers")}>Cadastrar servidor SSH</Button> : null}
       </EmptyState>
     );
   }
@@ -283,7 +283,7 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
               >
                 {profiles.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.name} · {p.serverName} · {STRATEGY_LABELS[p.strategy]}
+                    {p.name} · {p.serverName ?? DESTINO_LOCAL} · {STRATEGY_LABELS[p.strategy]}
                   </option>
                 ))}
               </Select>
@@ -304,7 +304,9 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
 
         {profile ? (
           <p className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-            <Badge tone={ENV_TONES[profile.serverEnvironment] ?? "neutral"}>{profile.serverName}</Badge>
+            <Badge tone={ENV_TONES[profile.serverEnvironment ?? "other"] ?? "neutral"}>
+              {profile.serverName ?? DESTINO_LOCAL}
+            </Badge>
             <Badge>{STRATEGY_LABELS[profile.strategy]}</Badge>
             <span className="font-mono text-zinc-500 dark:text-zinc-400">{profile.remotePath}</span>
             {profile.releasesEnabled ? <Badge tone="accent">releases + symlink</Badge> : null}
@@ -380,7 +382,7 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div className="min-w-0">
               <SectionTitle>
-                Execução #{run.id} · {run.projectName} → {run.serverName}
+                Execução #{run.id} · {run.projectName} → {run.serverName ?? DESTINO_LOCAL}
               </SectionTitle>
               <p className="text-xs text-zinc-500 dark:text-zinc-400">
                 {STRATEGY_LABELS[run.strategy] ?? run.strategy} · iniciada {formatDateTime(run.startedAt)}
@@ -447,7 +449,7 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
                   onClick={() => void openRun(r.id)}
                   className="min-w-0 flex-1 text-left text-sm transition hover:text-teal-700 dark:hover:text-teal-300"
                 >
-                  <span className="font-medium">#{r.id}</span> {r.projectName} → {r.serverName}
+                  <span className="font-medium">#{r.id}</span> {r.projectName} → {r.serverName ?? DESTINO_LOCAL}
                   <span className="block truncate text-[11px] text-zinc-500 dark:text-zinc-400">
                     {formatDateTime(r.startedAt)} · {STRATEGY_LABELS[r.strategy] ?? r.strategy}
                     {r.detail ? ` · ${r.detail}` : ""}
@@ -473,6 +475,11 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
       {secretsFor ? (
         <SecretsDialog
           keys={profile?.secretKeys ?? []}
+          local={
+            (secretsFor.kind === "rollback"
+              ? runs.find((r) => r.id === secretsFor.runId)?.serverName
+              : profile?.serverName) == null
+          }
           title={
             secretsFor.kind === "rollback"
               ? `Variáveis do rollback · execução #${secretsFor.runId}`
@@ -514,12 +521,14 @@ function SecretsDialog({
   keys,
   title,
   actionLabel,
+  local,
   onClose,
   onSubmit,
 }: {
   keys: string[];
   title: string;
   actionLabel: string;
+  local: boolean;
   onClose: () => void;
   onSubmit: (values: Record<string, string>) => void;
 }) {
@@ -540,13 +549,14 @@ function SecretsDialog({
     <Modal open onClose={onClose} title={title} width="max-w-md">
       {keys.length === 0 ? (
         <p className="text-sm text-zinc-600 dark:text-zinc-300">
-          Este modelo não declara variáveis. Confirme para executar as etapas no servidor.
+          Este modelo não declara variáveis. Confirme para executar as etapas.
         </p>
       ) : (
         <div className="space-y-2.5">
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            Os valores ficam apenas nesta janela e na memória da execução; vão ao servidor dentro do script enviado
-            pela stdin do SSH e não são gravados em lugar nenhum.
+            {local
+              ? "Os valores ficam apenas nesta janela e na memória da execução; entram pelo ambiente dos comandos desta máquina e não são gravados em lugar nenhum."
+              : "Os valores ficam apenas nesta janela e na memória da execução; vão ao servidor dentro do script enviado pela stdin do SSH e não são gravados em lugar nenhum."}
           </p>
           {keys.map((key) => (
             <Field key={key} label={key}>

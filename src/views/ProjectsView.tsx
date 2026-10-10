@@ -66,8 +66,13 @@ export function ProjectsView() {
   const remove = async () => {
     if (!deleting) return;
     try {
-      await api.deleteProject(deleting.id);
-      pushToast("info", `Projeto “${deleting.name}” removido do cadastro. Nenhum arquivo local foi apagado.`);
+      const modelos = await api.deleteProject(deleting.id);
+      pushToast(
+        "info",
+        modelos > 0
+          ? `Projeto “${deleting.name}” removido do cadastro, junto com ${modelos} modelo(s) de deploy. Nenhum arquivo local foi apagado.`
+          : `Projeto “${deleting.name}” removido do cadastro. Nenhum arquivo local foi apagado.`,
+      );
       setDeleting(null);
       await reloadProjects();
     } catch (e) {
@@ -225,7 +230,7 @@ export function ProjectsView() {
       <Confirm
         open={deleting !== null}
         title="Remover projeto"
-        message={`Remover “${deleting?.name}” do cadastro? Os arquivos em ${deleting?.localPath} não são afetados.`}
+        message={`Remover “${deleting?.name}” do cadastro? Os modelos de deploy dele e o histórico dessas publicações saem junto. Os arquivos em ${deleting?.localPath} não são afetados.`}
         confirmLabel="Remover"
         onConfirm={() => void remove()}
         onClose={() => setDeleting(null)}

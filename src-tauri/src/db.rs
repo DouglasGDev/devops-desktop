@@ -157,12 +157,69 @@ const MIGRATIONS: &[&str] = &[
         started_at TEXT,
         finished_at TEXT
     );
-    CREATE INDEX IF NOT EXISTS idx_run_steps_run ON deploy_run_steps(run_id, position);
+    -- Único porque `upsert_step` grava com ON CONFLICT(run_id, position): sem um
+    -- índice único nessas colunas o SQLite recusa a instrução inteira.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_run_steps_run ON deploy_run_steps(run_id, position);
     CREATE INDEX IF NOT EXISTS idx_runs_started ON deploy_runs(started_at DESC);
     "#,
     // v4 — testes automatizados da etapa 6 do pipeline
     r#"
     ALTER TABLE deploy_profiles ADD COLUMN test_commands TEXT NOT NULL DEFAULT '[]';
+    "#,
+    // v5 — modelo de deploy sem servidor: o destino pode ser esta própria máquina.
+    // SQLite não tira um NOT NULL de coluna existente, então a tabela é reconstruída.
+    // O `DROP TABLE` do meio é o perigo real: com as chaves estrangeiras aplicadas
+    // (o SQLite embutido vem com SQLITE_DEFAULT_FOREIGN_KEYS=1), apagar
+    // deploy_profiles apagaria em cascata todo o histórico de deploy do usuário.
+    // O procedimento documentado para reconstruir tabela-mãe é desligar a checagem
+    // durante o troca-e-troca e ligar de novo no fim. A v5 também conserta o índice
+    // dos passos, que impedia qualquer etapa de ser registrada.
+    r#"
+    PRAGMA foreign_keys=OFF;
+    CREATE TABLE deploy_profiles_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        server_id INTEGER REFERENCES servers(id) ON DELETE CASCADE,
+        strategy TEXT NOT NULL CHECK (strategy IN ('sftp','git','artifacts','script','docker')),
+        git_branch TEXT,
+        remote_path TEXT NOT NULL,
+        include_paths TEXT NOT NULL DEFAULT '[]',
+        exclude_paths TEXT NOT NULL DEFAULT '[]',
+        prepare_commands TEXT NOT NULL DEFAULT '[]',
+        build_commands TEXT NOT NULL DEFAULT '[]',
+        restart_commands TEXT NOT NULL DEFAULT '[]',
+        health_checks TEXT NOT NULL DEFAULT '[]',
+        rollback_commands TEXT NOT NULL DEFAULT '[]',
+        secret_keys TEXT NOT NULL DEFAULT '[]',
+        backup_enabled INTEGER NOT NULL DEFAULT 1,
+        releases_enabled INTEGER NOT NULL DEFAULT 0,
+        delete_extras INTEGER NOT NULL DEFAULT 0,
+        step_timeout_secs INTEGER NOT NULL DEFAULT 600,
+        is_default INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        test_commands TEXT NOT NULL DEFAULT '[]',
+        UNIQUE (project_id, name)
+    );
+    INSERT INTO deploy_profiles_new (id, project_id, name, server_id, strategy, git_branch, remote_path,
+        include_paths, exclude_paths, prepare_commands, build_commands, restart_commands, health_checks,
+        rollback_commands, secret_keys, backup_enabled, releases_enabled, delete_extras, step_timeout_secs,
+        is_default, created_at, updated_at, test_commands)
+    SELECT id, project_id, name, server_id, strategy, git_branch, remote_path,
+        include_paths, exclude_paths, prepare_commands, build_commands, restart_commands, health_checks,
+        rollback_commands, secret_keys, backup_enabled, releases_enabled, delete_extras, step_timeout_secs,
+        is_default, created_at, updated_at, test_commands FROM deploy_profiles;
+    DROP TABLE deploy_profiles;
+    ALTER TABLE deploy_profiles_new RENAME TO deploy_profiles;
+    CREATE INDEX IF NOT EXISTS idx_profiles_project ON deploy_profiles(project_id);
+    -- A v3 criava o índice das etapas sem ser único, e `upsert_step` grava com
+    -- ON CONFLICT(run_id, position): sem índice único nessas colunas o SQLite recusa
+    -- a instrução e nenhuma etapa era registrada no histórico. Aqui o índice é trocado.
+    DELETE FROM deploy_run_steps WHERE id NOT IN (SELECT MIN(id) FROM deploy_run_steps GROUP BY run_id, position);
+    DROP INDEX IF EXISTS idx_run_steps_run;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_run_steps_run ON deploy_run_steps(run_id, position);
+    PRAGMA foreign_keys=ON;
     "#,
 ];
 
@@ -180,6 +237,11 @@ pub fn init(app: &tauri::AppHandle) -> Result<Connection, String> {
     let _wal: String = conn
         .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
         .map_err(|e| format!("falha ao ativar WAL: {e}"))?;
+    // O SQLite embutido já vem com SQLITE_DEFAULT_FOREIGN_KEYS=1, mas as cascatas do
+    // esquema são parte da consistência dos dados: a promessa é declarada aqui, e não
+    // deixada nas mãos de como a lib foi compilada.
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .map_err(|e| format!("falha ao ativar as chaves estrangeiras: {e}"))?;
     migrate(&conn)?;
     Ok(conn)
 }
@@ -333,14 +395,64 @@ pub fn update_server_row(conn: &Connection, id: i64, input: &ServerInput) -> Res
     get_server(conn, id)
 }
 
-pub fn delete_server_row(conn: &Connection, id: i64) -> Result<(), String> {
-    let affected = conn
+/// Remove modelos e o que foi registrado por eles. As chaves estrangeiras do
+/// esquema são aplicadas — o SQLite embutido vem compilado com
+/// `SQLITE_DEFAULT_FOREIGN_KEYS=1`, então o `ON DELETE CASCADE` já funcionaria
+/// sozinho. A passada explícita existe por dois motivos: contar quantos modelos
+/// saíram (a auditoria avisa isso na interface) e continuar certa caso o banco
+/// seja aberto por uma build sem essa flag. Os ids vêm de colunas
+/// `INTEGER PRIMARY KEY`, nunca de texto do usuário.
+fn apagar_modelos_e_execucoes(conn: &Connection, modelos: &[i64]) -> Result<usize, String> {
+    if modelos.is_empty() {
+        return Ok(0);
+    }
+    let lista = modelos
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    conn.execute(
+        &format!("DELETE FROM deploy_run_steps WHERE run_id IN (SELECT id FROM deploy_runs WHERE profile_id IN ({lista}))"),
+        [],
+    )
+    .map_err(|e| format!("falha ao remover as etapas dos deploys: {e}"))?;
+    conn.execute(
+        &format!("DELETE FROM deploy_runs WHERE profile_id IN ({lista})"),
+        [],
+    )
+    .map_err(|e| format!("falha ao remover os deploys registrados: {e}"))?;
+    let afetados = conn
+        .execute(&format!("DELETE FROM deploy_profiles WHERE id IN ({lista})"), [])
+        .map_err(|e| format!("falha ao remover os modelos de deploy: {e}"))?;
+    Ok(afetados)
+}
+
+/// Ids dos modelos ligados a um projeto ou a um servidor, conforme a coluna pedida.
+fn ids_de_modelos(conn: &Connection, coluna: &str, id: i64) -> Result<Vec<i64>, String> {
+    let sql = format!("SELECT id FROM deploy_profiles WHERE {coluna} = ?1");
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("falha ao listar os modelos de deploy: {e}"))?;
+    let rows = stmt
+        .query_map([id], |r| r.get::<_, i64>(0))
+        .map_err(|e| format!("falha ao listar os modelos de deploy: {e}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| format!("falha ao listar os modelos de deploy: {e}"))
+}
+
+/// Remove um servidor junto com os modelos que publicavam nele: um modelo sem
+/// servidor é outra coisa (publica nesta máquina), então ele não pode ficar
+/// apontando para um cadastro que já era.
+pub fn delete_server_row(conn: &Connection, id: i64) -> Result<usize, String> {
+    let modelos = ids_de_modelos(conn, "server_id", id)?;
+    let removidos = apagar_modelos_e_execucoes(conn, &modelos)?;
+    let afetados = conn
         .execute("DELETE FROM servers WHERE id = ?1", [id])
         .map_err(|e| format!("falha ao remover servidor: {e}"))?;
-    if affected == 0 {
+    if afetados == 0 {
         return Err(format!("servidor #{id} não encontrado"));
     }
-    Ok(())
+    Ok(removidos)
 }
 
 pub fn server_exists(conn: &Connection, alias: &str, host: &str, user: &str, port: i64) -> Result<bool, String> {
@@ -458,14 +570,16 @@ pub fn update_project_git(
     get_project(conn, id)
 }
 
-pub fn delete_project_row(conn: &Connection, id: i64) -> Result<(), String> {
+pub fn delete_project_row(conn: &Connection, id: i64) -> Result<usize, String> {
+    let modelos = ids_de_modelos(conn, "project_id", id)?;
+    let removidos = apagar_modelos_e_execucoes(conn, &modelos)?;
     let affected = conn
         .execute("DELETE FROM projects WHERE id = ?1", [id])
         .map_err(|e| format!("falha ao remover projeto: {e}"))?;
     if affected == 0 {
         return Err(format!("projeto #{id} não encontrado"));
     }
-    Ok(())
+    Ok(removidos)
 }
 
 fn clean_optional(value: &Option<String>) -> Option<String> {
@@ -650,11 +764,11 @@ pub fn list_deploy_profiles(
 ) -> Result<Vec<DeployProfile>, String> {
     let sql = match project_id {
         Some(_) => format!(
-            "SELECT {PROFILE_COLUMNS} FROM deploy_profiles p JOIN servers s ON s.id = p.server_id \
+            "SELECT {PROFILE_COLUMNS} FROM deploy_profiles p LEFT JOIN servers s ON s.id = p.server_id \
              WHERE p.project_id = ?1 ORDER BY p.is_default DESC, p.name"
         ),
         None => format!(
-            "SELECT {PROFILE_COLUMNS} FROM deploy_profiles p JOIN servers s ON s.id = p.server_id \
+            "SELECT {PROFILE_COLUMNS} FROM deploy_profiles p LEFT JOIN servers s ON s.id = p.server_id \
              ORDER BY p.is_default DESC, p.name"
         ),
     };
@@ -686,7 +800,7 @@ pub fn list_deploy_profiles(
 pub fn get_deploy_profile(conn: &Connection, id: i64) -> Result<DeployProfile, String> {
     conn.query_row(
         &format!(
-            "SELECT {PROFILE_COLUMNS} FROM deploy_profiles p JOIN servers s ON s.id = p.server_id WHERE p.id = ?1"
+            "SELECT {PROFILE_COLUMNS} FROM deploy_profiles p LEFT JOIN servers s ON s.id = p.server_id WHERE p.id = ?1"
         ),
         [id],
         row_to_profile,
@@ -700,7 +814,9 @@ pub fn upsert_deploy_profile(
 ) -> Result<DeployProfile, String> {
     input.validate()?;
     exists(conn, "projects", input.project_id, "projeto")?;
-    exists(conn, "servers", input.server_id, "servidor")?;
+    if let Some(server_id) = input.server_id {
+        exists(conn, "servers", server_id, "servidor")?;
+    }
 
     let now = now_rfc3339();
     let include = to_json_list(&input.include_paths)?;
@@ -801,10 +917,8 @@ pub fn upsert_deploy_profile(
 }
 
 pub fn delete_deploy_profile(conn: &Connection, id: i64) -> Result<(), String> {
-    let affected = conn
-        .execute("DELETE FROM deploy_profiles WHERE id = ?1", [id])
-        .map_err(|e| format!("falha ao remover modelo de deploy: {e}"))?;
-    if affected == 0 {
+    let removidos = apagar_modelos_e_execucoes(conn, &[id])?;
+    if removidos == 0 {
         return Err(format!("modelo de deploy #{id} não encontrado"));
     }
     Ok(())
@@ -975,7 +1089,7 @@ const RUN_SELECT: &str = "r.id, r.profile_id, pr.name AS project_name, s.name AS
 const RUN_FROM: &str = "FROM deploy_runs r \
      JOIN deploy_profiles p ON p.id = r.profile_id \
      JOIN projects pr ON pr.id = p.project_id \
-     JOIN servers s ON s.id = p.server_id";
+     LEFT JOIN servers s ON s.id = p.server_id";
 
 pub fn get_run(conn: &Connection, run_id: i64) -> Result<DeployRun, String> {
     let mut base = conn
@@ -1120,6 +1234,12 @@ mod tests {
     }
 
     fn profile_input(project_id: i64, server_id: i64) -> DeployProfileInput {
+        profile_input_no_servidor(project_id, Some(server_id))
+    }
+
+    /// Mesmo molde, mas com o servidor opcional — é o que permite testar o
+    /// modelo que publica nesta máquina.
+    fn profile_input_no_servidor(project_id: i64, server_id: Option<i64>) -> DeployProfileInput {
         DeployProfileInput {
             id: None,
             project_id,
@@ -1158,8 +1278,8 @@ mod tests {
         assert_eq!(saved.build_commands.len(), 2);
         assert_eq!(saved.step_timeout_secs, 900);
         assert!(saved.releases_enabled && saved.backup_enabled && !saved.delete_extras);
-        assert_eq!(saved.server_name, "web-prod");
-        assert_eq!(saved.server_environment, "prod");
+        assert_eq!(saved.server_name.as_deref(), Some("web-prod"));
+        assert_eq!(saved.server_environment.as_deref(), Some("prod"));
 
         // somente os nomes das variáveis existem no esquema — não há coluna de valor
         let keys: String = conn
@@ -1191,9 +1311,166 @@ mod tests {
         assert_eq!(edited.step_timeout_secs, 300);
         assert_eq!(edited.id, saved.id);
 
-        // apagar o modelo remove as execuções junto (checado na etapa do motor)
+        // apagar o modelo remove as execuções junto (não há chave estrangeira ativa)
+        let outra_execucao = insert_run(&conn, other.id).unwrap();
         delete_deploy_profile(&conn, other.id).unwrap();
         assert!(get_deploy_profile(&conn, other.id).is_err());
+        assert!(get_run(&conn, outra_execucao).is_err());
+    }
+
+    #[test]
+    fn modelo_sem_servidor_guarda_o_destino_local() {
+        let conn = mem_db();
+        let (project_id, server_id) = seeded(&conn);
+
+        let mut local = profile_input_no_servidor(project_id, None);
+        local.name = "cópia local".into();
+        local.strategy = "artifacts".into();
+        local.releases_enabled = false;
+        local.remote_path = "C:\\publicados\\site".into();
+        let salvo = upsert_deploy_profile(&conn, &local).unwrap();
+
+        assert_eq!(salvo.server_id, None);
+        assert_eq!(salvo.server_name, None);
+        assert_eq!(salvo.server_environment, None);
+        assert_eq!(salvo.remote_path, "C:\\publicados\\site");
+        assert!(!salvo.releases_enabled);
+
+        // o modelo com servidor continua mostrando o servidor dele
+        let remoto = profile_input(project_id, server_id);
+        let remoto = upsert_deploy_profile(&conn, &remoto).unwrap();
+
+        let listados = list_deploy_profiles(&conn, Some(project_id)).unwrap();
+        assert_eq!(listados.len(), 2);
+        let lido_local = listados.iter().find(|p| p.id == salvo.id).unwrap();
+        assert_eq!(lido_local.server_name, None);
+        let lido_remoto = listados.iter().find(|p| p.id == remoto.id).unwrap();
+        assert_eq!(lido_remoto.server_name.as_deref(), Some("web-prod"));
+
+        // uma execução de um modelo sem servidor também aparece no histórico,
+        // sem nome de servidor
+        let run_id = insert_run(&conn, salvo.id).unwrap();
+        let execucao = get_run(&conn, run_id).unwrap();
+        assert_eq!(execucao.server_name, None);
+        assert_eq!(execucao.strategy, "artifacts");
+    }
+
+    #[test]
+    fn apagar_servidor_ou_projeto_leva_os_modelos_e_as_execucoes_junto() {
+        let conn = mem_db();
+        let server = insert_server(&conn, &sample_input(), "manual").unwrap();
+        let projeto = insert_project(&conn, "site", "C:/projetos/site", true, None, None).unwrap();
+        let modelo = upsert_deploy_profile(&conn, &profile_input(projeto.id, server.id)).unwrap();
+        let run_id = insert_run(&conn, modelo.id).unwrap();
+
+        // um modelo que publica nesta máquina não depende do servidor
+        let mut local = profile_input_no_servidor(projeto.id, None);
+        local.name = "cópia local".into();
+        local.releases_enabled = false;
+        local.remote_path = "C:/publicados/site".into();
+        let modelo_local = upsert_deploy_profile(&conn, &local).unwrap();
+
+        assert_eq!(delete_server_row(&conn, server.id).unwrap(), 1);
+        assert!(get_deploy_profile(&conn, modelo.id).is_err());
+        assert!(get_run(&conn, run_id).is_err());
+        assert!(get_deploy_profile(&conn, modelo_local.id).is_ok());
+
+        // sobrou só o modelo do projeto — apagar o projeto o leva junto
+        assert_eq!(delete_project_row(&conn, projeto.id).unwrap(), 1);
+        assert!(get_deploy_profile(&conn, modelo_local.id).is_err());
+        assert!(get_project(&conn, projeto.id).is_err());
+        assert!(list_deploy_profiles(&conn, None).unwrap().is_empty());
+    }
+
+    /// O esquema de antes da v5: `server_id` obrigatório, sem nenhum modelo sem
+    /// servidor possível. É o ponto de partida que a migração precisa sobreviver.
+    const ESQUEMA_ANTIGO: &str = "PRAGMA foreign_keys=OFF;
+        DROP TABLE deploy_profiles;
+        CREATE TABLE deploy_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            server_id INTEGER NOT NULL,
+            strategy TEXT NOT NULL,
+            git_branch TEXT,
+            remote_path TEXT NOT NULL,
+            include_paths TEXT NOT NULL DEFAULT '[]',
+            exclude_paths TEXT NOT NULL DEFAULT '[]',
+            prepare_commands TEXT NOT NULL DEFAULT '[]',
+            build_commands TEXT NOT NULL DEFAULT '[]',
+            restart_commands TEXT NOT NULL DEFAULT '[]',
+            health_checks TEXT NOT NULL DEFAULT '[]',
+            rollback_commands TEXT NOT NULL DEFAULT '[]',
+            secret_keys TEXT NOT NULL DEFAULT '[]',
+            backup_enabled INTEGER NOT NULL DEFAULT 1,
+            releases_enabled INTEGER NOT NULL DEFAULT 0,
+            delete_extras INTEGER NOT NULL DEFAULT 0,
+            step_timeout_secs INTEGER NOT NULL DEFAULT 600,
+            is_default INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            test_commands TEXT NOT NULL DEFAULT '[]',
+            UNIQUE (project_id, name)
+        );
+        PRAGMA foreign_keys=ON;";
+
+    #[test]
+    fn migracao_v5_preserva_modelos_e_historico_e_afrouxa_o_servidor() {
+        let conn = mem_db();
+        conn.execute_batch(ESQUEMA_ANTIGO).unwrap();
+        conn.pragma_update(None, "user_version", 4).unwrap();
+
+        let server = insert_server(&conn, &sample_input(), "manual").unwrap();
+        let projeto = insert_project(&conn, "site", "C:/projetos/site", true, None, None).unwrap();
+        let modelo = upsert_deploy_profile(&conn, &profile_input(projeto.id, server.id)).unwrap();
+        let run_id = insert_run(&conn, modelo.id).unwrap();
+        upsert_step(
+            &conn,
+            &StepUpdate {
+                run_id,
+                position: 1,
+                name: "Validar configurações e credenciais",
+                status: "done",
+                command: None,
+                exit_code: Some(0),
+                message: Some("modelo pronto"),
+            },
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        // nada se perdeu na reconstrução da tabela
+        let lido = get_deploy_profile(&conn, modelo.id).unwrap();
+        assert_eq!(lido.name, "produção");
+        assert_eq!(lido.remote_path, "/var/www/site");
+        assert_eq!(lido.server_name.as_deref(), Some("web-prod"));
+        assert_eq!(lido.test_commands, vec!["npm run test".to_string()]);
+        assert!(lido.is_default && lido.releases_enabled);
+
+        // o histórico é o ponto crítico: um DROP em cascata apagaria tudo
+        let execucao = get_run(&conn, run_id).unwrap();
+        assert_eq!(execucao.profile_id, modelo.id);
+        assert_eq!(execucao.steps.len(), 1);
+        assert_eq!(execucao.server_name.as_deref(), Some("web-prod"));
+
+        // e a checagem de chaves continua ligada depois da migração
+        let fk: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+        assert_eq!(fk, 1, "a v5 deixou as chaves desligadas");
+
+        // a mesma base agora aceita um modelo sem servidor
+        let mut local = profile_input_no_servidor(projeto.id, None);
+        local.name = "cópia local".into();
+        local.releases_enabled = false;
+        local.remote_path = "C:/publicados/site".into();
+        let salvo = upsert_deploy_profile(&conn, &local).unwrap();
+        assert_eq!(salvo.server_id, None);
+
+        // apagar o servidor continua levando só os modelos dele
+        assert_eq!(delete_server_row(&conn, server.id).unwrap(), 1);
+        assert!(get_deploy_profile(&conn, modelo.id).is_err());
+        assert!(get_run(&conn, run_id).is_err());
+        assert!(get_deploy_profile(&conn, salvo.id).is_ok());
     }
 
     #[test]
@@ -1255,10 +1532,42 @@ mod tests {
             .contains("projeto"));
 
         let mut servidor_falso = profile_input(project_id, server_id);
-        servidor_falso.server_id = 4242;
+        servidor_falso.server_id = Some(4242);
         assert!(upsert_deploy_profile(&conn, &servidor_falso)
             .unwrap_err()
             .contains("servidor"));
+
+        // Estratégia que exige host não pode ficar sem servidor.
+        let mut sem_servidor_remoto = profile_input_no_servidor(project_id, None);
+        sem_servidor_remoto.strategy = "sftp".into();
+        assert!(upsert_deploy_profile(&conn, &sem_servidor_remoto)
+            .unwrap_err()
+            .contains("escolha script"));
+
+        // Sem servidor, releases por symlink não existem.
+        let mut sem_servidor_release = profile_input_no_servidor(project_id, None);
+        sem_servidor_release.remote_path = "C:/publicados/site".into();
+        assert!(upsert_deploy_profile(&conn, &sem_servidor_release)
+            .unwrap_err()
+            .contains("symlink"));
+
+        // ...e o destino precisa ser um caminho absoluto desta máquina.
+        let mut sem_servidor_caminho = profile_input_no_servidor(project_id, None);
+        sem_servidor_caminho.releases_enabled = false;
+        sem_servidor_caminho.remote_path = "publicados/site".into();
+        assert!(upsert_deploy_profile(&conn, &sem_servidor_caminho)
+            .unwrap_err()
+            .contains("nesta máquina"));
+
+        // Nem uma raiz de disco nem um caminho que escapa por "..".
+        for destino in ["C:", "C:/", "/", "//", "../site", "/var/../etc"] {
+            let mut escapando = profile_input_no_servidor(project_id, None);
+            escapando.releases_enabled = false;
+            escapando.remote_path = destino.into();
+            assert!(upsert_deploy_profile(&conn, &escapando)
+                .unwrap_err()
+                .contains("nesta máquina"), "aceitou o destino {destino}");
+        }
 
         let mut duplicado = profile_input(project_id, server_id);
         duplicado.name = "produção ".into();

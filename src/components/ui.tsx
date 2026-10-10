@@ -111,6 +111,9 @@ export const ENV_TONES: Record<string, BadgeTone> = {
   other: "neutral",
 };
 
+/** Uma publicação sem servidor tem um único destino: o computador em uso. */
+export const DESTINO_LOCAL = "nesta máquina";
+
 export const AUTH_LABELS: Record<string, string> = {
   key: "Chave privada",
   agent: "SSH Agent",

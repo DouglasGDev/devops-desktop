@@ -105,7 +105,8 @@ export const api = {
   listServers: () => invoke<Server[]>("list_servers"),
   addServer: (input: ServerInput) => invoke<Server>("add_server", { input }),
   updateServer: (id: number, input: ServerInput) => invoke<Server>("update_server", { id, input }),
-  deleteServer: (id: number) => invoke<void>("delete_server", { id }),
+  /** Devolve quantos modelos de deploy que publicavam nele saíram junto. */
+  deleteServer: (id: number) => invoke<number>("delete_server", { id }),
   testConnection: (serverId: number) => invoke<ConnectionTestResult>("test_connection", { serverId }),
   // Coleta opcional de métricas reais (§12): só roda quando o usuário pede e
   // executa apenas comandos de leitura no servidor.
@@ -123,7 +124,8 @@ export const api = {
   refreshProject: (id: number) => invoke<Project>("refresh_project", { id }),
   updateProject: (id: number, name: string, defaultServerId: number | null) =>
     invoke<Project>("update_project", { id, name, defaultServerId }),
-  deleteProject: (id: number) => invoke<void>("delete_project", { id }),
+  /** Devolve quantos modelos do projeto saíram junto com ele. */
+  deleteProject: (id: number) => invoke<number>("delete_project", { id }),
 
   listDeployProfiles: (projectId: number | null) =>
     invoke<DeployProfile[]>("list_deploy_profiles", { projectId }),

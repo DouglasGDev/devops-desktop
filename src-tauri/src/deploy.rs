@@ -31,7 +31,7 @@ use crate::{
     audit, auth,
     db::{self, DbHandle},
     files, git,
-    models::{validate_strategy, DeployProfile, DeployRun, Project, Server},
+    models::{strategy_needs_server, validate_strategy, DeployProfile, DeployRun, Project, Server},
     security, ssh_test, sshexec,
 };
 
@@ -60,8 +60,19 @@ const MAX_FILES: usize = 20_000;
 const UPLOAD_CHUNK: usize = 40;
 /// Linhas de saída reaproveitadas no diagnóstico de uma etapa.
 const MAX_TAIL_LINES: usize = 20;
+/// Pasta dentro do destino local onde os pontos de recuperação ficam. É sempre
+/// ignorada pela cópia, pela limpeza de excedentes e pela conferência final.
+const BACKUPS_DIR: &str = ".devops-backups";
 /// Chave de configuração com padrões sensíveis adicionais do usuário.
 pub const SECRET_PATTERNS_SETTING: &str = "secret_patterns";
+
+/// Nomes das duas etapas que mudam de figura quando não há servidor: a conexão
+/// vira a pasta de destino e o envio vira cópia local. As outras treze descrevem
+/// o mesmo trabalho nos dois modos.
+pub const STEPS_LOCAIS: [(i64, &str); 2] = [
+    (2, "Abrir a pasta de destino"),
+    (10, "Copiar os arquivos para o destino"),
+];
 
 pub fn step_name(position: i64) -> String {
     STEPS
@@ -69,6 +80,14 @@ pub fn step_name(position: i64) -> String {
         .copied()
         .unwrap_or("Etapa")
         .to_string()
+}
+
+pub fn step_name_local(position: i64) -> String {
+    STEPS_LOCAIS
+        .iter()
+        .find(|(p, _)| *p == position)
+        .map(|(_, nome)| nome.to_string())
+        .unwrap_or_else(|| step_name(position))
 }
 
 // ---------- estado e eventos ----------
@@ -462,6 +481,13 @@ impl Secrets {
             .collect()
     }
 
+    /// Variáveis para o ambiente de um processo local. No remoto os mesmos
+    /// valores entram pelo `export` do script; aqui eles nunca aparecem na linha
+    /// de comando, que é o que a interface mostra.
+    pub fn env(&self) -> Vec<(String, String)> {
+        self.items.clone()
+    }
+
     pub fn mask(&self, text: &str) -> String {
         let values: Vec<&str> = self.items.iter().map(|(_, v)| v.as_str()).collect();
         audit::scrub_secrets(&redact(text, &values))
@@ -587,7 +613,9 @@ struct Ctx {
     cancel: Arc<AtomicBool>,
     touched: AtomicU16,
     profile: DeployProfile,
-    server: Server,
+    /// `None` é o modo sem servidor: o destino é uma pasta desta máquina e todos
+    /// os comandos rodam aqui. As etapas remotas têm uma variante local cada.
+    server: Option<Server>,
     project: Project,
     root: PathBuf,
     broker: auth::AuthBroker,
@@ -598,6 +626,9 @@ struct Ctx {
     secrets: Secrets,
     shell: String,
     files: Vec<LocalFile>,
+    /// Comparação origem↔destino já feita, guardada entre as etapas de backup e
+    /// de cópia para o mesmo conteúdo ser lido uma única vez.
+    plano: Option<(Vec<LocalFile>, usize)>,
     release: Option<String>,
     previous: Option<String>,
     tools: HashMap<String, Option<String>>,
@@ -619,6 +650,16 @@ impl Ctx {
         self.cancel.load(Ordering::SeqCst)
     }
 
+    fn local_mode(&self) -> bool {
+        self.server.is_none()
+    }
+
+    fn server_ref(&self) -> Result<&Server, Fail> {
+        self.server
+            .as_ref()
+            .ok_or_else(|| Fail::new("este modelo publica nesta máquina e não tem servidor para contatar"))
+    }
+
     fn has(&self, tool: &str) -> bool {
         self.tools.get(tool).and_then(|v| v.as_ref()).is_some()
     }
@@ -628,7 +669,14 @@ impl Ctx {
             .remote_path
             .trim()
             .trim_end_matches('/')
+            .trim_end_matches('\\')
             .to_string()
+    }
+
+    /// O destino como caminho do sistema de arquivos. No modo local é para onde
+    /// a cópia vai; no remoto a string continua sendo o caminho POSIX no servidor.
+    fn destino_path(&self) -> PathBuf {
+        PathBuf::from(self.base())
     }
 
     /// Grava e publica o estado de uma etapa, mascarando qualquer segredo.
@@ -636,9 +684,13 @@ impl Ctx {
         self.touched.fetch_or(1u16 << position, Ordering::Relaxed);
         let message = message.map(|m| self.secrets.mask(m));
         let command = command.map(|c| self.secrets.mask(c));
-        let name = step_name(position);
+        let name = if self.local_mode() {
+            step_name_local(position)
+        } else {
+            step_name(position)
+        };
         if let Ok(conn) = self.db.lock() {
-            let _ = db::upsert_step(
+            if let Err(e) = db::upsert_step(
                 &conn,
                 &db::StepUpdate {
                     run_id: self.run_id,
@@ -649,7 +701,10 @@ impl Ctx {
                     exit_code,
                     message: message.as_deref(),
                 },
-            );
+            ) {
+                // Etapa sem registro no histórico é dado perdido: mostra na tela.
+                self.log(position, "err", &format!("falha ao registrar a etapa: {e}"));
+            }
         }
         let _ = self.app.emit(
             "deploy-step",
@@ -698,9 +753,10 @@ impl Ctx {
         if self.cancelled() {
             return Err(Fail::cancelled());
         }
+        let servidor = self.server_ref()?.clone();
         let timeout = self.timeout();
         let result = sshexec::run_script(
-            &self.server,
+            &servidor,
             self.askpass.as_ref(),
             shell,
             script,
@@ -719,7 +775,7 @@ impl Ctx {
                 format!("{} — {detail}", result.summary())
             };
             return Err(Fail::failed(
-                format!("{label} [ssh {}]", self.server.name),
+                format!("{label} [ssh {}]", servidor.name),
                 Some(result.exit_code.unwrap_or(-1) as i64),
                 message,
             ));
@@ -732,7 +788,10 @@ impl Ctx {
             return Err(Fail::cancelled());
         }
         let timeout = self.timeout();
-        let result = sshexec::run_local(command, &self.root, timeout, &self.cancel).map_err(Fail::new)?;
+        let env = self.secrets.env();
+        let result =
+            sshexec::run_local_with_env(command, &self.root, &env, timeout, &self.cancel)
+                .map_err(Fail::new)?;
         self.log(position, "out", &result.stdout);
         self.log(position, "err", &result.stderr);
         if !result.ok() {
@@ -751,9 +810,10 @@ impl Ctx {
         if self.cancelled() {
             return Err(Fail::cancelled());
         }
+        let servidor = self.server_ref()?.clone();
         let timeout = self.timeout();
         files::put_chunk(
-            &self.server,
+            &servidor,
             pares,
             self.askpass.as_ref(),
             timeout,
@@ -775,6 +835,15 @@ impl Ctx {
             .collect();
         if linhas.is_empty() {
             return Ok(0);
+        }
+        if self.local_mode() {
+            // Sem servidor o lote roda no interpretador desta máquina, um comando
+            // de cada vez: não existe o `set -e` de um script POSIX aqui.
+            for linha in &linhas {
+                self.log(position, "out", &format!("+ {linha}"));
+                self.local(position, linha)?;
+            }
+            return Ok(linhas.len());
         }
         let mut script = self.script(&format!("# {label}\n"));
         for line in &linhas {
@@ -854,22 +923,45 @@ fn rollback_pipeline(ctx: &mut Ctx) -> Result<String, Fail> {
 // ---------- etapas ----------
 
 fn validate_step(ctx: &mut Ctx) -> Result<Info, Fail> {
-    validate_strategy(&ctx.profile.strategy).map_err(Fail::new)?;
-    if !ctx.profile.remote_path.trim().starts_with('/') {
-        return Err(Fail::new("o diretório remoto precisa ser um caminho absoluto"));
+    if ctx.local_mode() {
+        return validate_local(ctx);
     }
+    validate_remoto(ctx)
+}
+
+/// O que as duas formas de publicar têm em comum: a pasta do projeto ainda existe
+/// e nenhuma variável declarada ficou sem valor.
+fn checar_pasta_e_variaveis(ctx: &mut Ctx) -> Result<(), Fail> {
     if !ctx.root.is_dir() {
         return Err(Fail::new(format!(
             "a pasta local do projeto não existe mais: {}",
             ctx.root.display()
         )));
     }
-    let sem_destino = ctx.server.host.trim().is_empty()
-        && ctx.server.ssh_alias.as_deref().unwrap_or("").trim().is_empty();
+    let faltando = Secrets::missing(&ctx.profile.secret_keys, &ctx.provided);
+    if !faltando.is_empty() {
+        return Err(Fail::new(format!(
+            "informe o valor das variáveis do deploy: {}",
+            faltando.join(", ")
+        )));
+    }
+    ctx.secrets = Secrets::new(&ctx.profile.secret_keys, &ctx.provided);
+    Ok(())
+}
+
+fn validate_remoto(ctx: &mut Ctx) -> Result<Info, Fail> {
+    validate_strategy(&ctx.profile.strategy).map_err(Fail::new)?;
+    if !ctx.profile.remote_path.trim().starts_with('/') {
+        return Err(Fail::new("o diretório remoto precisa ser um caminho absoluto"));
+    }
+    checar_pasta_e_variaveis(ctx)?;
+    let servidor = ctx.server_ref()?;
+    let sem_destino = servidor.host.trim().is_empty()
+        && servidor.ssh_alias.as_deref().unwrap_or("").trim().is_empty();
     if sem_destino {
         return Err(Fail::new(format!(
             "o servidor “{}” está sem host e sem alias",
-            ctx.server.name
+            servidor.name
         )));
     }
     // Cada estratégia tem o seu requisito mínimo; o resto cai no `_ => {}` e é
@@ -889,25 +981,16 @@ fn validate_step(ctx: &mut Ctx) -> Result<Info, Fail> {
         _ => {}
     }
 
-    let faltando = Secrets::missing(&ctx.profile.secret_keys, &ctx.provided);
-    if !faltando.is_empty() {
-        return Err(Fail::new(format!(
-            "informe o valor das variáveis do deploy: {}",
-            faltando.join(", ")
-        )));
-    }
-    ctx.secrets = Secrets::new(&ctx.profile.secret_keys, &ctx.provided);
-
     if ctx.askpass.is_none() {
-        ctx.askpass =
-            auth::prepare(&ctx.broker, &ctx.app, &ctx.server, &format!("Deploy · {}", ctx.profile.name))
-                .map_err(Fail::new)?;
+        let servidor = ctx.server_ref()?.clone();
+        ctx.askpass = auth::prepare(&ctx.broker, &ctx.app, &servidor, &format!("Deploy · {}", ctx.profile.name))
+            .map_err(Fail::new)?;
     }
+    let servidor = ctx.server_ref()?;
     let auth_desc = match &ctx.askpass {
         Some(_) => "senha informada agora (não gravada)".to_string(),
-        None if ctx.server.auth_method == "agent" => "SSH Agent".to_string(),
-        None => ctx
-            .server
+        None if servidor.auth_method == "agent" => "SSH Agent".to_string(),
+        None => servidor
             .identity_file
             .as_deref()
             .map(|f| format!("chave {f}"))
@@ -923,21 +1006,81 @@ fn validate_step(ctx: &mut Ctx) -> Result<Info, Fail> {
     )))
 }
 
+/// Modelo sem servidor: tudo acontece nesta máquina, então o que se confere aqui
+/// é a pasta de destino e o perigo de ela bater no próprio projeto.
+fn validate_local(ctx: &mut Ctx) -> Result<Info, Fail> {
+    validate_strategy(&ctx.profile.strategy).map_err(Fail::new)?;
+    if strategy_needs_server(&ctx.profile.strategy) {
+        return Err(Fail::new(format!(
+            "a estratégia {} publica em um servidor, e este modelo não tem servidor. Escolha script ou artefatos.",
+            ctx.profile.strategy
+        )));
+    }
+    checar_pasta_e_variaveis(ctx)?;
+    let destino = ctx.destino_path();
+    if !destino.is_absolute() {
+        return Err(Fail::new(format!(
+            "a pasta de destino precisa ser um caminho absoluto, e “{}” não é",
+            ctx.base()
+        )));
+    }
+    if ctx.profile.strategy == "script"
+        && ctx.profile.prepare_commands.iter().all(|c| c.trim().is_empty())
+        && ctx.profile.build_commands.iter().all(|c| c.trim().is_empty())
+        && ctx.profile.restart_commands.iter().all(|c| c.trim().is_empty())
+    {
+        return Err(Fail::new(
+            "um deploy por script nesta máquina precisa de pelo menos um comando de preparação, build ou reinicialização",
+        ));
+    }
+    // Copiar o projeto para dentro dele mesmo (ou apagar o projeto ao "limpar o
+    // destino") é o único jeito de perder trabalho com um modelo sem servidor.
+    let origem = ctx.root.canonicalize().unwrap_or_else(|_| ctx.root.clone());
+    let alvo = destino.canonicalize().unwrap_or_else(|_| destino.clone());
+    if alvo == origem || origem.starts_with(&alvo) {
+        return Err(Fail::new(format!(
+            "a pasta de destino ({}) é o projeto ou um lugar de onde ele estaria dentro — escolha uma pasta separada",
+            ctx.base()
+        )));
+    }
+    // O contrário também atrapalha: destino dentro do projeto significaria copiar
+    // arquivos para dentro da própria seleção, e a limpeza do destino apagaria
+    // arquivos do projeto.
+    if alvo.starts_with(&origem) {
+        return Err(Fail::new(format!(
+            "a pasta de destino ({}) está dentro do projeto ({}) — publique em uma pasta fora do código-fonte",
+            ctx.base(),
+            origem.display()
+        )));
+    }
+    Ok(Info::done(format!(
+        "modelo “{}” · {} · destino {} · nesta máquina, sem SSH · {} variável(is)",
+        ctx.profile.name,
+        ctx.profile.strategy,
+        ctx.base(),
+        ctx.secrets.count()
+    )))
+}
+
 fn connection_step(ctx: &mut Ctx) -> Result<Info, Fail> {
-    let identity = ctx.server.identity_file.clone();
-    let alias = ctx.server.ssh_alias.clone();
+    if ctx.local_mode() {
+        return destino_step(ctx);
+    }
+    let servidor = ctx.server_ref()?.clone();
+    let identity = servidor.identity_file.clone();
+    let alias = servidor.ssh_alias.clone();
     let result = ssh_test::test(
         alias.as_deref(),
-        &ctx.server.host,
-        ctx.server.port,
-        &ctx.server.username,
+        &servidor.host,
+        servidor.port,
+        &servidor.username,
         identity.as_deref(),
         ctx.askpass.as_ref(),
     );
     ctx.log(2, "out", &result.message);
     if !result.ok {
         return Err(Fail::failed(
-            format!("ssh {}", ctx.server.name),
+            format!("ssh {}", servidor.name),
             result.exit_code,
             format!(
                 "{} — sem conexão verificada a publicação não continua",
@@ -947,7 +1090,54 @@ fn connection_step(ctx: &mut Ctx) -> Result<Info, Fail> {
     }
     Ok(Info::done(format!(
         "{} ({} ms no servidor “{}”)",
-        result.message, result.duration_ms, ctx.server.name
+        result.message, result.duration_ms, servidor.name
+    )))
+}
+
+/// Etapa 2 do modo sem servidor: a pasta de destino precisa existir e aceitar
+/// escrita. Se não existir ainda, ela é criada — é o que o `mkdir -p` remoto faz.
+fn destino_step(ctx: &mut Ctx) -> Result<Info, Fail> {
+    let destino = ctx.destino_path();
+    if destino.exists() {
+        if !destino.is_dir() {
+            return Err(Fail::new(format!(
+                "o destino {} existe mas não é uma pasta",
+                destino.display()
+            )));
+        }
+    } else {
+        fs::create_dir_all(&destino).map_err(|e| {
+            Fail::new(format!(
+                "não foi possível criar a pasta de destino {}: {e}",
+                destino.display()
+            ))
+        })?;
+    }
+    // Escrever e apagar um arquivo de teste é a única prova de que ali se publica
+    // — checar permissão de pasta no Windows não diz nada confiável.
+    let prova = destino.join(".devops-permissao.tmp");
+    let gravado = fs::write(&prova, b"devops").map_err(|e| {
+        Fail::new(format!(
+            "a pasta de destino {} não aceita escrita: {e}",
+            destino.display()
+        ))
+    });
+    match gravado {
+        Ok(()) => {
+            let _ = fs::remove_file(&prova);
+        }
+        Err(fail) => return Err(fail),
+    }
+    if ctx.profile.backup_enabled {
+        fs::create_dir_all(destino.join(BACKUPS_DIR)).map_err(|e| {
+            Fail::new(format!(
+                "não foi possível preparar a pasta de backup dentro do destino: {e}"
+            ))
+        })?;
+    }
+    Ok(Info::done(format!(
+        "destino {} acessível nesta máquina, sem SSH",
+        destino.display()
     )))
 }
 
@@ -1021,8 +1211,25 @@ fn files_step(ctx: &mut Ctx) -> Result<Info, Fail> {
     )
     .map_err(Fail::new)?;
     if lista.is_empty() {
-        return Err(Fail::new(
-            "nenhum arquivo corresponde aos caminhos configurados — revise inclusão e exclusão",
+        // Nesta máquina o caminho declarado pode ser exatamente o que a preparação ou o
+        // build ainda vai gerar — as etapas 7 e 8 reescaneiam. Segurar o erro até lá dá
+        // ao comando a chance de produzir o artefato; se não produzir, ele falha na etapa
+        // dele com a mesma indicação de caminho.
+        let vai_gerar = ctx.local_mode()
+            && ctx
+                .profile
+                .prepare_commands
+                .iter()
+                .chain(ctx.profile.build_commands.iter())
+                .any(|c| !c.trim().is_empty());
+        if !vai_gerar {
+            return Err(Fail::new(
+                "nenhum arquivo corresponde aos caminhos configurados — revise inclusão e exclusão",
+            ));
+        }
+        ctx.files = lista;
+        return Ok(Info::done(
+            "nenhum arquivo existe ainda nos caminhos configurados — a preparação ou o build desta máquina pode gerá-los",
         ));
     }
     let bytes: u64 = lista.iter().map(|f| f.size).sum();
@@ -1083,8 +1290,9 @@ fn build_step(ctx: &mut Ctx) -> Result<Info, Fail> {
         ctx.local(7, &command)?;
     }
     // O build mudou o conteúdo: refaz a seleção e a checagem de segredos antes
-    // de qualquer envio.
-    if !ctx.profile.include_paths.is_empty() {
+    // de qualquer envio. Sem servidor isso vale também quando a seleção está vazia
+    // ("projeto inteiro"): o artefato recém-gerado não estava na varredura da etapa 4.
+    if !ctx.profile.include_paths.is_empty() || ctx.local_mode() {
         let lista = collect_files(
             &ctx.root,
             &ctx.profile.include_paths,
@@ -1092,7 +1300,7 @@ fn build_step(ctx: &mut Ctx) -> Result<Info, Fail> {
             MAX_FILES,
         )
         .map_err(Fail::new)?;
-        if lista.is_empty() {
+        if lista.is_empty() && !ctx.profile.include_paths.is_empty() {
             return Err(Fail::new(
                 "depois do build não sobrou nenhum arquivo para enviar — confira os caminhos",
             ));
@@ -1108,6 +1316,9 @@ fn build_step(ctx: &mut Ctx) -> Result<Info, Fail> {
 }
 
 fn prepare_step(ctx: &mut Ctx) -> Result<Info, Fail> {
+    if ctx.local_mode() {
+        return prepare_local(ctx);
+    }
     let strategy = ctx.profile.strategy.as_str();
     let precisa_git = strategy == "git";
     let precisa_docker = strategy == "docker";
@@ -1193,7 +1404,113 @@ fn prepare_step(ctx: &mut Ctx) -> Result<Info, Fail> {
     )))
 }
 
+/// Etapa 8 sem servidor: não existe sonda de ferramentas em outro host — o que há
+/// é o PATH desta máquina, e a pasta de destino já foi aberta e escrita na etapa 2.
+/// Sobram os comandos de preparação do modelo, rodando aqui.
+fn prepare_local(ctx: &mut Ctx) -> Result<Info, Fail> {
+    let total = ctx.profile.prepare_commands.len();
+    let executados = ctx.run_commands(8, "preparação", &ctx.profile.prepare_commands.clone())?;
+    if total > 0 && ctx.profile.strategy != "script" {
+        // A preparação roda antes da cópia e pode ter criado arquivo. A seleção é da
+        // etapa 4, então sem reescanear o que a preparação gerou nunca chegaria ao
+        // destino. Em `script` não há cópia nenhuma (etapa 4 pula de propósito), e
+        // reescanear ali faria a confirmação cobrar no destino um arquivo que a
+        // estratégia nunca envia.
+        let lista = collect_files(
+            &ctx.root,
+            &ctx.profile.include_paths,
+            &ctx.profile.exclude_paths,
+            MAX_FILES,
+        )
+        .map_err(Fail::new)?;
+        if lista.is_empty() && !ctx.profile.include_paths.is_empty() {
+            return Err(Fail::new(
+                "depois da preparação não sobrou nenhum arquivo para enviar — confira os caminhos",
+            ));
+        }
+        ctx.files = lista;
+        ctx.plano = None;
+        gate(ctx, 8)?;
+    }
+    let selecionados = ctx.files.len();
+    Ok(Info::done(format!(
+        "{} pronto nesta máquina · {executados}/{total} comando(s) de preparação · {selecionados} arquivo(s) para copiar",
+        ctx.base()
+    )))
+}
+
+/// Caminhos de um destino local, com `/` como separador e a guarda de backups de
+/// fora — é o espelho do `find . -type f` usado no servidor.
+fn listar_arquivos_local(dir: &Path) -> Result<Vec<String>, String> {
+    fn andar(pasta: &Path, prefixo: &str, out: &mut Vec<String>) -> Result<(), String> {
+        let entradas = fs::read_dir(pasta)
+            .map_err(|e| format!("falha ao ler {}: {e}", pasta.display()))?;
+        for entrada in entradas {
+            let entrada = entrada.map_err(|e| format!("falha ao ler {}: {e}", pasta.display()))?;
+            let nome = entrada.file_name().to_string_lossy().to_string();
+            let caminho = entrada.path();
+            let rel = if prefixo.is_empty() {
+                nome.clone()
+            } else {
+                format!("{prefixo}/{nome}")
+            };
+            if caminho.is_dir() {
+                if nome == BACKUPS_DIR && prefixo.is_empty() {
+                    continue;
+                }
+                andar(&caminho, &rel, out)?;
+            } else {
+                out.push(rel);
+                if out.len() > MAX_FILES {
+                    return Err(format!(
+                        "o destino tem mais de {MAX_FILES} arquivos — revise a pasta configurada"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    if dir.is_dir() {
+        andar(dir, "", &mut out)?;
+    }
+    out.sort();
+    Ok(out)
+}
+
+impl Ctx {
+    /// Compara origem e destino por conteúdo (CRC32, o mesmo critério do `cksum`
+    /// remoto) uma única vez e guarda o resultado: a etapa de backup e a de cópia
+    /// precisam do mesmo plano.
+    fn plano_de_copia(&mut self) -> Result<(Vec<LocalFile>, usize), Fail> {
+        if let Some(plano) = &self.plano {
+            return Ok(plano.clone());
+        }
+        let base = self.destino_path();
+        let mut a_copiar = Vec::new();
+        let mut iguais = 0usize;
+        for arquivo in self.files.clone() {
+            if self.cancelled() {
+                return Err(Fail::cancelled());
+            }
+            let alvo = base.join(&arquivo.rel);
+            let mesmo = alvo.is_file() && crc_of_file(&alvo) == crc_of_file(&arquivo.abs);
+            if mesmo {
+                iguais += 1;
+            } else {
+                a_copiar.push(arquivo);
+            }
+        }
+        let plano = (a_copiar, iguais);
+        self.plano = Some(plano.clone());
+        Ok(plano)
+    }
+}
+
 fn backup_step(ctx: &mut Ctx) -> Result<Info, Fail> {
+    if ctx.local_mode() {
+        return backup_local(ctx);
+    }
     if !ctx.profile.backup_enabled {
         return Ok(Info::skip("backup desativado no modelo — nenhum ponto de recuperação novo"));
     }
@@ -1221,11 +1538,198 @@ fn backup_step(ctx: &mut Ctx) -> Result<Info, Fail> {
     Ok(Info::done(format!("ponto de recuperação em {destino} (origem {origem})")))
 }
 
+/// Ponto de recuperação do modo sem servidor: os arquivos que já estão no destino
+/// e vão mudar são copiados para `<destino>/.devops-backups/<execução>/` antes de
+/// qualquer sobrescrita. É essa pasta que a ação **Reverter** repõe no lugar.
+fn backup_local(ctx: &mut Ctx) -> Result<Info, Fail> {
+    if !ctx.profile.backup_enabled {
+        return Ok(Info::skip("backup desativado no modelo — nenhum ponto de recuperação novo"));
+    }
+    if ctx.files.is_empty() {
+        return Ok(Info::skip("nenhum arquivo seria copiado — não há o que guardar do destino"));
+    }
+    let (a_copiar, _) = ctx.plano_de_copia()?;
+    if a_copiar.is_empty() && !ctx.profile.delete_extras {
+        return Ok(Info::skip(
+            "o destino já tem exatamente o conteúdo selecionado — nada a guardar",
+        ));
+    }
+    let base = ctx.destino_path();
+    let guarda = base.join(BACKUPS_DIR).join(ctx.run_id.to_string());
+    fs::create_dir_all(&guarda).map_err(|e| {
+        Fail::new(format!(
+            "não foi possível criar a pasta de backup {}: {e}",
+            guarda.display()
+        ))
+    })?;
+    let mut guardados = 0usize;
+    for arquivo in &a_copiar {
+        if ctx.cancelled() {
+            return Err(Fail::cancelled());
+        }
+        let atual = base.join(&arquivo.rel);
+        if !atual.is_file() {
+            continue;
+        }
+        let copia = guarda.join(&arquivo.rel);
+        if let Some(pai) = copia.parent() {
+            fs::create_dir_all(pai)
+                .map_err(|e| Fail::new(format!("falha ao preparar {}: {e}", pai.display())))?;
+        }
+        fs::copy(&atual, &copia).map_err(|e| {
+            Fail::new(format!(
+                "falha ao guardar {} antes de sobrescrever: {e}",
+                arquivo.rel
+            ))
+        })?;
+        guardados += 1;
+    }
+    let caminho = guarda.display().to_string();
+    ctx.backup = Some(caminho.clone());
+    ctx.previous = Some(caminho.clone());
+    if guardados == 0 {
+        if ctx.profile.delete_extras {
+            return Ok(Info::done(format!(
+                "nada a sobrescrever em {} — a guarda {caminho} recebe o que a limpeza do destino remover",
+                base.display()
+            )));
+        }
+        return Ok(Info::skip(
+            "nenhum dos arquivos selecionados existia no destino: a publicação só acrescenta arquivos",
+        ));
+    }
+    Ok(Info::done(format!(
+        "{guardados} arquivo(s) do destino guardados em {caminho}"
+    )))
+}
+
 fn send_step(ctx: &mut Ctx) -> Result<Info, Fail> {
+    if ctx.local_mode() {
+        return send_local(ctx);
+    }
     match ctx.profile.strategy.as_str() {
         "git" => send_git(ctx),
         "script" => Ok(Info::skip("deploy por script: só comandos, nenhum arquivo é enviado")),
         _ => send_files(ctx),
+    }
+}
+
+/// Cópia local: só o que difere em conteúdo é escrito no destino, do mesmo jeito
+/// que o envio por sftp compara o `cksum` antes de transferir.
+fn send_local(ctx: &mut Ctx) -> Result<Info, Fail> {
+    if ctx.profile.strategy == "script" {
+        return Ok(Info::skip("deploy por script: só comandos, nenhuma pasta é copiada"));
+    }
+    let (a_copiar, iguais) = ctx.plano_de_copia()?;
+    let base = ctx.destino_path();
+    let total = a_copiar.len();
+    let mut copiados = 0usize;
+    for arquivo in &a_copiar {
+        if ctx.cancelled() {
+            return Err(Fail::cancelled());
+        }
+        let alvo = base.join(&arquivo.rel);
+        if let Some(pai) = alvo.parent() {
+            fs::create_dir_all(pai)
+                .map_err(|e| Fail::new(format!("falha ao preparar {}: {e}", pai.display())))?;
+        }
+        fs::copy(&arquivo.abs, &alvo).map_err(|e| {
+            Fail::failed(
+                format!("copiar {}", arquivo.rel),
+                None,
+                format!("falha ao copiar {} para {}: {e}", arquivo.abs.display(), alvo.display()),
+            )
+        })?;
+        copiados += 1;
+        if copiados.is_multiple_of(UPLOAD_CHUNK) || copiados == total {
+            ctx.mark(
+                10,
+                "running",
+                Some(&format!("copiando {copiados}/{total} arquivo(s)…")),
+                None,
+                None,
+            );
+        }
+    }
+    ctx.sent = copiados;
+    ctx.unchanged = iguais;
+    if total == 0 {
+        ctx.log(10, "out", "destino já igual à origem: nenhum arquivo precisou ser copiado");
+    }
+    let mut removidos = 0usize;
+    if ctx.profile.delete_extras && !ctx.files.is_empty() {
+        removidos = delete_extras_local(ctx, &base, &ctx.files.clone())?;
+    }
+    ctx.removed = removidos;
+    let mut msg = format!(
+        "{copiados} arquivo(s) copiado(s) para {} · {iguais} já igual(is)",
+        base.display()
+    );
+    if removidos > 0 {
+        msg.push_str(&format!(" · {removidos} removido(s) (exclusão explícita ativada)"));
+    }
+    Ok(Info::done(msg))
+}
+
+/// Apaga no destino local o que não está na seleção — sempre depois de guardar a
+/// cópia na pasta de backup, e nunca dentro dela.
+fn delete_extras_local(ctx: &mut Ctx, base: &Path, lista: &[LocalFile]) -> Result<usize, Fail> {
+    let presentes = listar_arquivos_local(base).map_err(Fail::new)?;
+    let selecionados: Vec<&str> = lista.iter().map(|f| f.rel.as_str()).collect();
+    let guarda = ctx.backup.as_deref().map(PathBuf::from);
+    let mut removidos = 0usize;
+    for rel in presentes {
+        if selecionados.contains(&rel.as_str()) {
+            continue;
+        }
+        if ctx.cancelled() {
+            return Err(Fail::cancelled());
+        }
+        let caminho = base.join(&rel);
+        if guarda.as_ref().is_some_and(|g| caminho.starts_with(g)) {
+            continue;
+        }
+        // Com guarda disponível o arquivo é movido para ela, então "Reverter"
+        // consegue repô-lo. Sem guarda (backup desativado) a remoção é direta.
+        if let Some(g) = &guarda {
+            let copia = g.join(&rel);
+            if let Some(pai) = copia.parent() {
+                fs::create_dir_all(pai)
+                    .map_err(|e| Fail::new(format!("falha ao preparar {}: {e}", pai.display())))?;
+            }
+            if fs::rename(&caminho, &copia).is_err() {
+                fs::copy(&caminho, &copia)
+                    .map_err(|e| Fail::new(format!("falha ao guardar {rel}: {e}")))?;
+                fs::remove_file(&caminho)
+                    .map_err(|e| Fail::new(format!("falha ao remover {}: {e}", caminho.display())))?;
+            }
+        } else {
+            fs::remove_file(&caminho)
+                .map_err(|e| Fail::new(format!("falha ao remover {}: {e}", caminho.display())))?;
+        }
+        removidos += 1;
+    }
+    // Pastas que ficaram vazias depois da limpeza.
+    podar_pastas_vazias(base);
+    Ok(removidos)
+}
+
+/// Remove diretórios vazios abaixo do destino, sem tocar no próprio destino.
+fn podar_pastas_vazias(base: &Path) {
+    let Ok(entradas) = fs::read_dir(base) else { return };
+    for entrada in entradas.flatten() {
+        let Ok(tipo) = entrada.file_type() else { continue };
+        if !tipo.is_dir() {
+            continue;
+        }
+        let caminho = entrada.path();
+        if caminho.file_name().and_then(|n| n.to_str()) == Some(BACKUPS_DIR) {
+            continue;
+        }
+        podar_pastas_vazias(&caminho);
+        if fs::read_dir(&caminho).map(|mut d| d.next().is_none()).unwrap_or(false) {
+            let _ = fs::remove_dir(&caminho);
+        }
     }
 }
 
@@ -1385,6 +1889,9 @@ fn delete_extras(ctx: &mut Ctx, destino: &str, lista: &[LocalFile]) -> Result<us
 }
 
 fn update_step(ctx: &mut Ctx) -> Result<Info, Fail> {
+    if ctx.local_mode() {
+        return update_local(ctx);
+    }
     let base = ctx.base();
     let mut operacoes = 0usize;
     if let Some(rel) = ctx.release.clone() {
@@ -1415,6 +1922,22 @@ fn update_step(ctx: &mut Ctx) -> Result<Info, Fail> {
     Ok(Info::done(format!("{operacoes} operação(ões) de atualização concluída(s)")))
 }
 
+/// Etapa 11 sem servidor: não há symlink de release para trocar (o modelo local
+/// não pode usar esse mecanismo), sobram os comandos de build do deploy por script,
+/// que aqui rodariam "no servidor".
+fn update_local(ctx: &mut Ctx) -> Result<Info, Fail> {
+    if ctx.profile.strategy != "script" {
+        return Ok(Info::skip(
+            "sem servidor a publicação vai direto para a pasta de destino: não há troca de release nem comando remoto",
+        ));
+    }
+    let n = ctx.run_commands(11, "build/atualização nesta máquina", &ctx.profile.build_commands.clone())?;
+    if n == 0 {
+        return Ok(Info::skip("nenhum comando de build ou atualização configurado no modelo"));
+    }
+    Ok(Info::done(format!("{n} operação(ões) de atualização concluída(s) nesta máquina")))
+}
+
 fn restart_step(ctx: &mut Ctx) -> Result<Info, Fail> {
     if ctx.profile.restart_commands.is_empty() {
         return Ok(Info::skip(
@@ -1436,6 +1959,9 @@ fn health_step(ctx: &mut Ctx) -> Result<Info, Fail> {
 }
 
 fn confirm_step(ctx: &mut Ctx) -> Result<Info, Fail> {
+    if ctx.local_mode() {
+        return confirm_local(ctx);
+    }
     let base = ctx.base();
     let ativo = match &ctx.release {
         Some(rel) => remote_join(&base, rel),
@@ -1479,7 +2005,87 @@ fn confirm_step(ctx: &mut Ctx) -> Result<Info, Fail> {
     Ok(Info::done(msg))
 }
 
+/// Conferência do modo sem servidor: cada arquivo selecionado é relido no destino
+/// e comparado com a origem. Não é "assumir que copiou" — é o oposto do `find` +
+/// contagem que a etapa remota faz por SSH.
+fn confirm_local(ctx: &mut Ctx) -> Result<Info, Fail> {
+    if ctx.files.is_empty() {
+        // Um rollback por reposição da guarda já escreveu a própria confirmação
+        // na etapa 11; aqui ela é apenas repetida.
+        if !ctx.confirmation.is_empty() {
+            return Ok(Info::done(ctx.confirmation.clone()));
+        }
+        ctx.confirmation =
+            "nenhum arquivo foi copiado: as etapas de comando desta execução são a confirmação"
+                .to_string();
+        return Ok(Info::skip(
+            "nenhum arquivo foi copiado — as etapas de comando acima são a confirmação desta publicação",
+        ));
+    }
+    let base = ctx.destino_path();
+    let mut divergentes: Vec<String> = Vec::new();
+    for arquivo in ctx.files.clone() {
+        if ctx.cancelled() {
+            return Err(Fail::cancelled());
+        }
+        let alvo = base.join(&arquivo.rel);
+        let igual = alvo.is_file() && crc_of_file(&alvo) == crc_of_file(&arquivo.abs);
+        if !igual {
+            divergentes.push(arquivo.rel);
+        }
+    }
+    if !divergentes.is_empty() {
+        let mostradas: Vec<&String> = divergentes.iter().take(5).collect();
+        return Err(Fail::failed(
+            format!("conferir {}", base.display()),
+            Some(1),
+            format!(
+                "{} arquivo(s) não bateram com a origem no destino: {}{}",
+                divergentes.len(),
+                mostradas.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+                if divergentes.len() > 5 { " …" } else { "" }
+            ),
+        ));
+    }
+    let presentes = listar_arquivos_local(&base).map_err(Fail::new)?;
+    if presentes.is_empty() {
+        return Err(Fail::failed(
+            format!("conferir {}", base.display()),
+            Some(1),
+            "a pasta de destino está vazia — a publicação não produziu arquivos".to_string(),
+        ));
+    }
+    ctx.confirmation = format!(
+        "{} no ar com {} arquivo(s) · {} copiado(s) nesta execução",
+        base.display(),
+        presentes.len(),
+        ctx.sent
+    );
+    let mut msg = format!(
+        "publicação confirmada em {} · {} arquivo(s) no destino",
+        base.display(),
+        presentes.len()
+    );
+    if let Some(b) = ctx.backup.clone() {
+        msg.push_str(&format!(" · ponto de recuperação em {b}"));
+    }
+    Ok(Info::done(msg))
+}
+
 fn register_step(ctx: &mut Ctx) -> Result<Info, Fail> {
+    if ctx.local_mode() {
+        let guarda = match &ctx.backup {
+            Some(b) => format!("ponto de recuperação em {b}"),
+            None => "sem guarda de arquivos".to_string(),
+        };
+        return Ok(Info::done(format!(
+            "{} copiado(s), {} inalterado(s), {} de fora do destino · {} · {guarda}",
+            ctx.sent,
+            ctx.unchanged,
+            ctx.removed,
+            ctx.base(),
+        )));
+    }
     Ok(Info::done(format!(
         "{} enviado(s), {} inalterado(s), {} removido(s), publicação em {}, anterior {}",
         ctx.sent,
@@ -1491,6 +2097,9 @@ fn register_step(ctx: &mut Ctx) -> Result<Info, Fail> {
 }
 
 fn rollback_switch(ctx: &mut Ctx) -> Result<Info, Fail> {
+    if ctx.local_mode() {
+        return rollback_local(ctx);
+    }
     let base = ctx.base();
     if !ctx.profile.rollback_commands.is_empty() {
         let n = ctx.run_commands(11, "rollback", &ctx.profile.rollback_commands.clone())?;
@@ -1522,6 +2131,64 @@ fn rollback_switch(ctx: &mut Ctx) -> Result<Info, Fail> {
     Ok(Info::done(format!("diretório ativo voltou para {alvo}")))
 }
 
+/// Reversão do modo sem servidor: os arquivos voltam da pasta de guarda daquela
+/// execução, ou os comandos de rollback do modelo rodam nesta máquina. Nada é
+/// apagado para reverter — o que existe na guarda é reposto no lugar.
+fn rollback_local(ctx: &mut Ctx) -> Result<Info, Fail> {
+    if !ctx.profile.rollback_commands.is_empty() {
+        let n = ctx.run_commands(11, "rollback", &ctx.profile.rollback_commands.clone())?;
+        return Ok(Info::done(format!(
+            "{n} comando(s) de rollback executados nesta máquina"
+        )));
+    }
+    let anterior = ctx.previous.clone().ok_or_else(|| {
+        Fail::new(
+            "esta execução não guardou arquivos do destino e o modelo não tem comandos de rollback — não há para onde voltar",
+        )
+    })?;
+    let guarda = PathBuf::from(&anterior);
+    if !guarda.is_dir() {
+        return Err(Fail::new(format!(
+            "a guarda {} não existe mais — nada foi alterado no destino",
+            guarda.display()
+        )));
+    }
+    let lista = listar_arquivos_local(&guarda).map_err(Fail::new)?;
+    if lista.is_empty() {
+        return Err(Fail::new(format!(
+            "a guarda {} está vazia — nada foi alterado no destino",
+            guarda.display()
+        )));
+    }
+    let base = ctx.destino_path();
+    let mut repostos = 0usize;
+    for rel in &lista {
+        if ctx.cancelled() {
+            return Err(Fail::cancelled());
+        }
+        let origem = guarda.join(rel);
+        let alvo = base.join(rel);
+        if let Some(pai) = alvo.parent() {
+            fs::create_dir_all(pai)
+                .map_err(|e| Fail::new(format!("falha ao preparar {}: {e}", pai.display())))?;
+        }
+        fs::copy(&origem, &alvo).map_err(|e| {
+            Fail::new(format!("falha ao repor {} no destino: {e}", rel))
+        })?;
+        repostos += 1;
+    }
+    ctx.sent = repostos;
+    ctx.confirmation = format!(
+        "{} arquivo(s) reposto(s) em {} desde a guarda",
+        repostos,
+        base.display()
+    );
+    Ok(Info::done(format!(
+        "{repostos} arquivo(s) voltaram ao lugar desde {}",
+        guarda.display()
+    )))
+}
+
 // ---------- entrada pública ----------
 
 /// Carrega modelo/servidor/projeto, abre a linha de execução e dispara o
@@ -1535,10 +2202,10 @@ pub fn start(
     secret_values: HashMap<String, String>,
     allow_secrets: bool,
 ) -> Result<i64, String> {
-    let (profile, server, project, root, extra, run_id) = {
+    let (profile, servidor, project, root, extra, run_id) = {
         let conn = db.lock().map_err(|_| "o banco local está indisponível".to_string())?;
         let profile = db::get_deploy_profile(&conn, profile_id)?;
-        let server = db::get_server(&conn, profile.server_id)?;
+        let servidor = servidor_do_modelo(&conn, &profile)?;
         let project = db::get_project(&conn, profile.project_id)?;
         let extra = security::extra_patterns(
             db::setting_value(&conn, SECRET_PATTERNS_SETTING)?.as_deref(),
@@ -1550,15 +2217,17 @@ pub fn start(
             "info",
             "deploy",
             "Deploy iniciado",
-            Some(&server.name),
+            servidor.as_ref().map(|s| s.name.as_str()),
             Some(&project.name),
             None,
             Some(&format!(
-                "modelo {} · estratégia {} · execução #{run_id}",
-                profile.name, profile.strategy
+                "modelo {} · estratégia {} · execução #{run_id}{}",
+                profile.name,
+                profile.strategy,
+                if servidor.is_none() { " · nesta máquina" } else { "" }
             )),
         );
-        (profile, server, project, root, extra, run_id)
+        (profile, servidor, project, root, extra, run_id)
     };
     run(
         app,
@@ -1567,7 +2236,7 @@ pub fn start(
         broker,
         run_id,
         profile,
-        server,
+        servidor,
         project,
         root,
         extra,
@@ -1576,6 +2245,15 @@ pub fn start(
         allow_secrets,
         None,
     )
+}
+
+/// O servidor cadastrado do modelo, quando ele tem um. A ausência é o modo sem
+/// servidor: a publicação acontece nas pastas e no shell desta máquina.
+fn servidor_do_modelo(conn: &rusqlite::Connection, profile: &DeployProfile) -> Result<Option<Server>, String> {
+    match profile.server_id {
+        Some(id) => db::get_server(conn, id).map(Some),
+        None => Ok(None),
+    }
 }
 
 /// Rollback de uma execução registrada: volta o symlink para a release anterior
@@ -1588,7 +2266,7 @@ pub fn rollback(
     run_id: i64,
     secret_values: HashMap<String, String>,
 ) -> Result<i64, String> {
-    let (profile, server, project, root, extra, previous, new_run) = {
+    let (profile, servidor, project, root, extra, previous, new_run) = {
         let conn = db.lock().map_err(|_| "o banco local está indisponível".to_string())?;
         let origem = db::get_run(&conn, run_id)?;
         if origem.status != "success" && origem.status != "failed" {
@@ -1598,7 +2276,7 @@ pub fn rollback(
             ));
         }
         let profile = db::get_deploy_profile(&conn, origem.profile_id)?;
-        let server = db::get_server(&conn, profile.server_id)?;
+        let servidor = servidor_do_modelo(&conn, &profile)?;
         let project = db::get_project(&conn, profile.project_id)?;
         let extra = security::extra_patterns(
             db::setting_value(&conn, SECRET_PATTERNS_SETTING)?.as_deref(),
@@ -1610,7 +2288,7 @@ pub fn rollback(
             "warning",
             "deploy",
             "Rollback iniciado",
-            Some(&server.name),
+            servidor.as_ref().map(|s| s.name.as_str()),
             Some(&project.name),
             None,
             Some(&format!(
@@ -1623,7 +2301,7 @@ pub fn rollback(
         );
         (
             profile,
-            server,
+            servidor,
             project,
             root,
             extra,
@@ -1638,7 +2316,7 @@ pub fn rollback(
         broker,
         new_run,
         profile,
-        server,
+        servidor,
         project,
         root,
         extra,
@@ -1657,7 +2335,7 @@ fn run(
     broker: auth::AuthBroker,
     run_id: i64,
     profile: DeployProfile,
-    server: Server,
+    servidor: Option<Server>,
     project: Project,
     root: PathBuf,
     extra: Vec<String>,
@@ -1668,10 +2346,11 @@ fn run(
 ) -> Result<i64, String> {
     let cancel = Arc::new(AtomicBool::new(false));
     let operacao = if rollback { "Rollback" } else { "Deploy" };
-    let label = format!(
-        "{operacao} {} → {} (#{run_id})",
-        profile.name, server.name
-    );
+    let destino = servidor
+        .as_ref()
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| profile.remote_path.clone());
+    let label = format!("{operacao} {} → {destino} (#{run_id})", profile.name);
     state.register(run_id, label.clone(), Arc::clone(&cancel))?;
 
     let ctx = Ctx {
@@ -1685,6 +2364,7 @@ fn run(
         askpass: None,
         shell: "sh".to_string(),
         files: Vec::new(),
+        plano: None,
         release: None,
         previous,
         tools: HashMap::new(),
@@ -1698,7 +2378,7 @@ fn run(
         allow_secrets,
         extra,
         profile,
-        server,
+        server: servidor,
         project,
         root,
         broker,
@@ -1757,11 +2437,18 @@ fn finalize(ctx: &Ctx, status: &str, detail: &str, rollback: bool) {
     let detail = ctx.secrets.mask(detail);
     let run = {
         let Ok(conn) = ctx.db.lock() else { return };
+        let ativa = match &ctx.release {
+            Some(r) => Some(remote_join(&ctx.base(), r)),
+            // Sem servidor não há release: o que fica registrado como publicação
+            // ativa é a própria pasta de destino.
+            None if ctx.local_mode() => Some(ctx.base()),
+            None => None,
+        };
         let _ = db::finish_run(
             &conn,
             ctx.run_id,
             status,
-            ctx.release.as_deref().map(|r| remote_join(&ctx.base(), r)).as_deref(),
+            ativa.as_deref(),
             ctx.previous.as_deref(),
             Some(&detail),
         );
@@ -1774,7 +2461,7 @@ fn finalize(ctx: &Ctx, status: &str, detail: &str, rollback: bool) {
             },
             "deploy",
             if rollback { "Rollback" } else { "Deploy" },
-            Some(&ctx.server.name),
+            ctx.server.as_ref().map(|s| s.name.as_str()),
             Some(&ctx.project.name),
             None,
             Some(&format!(
@@ -2109,5 +2796,82 @@ mod tests {
         assert_eq!(prelude, "export DB_URL='postgres://u:p@h/db'\nexport TAG='v1.2'\n");
         // os nomes aparecem, os valores só saem mascarados
         assert!(secrets.mask("connect postgres://u:p@h/db ok").contains("***"));
+    }
+
+    #[test]
+    fn variaveis_locais_vao_para_o_ambiente_do_processo() {
+        let mut provided = HashMap::new();
+        provided.insert("TOKEN".to_string(), "abc123".to_string());
+        provided.insert("SO".to_string(), "linux".to_string());
+        let declared = vec!["TOKEN".to_string(), "SO".to_string(), "AUSENTE".to_string()];
+        let secrets = Secrets::new(&declared, &provided);
+        let pares = secrets.env();
+        // só o que tem valor vai para o ambiente, na ordem declarada
+        assert_eq!(
+            pares,
+            vec![
+                ("TOKEN".to_string(), "abc123".to_string()),
+                ("SO".to_string(), "linux".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn etapa_local_muda_só_o_nome_das_etapas_de_servidor() {
+        for position in 1..=15 {
+            let remoto = step_name(position);
+            let local = step_name_local(position);
+            if position == 2 || position == 10 {
+                assert_ne!(remoto, local, "etapa {position} deveria mudar de nome");
+            } else {
+                assert_eq!(remoto, local, "etapa {position} mudou sem precisar");
+            }
+        }
+        assert_eq!(step_name_local(2), "Abrir a pasta de destino");
+        assert_eq!(step_name_local(10), "Copiar os arquivos para o destino");
+    }
+
+    #[test]
+    fn listar_arquivos_local_espelha_o_find_do_servidor() {
+        let base = pasta_de_teste("listar");
+        fs::create_dir_all(base.join("assets/img")).unwrap();
+        fs::write(base.join("index.html"), b"oi").unwrap();
+        fs::write(base.join("assets/app.js"), b"js").unwrap();
+        fs::write(base.join("assets/img/logo.svg"), b"svg").unwrap();
+        fs::create_dir_all(base.join(BACKUPS_DIR).join("7")).unwrap();
+        fs::write(base.join(BACKUPS_DIR).join("7/antigo.html"), b"velho").unwrap();
+
+        let lista = listar_arquivos_local(&base).unwrap();
+        assert_eq!(
+            lista,
+            vec!["assets/app.js".to_string(), "assets/img/logo.svg".to_string(), "index.html".to_string()]
+        );
+        // destino que ainda não existe é pasta vazia, não erro
+        assert!(listar_arquivos_local(&base.join("ausente")).unwrap().is_empty());
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn podar_pastas_vazias_limpa_debaixo_do_destino_sem_tocar_na_guarda() {
+        let base = pasta_de_teste("podar");
+        fs::create_dir_all(base.join("vazia/interna")).unwrap();
+        fs::create_dir_all(base.join(BACKUPS_DIR).join("9")).unwrap();
+        fs::write(base.join(BACKUPS_DIR).join("9/guardado.html"), b"g").unwrap();
+        fs::write(base.join("index.html"), b"i").unwrap();
+
+        podar_pastas_vazias(&base);
+        assert!(!base.join("vazia").exists(), "a pasta vazia deveria sumir");
+        assert!(base.join(BACKUPS_DIR).join("9").is_dir(), "a guarda não pode ser podada");
+        assert!(base.join("index.html").is_file());
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Pasta exclusiva do teste dentro do temporário do sistema.
+    fn pasta_de_teste(nome: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("devops-teste-{}-{nome}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("criar pasta de teste");
+        dir
     }
 }

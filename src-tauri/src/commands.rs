@@ -169,10 +169,10 @@ async fn update_server(state: State<'_, AppState>, id: i64, input: ServerInput) 
 }
 
 #[tauri::command]
-async fn delete_server(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+async fn delete_server(state: State<'_, AppState>, id: i64) -> Result<usize, String> {
     let conn = lock_db(&state.db)?;
     let server = db::get_server(&conn, id)?;
-    db::delete_server_row(&conn, id)?;
+    let modelos = db::delete_server_row(&conn, id)?;
     audit::log(
         &conn,
         "info",
@@ -181,8 +181,16 @@ async fn delete_server(state: State<'_, AppState>, id: i64) -> Result<(), String
         Some(&server.name),
         None,
         None,
-        Some("apenas o cadastro local; ~/.ssh não foi alterado"),
-    )
+        Some(&format!(
+            "apenas o cadastro local; ~/.ssh não foi alterado{}",
+            if modelos > 0 {
+                format!(" · {modelos} modelo(s) de deploy que publicavam nele também saíram")
+            } else {
+                String::new()
+            }
+        )),
+    )?;
+    Ok(modelos)
 }
 
 #[tauri::command]
@@ -523,10 +531,10 @@ async fn update_project(
 }
 
 #[tauri::command]
-async fn delete_project(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+async fn delete_project(state: State<'_, AppState>, id: i64) -> Result<usize, String> {
     let conn = lock_db(&state.db)?;
     let project = db::get_project(&conn, id)?;
-    db::delete_project_row(&conn, id)?;
+    let modelos = db::delete_project_row(&conn, id)?;
     audit::log(
         &conn,
         "info",
@@ -535,8 +543,16 @@ async fn delete_project(state: State<'_, AppState>, id: i64) -> Result<(), Strin
         None,
         Some(&project.name),
         None,
-        Some("apenas o cadastro local; nenhum arquivo foi apagado"),
-    )
+        Some(&format!(
+            "apenas o cadastro local; nenhum arquivo foi apagado{}",
+            if modelos > 0 {
+                format!(" · {modelos} modelo(s) de deploy do projeto também saíram do cadastro")
+            } else {
+                String::new()
+            }
+        )),
+    )?;
+    Ok(modelos)
 }
 
 // ---------- Modelos de deploy ----------
@@ -568,7 +584,7 @@ async fn save_deploy_profile(
         "info",
         "deploy",
         if input.id.is_some() { "Modelo de deploy atualizado" } else { "Modelo de deploy criado" },
-        Some(&profile.server_name),
+        profile.server_name.as_deref(),
         Some(&project.name),
         None,
         Some(&profile_summary(&profile)),
@@ -587,7 +603,7 @@ async fn delete_deploy_profile(state: State<'_, AppState>, id: i64) -> Result<()
         "info",
         "deploy",
         "Modelo de deploy removido",
-        Some(&profile.server_name),
+        profile.server_name.as_deref(),
         Some(&project.name),
         None,
         Some(&format!("modelo “{}”", profile.name)),
@@ -607,7 +623,7 @@ async fn set_default_deploy_profile(
         "info",
         "deploy",
         "Modelo padrão definido",
-        Some(&profile.server_name),
+        profile.server_name.as_deref(),
         Some(&project.name),
         None,
         Some(&format!("modelo “{}”", profile.name)),
@@ -618,10 +634,14 @@ async fn set_default_deploy_profile(
 /// Resumo do modelo para a auditoria: estratégia, destino e contagem de
 /// variáveis — nunca os valores.
 fn profile_summary(profile: &DeployProfile) -> String {
+    let destino = match profile.server_name.as_deref() {
+        Some(nome) => format!("{} em {nome}", profile.remote_path),
+        None => format!("{} nesta máquina", profile.remote_path),
+    };
     format!(
         "estratégia {}, destino {}, {} etapa(s) de comando, {} variável(is) declarada(s) (só os nomes)",
         profile.strategy,
-        profile.remote_path,
+        destino,
         profile.prepare_commands.len()
             + profile.build_commands.len()
             + profile.restart_commands.len()

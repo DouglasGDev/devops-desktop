@@ -36,6 +36,7 @@ import {
   type BadgeTone,
   Button,
   Card,
+  DESTINO_LOCAL,
   EmptyState,
   LEVEL_LABELS,
   LEVEL_TONES,
@@ -171,7 +172,7 @@ function montarAlertas(servers: Server[], tools: ToolVersions | null, runs: Depl
   if (ultimo && ultimo.status === "failed") {
     alertas.push({
       nivel: "error",
-      texto: `O último deploy (${ultimo.projectName} → ${ultimo.serverName}) falhou: ${
+      texto: `O último deploy (${ultimo.projectName} → ${ultimo.serverName ?? DESTINO_LOCAL}) falhou: ${
         ultimo.detail ?? "sem detalhe registrado"
       }. Nada foi marcado como publicado.`,
       acao: { label: "Ver deploy", view: "deploy" },
@@ -340,7 +341,9 @@ export function DashboardView({ onNavigate }: { onNavigate: (v: ViewId) => void 
                     <div className="flex flex-wrap items-center gap-2 text-sm">
                       <Badge tone={RUN_TONES[r.status]}>{RUN_LABELS[r.status]}</Badge>
                       <span className="font-medium">{r.projectName}</span>
-                      <span className="text-xs text-zinc-500 dark:text-zinc-400">→ {r.serverName}</span>
+                      <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                        → {r.serverName ?? DESTINO_LOCAL}
+                      </span>
                       <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
                         {STRATEGY_LABELS[r.strategy] ?? r.strategy}
                       </span>

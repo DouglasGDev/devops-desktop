@@ -3,7 +3,7 @@ import { api } from "../../lib/api";
 import { useApp } from "../../store/AppContext";
 import type { DeployProfile, Project } from "../../types";
 import { TrashIcon, PencilIcon, PlusIcon, StarIcon } from "../Icons";
-import { Badge, Button, Confirm, ENV_TONES, Spinner, STRATEGY_LABELS } from "../ui";
+import { Badge, Button, Confirm, DESTINO_LOCAL, ENV_TONES, Spinner, STRATEGY_LABELS } from "../ui";
 import { ProfileForm } from "./ProfileForm";
 
 type Editing = { kind: "new" } | { kind: "existing"; profile: DeployProfile } | null;
@@ -46,7 +46,7 @@ export function ProjectProfiles({ project }: { project: Project }) {
     if (!deleting) return;
     try {
       await api.deleteDeployProfile(deleting.id);
-      pushToast("info", `Modelo “${deleting.name}” removido. Nenhum arquivo no servidor foi tocado.`);
+      pushToast("info", `Modelo “${deleting.name}” removido. Nenhum arquivo do destino foi tocado.`);
       setDeleting(null);
       await load();
     } catch (e) {
@@ -65,7 +65,8 @@ export function ProjectProfiles({ project }: { project: Project }) {
 
       {!loading && profiles.length === 0 ? (
         <p className="text-xs text-zinc-500 dark:text-zinc-400">
-          Nenhum modelo ainda. Um modelo diz para qual servidor publicar, com qual estratégia e quais comandos.
+          Nenhum modelo ainda. Cada modelo define o destino — servidor SSH ou pasta desta máquina —, a estratégia e os
+          comandos.
         </p>
       ) : null}
 
@@ -84,7 +85,9 @@ export function ProjectProfiles({ project }: { project: Project }) {
                   </Badge>
                 ) : null}
                 <Badge>{STRATEGY_LABELS[p.strategy] ?? p.strategy}</Badge>
-                <Badge tone={ENV_TONES[p.serverEnvironment] ?? "neutral"}>{p.serverName}</Badge>
+                <Badge tone={ENV_TONES[p.serverEnvironment ?? "other"] ?? "neutral"}>
+                  {p.serverName ?? DESTINO_LOCAL}
+                </Badge>
               </p>
               <p className="truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400" title={p.remotePath}>
                 {p.remotePath}
@@ -139,7 +142,7 @@ export function ProjectProfiles({ project }: { project: Project }) {
       <Confirm
         open={deleting !== null}
         title="Remover modelo de deploy"
-        message={`Remover “${deleting?.name}” de ${deleting?.serverName}? O histórico de deploys já executados continua no registro de auditoria, e nada no servidor é alterado.`}
+        message={`Remover o modelo “${deleting?.name}”? O histórico de deploys já executados continua no registro de auditoria, e nenhum arquivo do destino é alterado.`}
         confirmLabel="Remover"
         onConfirm={() => void remove()}
         onClose={() => setDeleting(null)}

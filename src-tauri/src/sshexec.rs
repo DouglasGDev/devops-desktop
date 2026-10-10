@@ -204,6 +204,19 @@ pub fn run_local(
     timeout: Duration,
     cancel: &AtomicBool,
 ) -> Result<ExecResult, String> {
+    run_local_with_env(command, cwd, &[], timeout, cancel)
+}
+
+/// O mesmo comando local, com variáveis extras no ambiente do processo. É por
+/// aqui que um deploy sem servidor recebe as variáveis do modelo: ambiente, e não
+/// linha de comando — o texto do comando é o que aparece na interface e no log.
+pub fn run_local_with_env(
+    command: &str,
+    cwd: &Path,
+    env: &[(String, String)],
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Result<ExecResult, String> {
     if command.contains('\0') {
         return Err("o comando contém caractere nulo".to_string());
     }
@@ -218,6 +231,9 @@ pub fn run_local(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (chave, valor) in env {
+        cmd.env(chave, valor);
+    }
     let mut child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             format!("interpretador de comandos ({program}) não encontrado no PATH")
@@ -422,5 +438,67 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0], ("bash".to_string(), Some("/usr/bin/bash".to_string())));
         assert_eq!(rows[1], ("git".to_string(), None));
+    }
+
+    #[test]
+    fn comando_local_recebe_ambiente_e_roda_na_pasta_pedida() {
+        let cancel = AtomicBool::new(false);
+        let comando = if cfg!(windows) {
+            "echo %DEVOPS_VAR%&& cd"
+        } else {
+            "printf '%s\\n' \"$DEVOPS_VAR\"; pwd"
+        };
+        let executado = run_local_with_env(
+            comando,
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+            &[("DEVOPS_VAR".to_string(), "valor-da-variavel".to_string())],
+            Duration::from_secs(30),
+            &cancel,
+        )
+        .expect("rodar comando local");
+        assert!(executado.ok(), "stderr: {}", executado.stderr);
+        let saida = executado.stdout.replace('\r', "");
+        let mut linhas = saida.lines().map(|l| l.trim()).filter(|l| !l.is_empty());
+        // A variável chegou pelo ambiente do processo, não pela linha de comando.
+        assert_eq!(linhas.next(), Some("valor-da-variavel"));
+        let pasta = linhas.next().unwrap_or_default();
+        assert!(
+            pasta.replace('\\', "/").ends_with("src-tauri"),
+            "cwd inesperado: {pasta}"
+        );
+    }
+
+    #[test]
+    fn comando_local_devolve_codigo_de_saida_e_falha() {
+        let cancel = AtomicBool::new(false);
+        let falho = run_local(
+            "exit 7",
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+            Duration::from_secs(30),
+            &cancel,
+        )
+        .expect("rodar comando que falha");
+        assert!(!falho.ok());
+        assert_eq!(falho.exit_code, Some(7));
+
+        assert!(run_local("", std::path::Path::new("."), Duration::from_secs(5), &cancel).is_err());
+        assert!(
+            run_local("echo a\0b", std::path::Path::new("."), Duration::from_secs(5), &cancel).is_err()
+        );
+    }
+
+    #[test]
+    fn comando_local_interrompido_marca_cancelamento() {
+        let cancel = AtomicBool::new(true);
+        let r = run_local(
+            if cfg!(windows) { "ping -n 30 127.0.0.1 >nul" } else { "sleep 30" },
+            std::path::Path::new("."),
+            Duration::from_secs(120),
+            &cancel,
+        )
+        .expect("executor devolve o resultado");
+        assert!(r.cancelled, "o cancelamento não foi registrado: {r:?}");
+        assert_eq!(r.exit_code, None);
+        assert!(r.cancelled, "o cancelamento não foi registrado: {r:?}");
     }
 }

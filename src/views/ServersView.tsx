@@ -111,8 +111,13 @@ export function ServersView() {
   const remove = async () => {
     if (!deleting) return;
     try {
-      await api.deleteServer(deleting.id);
-      pushToast("info", `Servidor “${deleting.name}” removido.`);
+      const modelos = await api.deleteServer(deleting.id);
+      pushToast(
+        "info",
+        modelos > 0
+          ? `Servidor “${deleting.name}” removido, junto com ${modelos} modelo(s) de deploy dele.`
+          : `Servidor “${deleting.name}” removido.`,
+      );
       setDeleting(null);
       await reloadServers();
     } catch (e) {
@@ -244,7 +249,7 @@ export function ServersView() {
       <Confirm
         open={deleting !== null}
         title="Remover servidor"
-        message={`Remover “${deleting?.name}” do cadastro? A configuração original em ~/.ssh não é alterada.`}
+        message={`Remover “${deleting?.name}” do cadastro? Os modelos de deploy ligados a ele e o histórico dessas publicações saem junto. A configuração original em ~/.ssh não é alterada.`}
         confirmLabel="Remover"
         onConfirm={() => void remove()}
         onClose={() => setDeleting(null)}

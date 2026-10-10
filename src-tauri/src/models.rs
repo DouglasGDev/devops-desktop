@@ -397,6 +397,43 @@ fn is_safe_remote_path(path: &str) -> bool {
         && path.len() <= 512
 }
 
+/// Estratégias que existem sem host: rodar comandos aqui e copiar artefatos para
+/// uma pasta local. As outras três (`sftp`, `git`, `docker`) falam com um servidor.
+pub const LOCAL_STRATEGIES: [&str; 2] = ["script", "artifacts"];
+
+pub fn strategy_needs_server(strategy: &str) -> bool {
+    !LOCAL_STRATEGIES.contains(&strategy)
+}
+
+/// Caminho absoluto de pasta nesta máquina: POSIX (`/srv/site`), unidade Windows
+/// (`D:\\publicados\\site`, `D:/site`) ou compartilhamento de rede (`\\\\srv\\site`).
+/// Raiz pura (`/`, `D:\\`) e trechos com `..` são rejeitados: o destino de uma
+/// publicação tem que ser uma pasta nomeada, nunca o topo de um disco.
+fn is_safe_local_path(path: &str) -> bool {
+    let raw = path.trim();
+    if raw.is_empty()
+        || raw.len() > 512
+        || raw.contains('\0')
+        || raw.contains('\n')
+        || raw.contains('\r')
+        || raw.contains("..")
+    {
+        return false;
+    }
+    let unificado = raw.replace('\\', "/");
+    if unificado.starts_with("//") {
+        return unificado.split('/').filter(|p| !p.is_empty()).count() >= 2;
+    }
+    if let Some(rest) = unificado.strip_prefix('/') {
+        return !rest.trim_matches('/').is_empty();
+    }
+    let mut chars = unificado.chars();
+    match (chars.next(), chars.next(), chars.next()) {
+        (Some(letra), Some(':'), Some('/')) => letra.is_ascii_alphabetic() && !chars.as_str().trim_matches('/').is_empty(),
+        _ => false,
+    }
+}
+
 fn is_env_key_name(key: &str) -> bool {
     let mut chars = key.chars();
     match chars.next() {
@@ -427,16 +464,17 @@ fn validate_list(items: &[String], label: &str, max_items: usize) -> Result<(), 
     Ok(())
 }
 
-/// Um modelo de deploy: projeto + servidor + estratégia + comandos.
+/// Um modelo de deploy: projeto + destino + estratégia + comandos. O destino é
+/// um servidor cadastrado, ou esta mesma máquina quando `server_id` é `None`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeployProfile {
     pub id: i64,
     pub project_id: i64,
     pub name: String,
-    pub server_id: i64,
-    pub server_name: String,
-    pub server_environment: String,
+    pub server_id: Option<i64>,
+    pub server_name: Option<String>,
+    pub server_environment: Option<String>,
     pub strategy: String,
     pub git_branch: Option<String>,
     pub remote_path: String,
@@ -466,7 +504,8 @@ pub struct DeployProfileInput {
     pub id: Option<i64>,
     pub project_id: i64,
     pub name: String,
-    pub server_id: i64,
+    /// `None` publica nesta máquina: sem SSH, sem SFTP e sem release por symlink.
+    pub server_id: Option<i64>,
     pub strategy: String,
     pub git_branch: Option<String>,
     pub remote_path: String,
@@ -492,11 +531,35 @@ impl DeployProfileInput {
         if name.is_empty() || name.len() > 200 {
             return Err("dê um nome ao modelo de deploy (até 200 caracteres)".into());
         }
-        if self.project_id <= 0 || self.server_id <= 0 {
-            return Err("selecione o projeto e o servidor de destino".into());
+        if self.project_id <= 0 {
+            return Err("selecione o projeto do modelo".into());
+        }
+        if let Some(id) = self.server_id {
+            if id <= 0 {
+                return Err("escolha o servidor de destino ou o modo sem servidor".into());
+            }
         }
         validate_strategy(&self.strategy)?;
-        if !is_safe_remote_path(self.remote_path.trim()) {
+        if self.server_id.is_none() {
+            if strategy_needs_server(&self.strategy) {
+                return Err(format!(
+                    "a estratégia {} publica em um servidor. Sem servidor escolha script ou artefatos.",
+                    self.strategy
+                ));
+            }
+            if self.releases_enabled {
+                return Err(
+                    "releases com symlink acontecem no servidor; sem servidor a publicação vai direto para a pasta de destino"
+                        .into(),
+                );
+            }
+            if !is_safe_local_path(self.remote_path.trim()) {
+                return Err(
+                    "a pasta de destino precisa ser um caminho absoluto nesta máquina, como D:\\publicados\\site ou /srv/site"
+                        .into(),
+                );
+            }
+        } else if !is_safe_remote_path(self.remote_path.trim()) {
             return Err(
                 "o diretório remoto deve ser um caminho absoluto, sem quebras de linha".into(),
             );
@@ -578,7 +641,8 @@ pub struct DeployRun {
     pub id: i64,
     pub profile_id: i64,
     pub project_name: String,
-    pub server_name: String,
+    /// `None` quando o modelo publica nesta máquina — o destino é uma pasta local.
+    pub server_name: Option<String>,
     pub strategy: String,
     pub status: String,
     pub started_at: String,
@@ -589,3 +653,112 @@ pub struct DeployRun {
     pub steps: Vec<DeployRunStep>,
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entrada(server_id: Option<i64>, strategy: &str, destino: &str) -> DeployProfileInput {
+        DeployProfileInput {
+            id: None,
+            project_id: 1,
+            name: "cópia local".into(),
+            server_id,
+            strategy: strategy.into(),
+            git_branch: None,
+            remote_path: destino.into(),
+            include_paths: vec!["dist".into()],
+            exclude_paths: vec![],
+            prepare_commands: vec![],
+            build_commands: vec!["npm run build".into()],
+            restart_commands: vec![],
+            health_checks: vec![],
+            rollback_commands: vec![],
+            test_commands: vec![],
+            secret_keys: vec![],
+            backup_enabled: true,
+            releases_enabled: false,
+            delete_extras: false,
+            step_timeout_secs: 600,
+            is_default: false,
+        }
+    }
+
+    #[test]
+    fn destino_local_e_so_pasta_absoluta() {
+        let longo = format!("C:/{}", "a".repeat(600));
+        for aceito in [
+            "C:/publicados/site",
+            r"D:\publicados\site",
+            "/srv/site",
+            "/var/www/html",
+            "//servidor/compartilhado/site",
+        ] {
+            assert!(is_safe_local_path(aceito), "recusou {aceito}");
+        }
+        for recusado in [
+            "",
+            "   ",
+            "publicados/site",
+            "C:",
+            "C:/",
+            "/",
+            "//",
+            "../site",
+            "C:/publicados/../windows",
+            "/var\0",
+            "/var\nrm -rf /",
+            longo.as_str(),
+        ] {
+            assert!(!is_safe_local_path(recusado), "aceitou {recusado}");
+        }
+    }
+
+    #[test]
+    fn sem_servidor_só_libera_estratégias_locais() {
+        assert!(!strategy_needs_server("script"));
+        assert!(!strategy_needs_server("artifacts"));
+        for remota in ["sftp", "git", "docker"] {
+            assert!(strategy_needs_server(remota), "{remota} parece local");
+        }
+    }
+
+    #[test]
+    fn valida_modelo_sem_servidor() {
+        assert!(entrada(None, "artifacts", r"D:\publicados\site")
+            .validate()
+            .is_ok());
+
+        // um script local precisa de pelo menos um comando
+        let mut sem_comando = entrada(None, "script", "/srv/site");
+        sem_comando.build_commands = vec![];
+        assert!(sem_comando.validate().unwrap_err().contains("pelo menos um comando"));
+
+        assert!(entrada(None, "sftp", "/srv/site")
+            .validate()
+            .unwrap_err()
+            .contains("escolha script"));
+
+        // releases por symlink só existem no servidor
+        let mut com_release = entrada(None, "artifacts", "C:/publicados/site");
+        com_release.releases_enabled = true;
+        assert!(com_release.validate().unwrap_err().contains("symlink"));
+
+        // destino relativo não é uma pasta absoluta desta máquina
+        let relativo = entrada(None, "artifacts", "publicados");
+        assert!(relativo.validate().unwrap_err().contains("nesta máquina"));
+
+        // id <= 0 não é um servidor válido
+        assert!(entrada(Some(0), "artifacts", "C:/publicados/site")
+            .validate()
+            .unwrap_err()
+            .contains("modo sem servidor"));
+
+        // com servidor, o caminho continua sendo o POSIX do servidor
+        assert!(entrada(Some(3), "artifacts", "/var/www/site").validate().is_ok());
+        assert!(entrada(Some(3), "artifacts", "C:/publicados/site")
+            .validate()
+            .unwrap_err()
+            .contains("caminho absoluto"));
+    }
+}
