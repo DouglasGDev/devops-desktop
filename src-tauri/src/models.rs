@@ -193,7 +193,7 @@ pub struct ToolVersions {
     pub editors: Vec<EditorInstalado>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     pub id: i64,
@@ -635,6 +635,11 @@ pub struct DeployRunStep {
     pub message: Option<String>,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
+    /// O nó do grafo que produziu esta linha. `None` em toda execução linear.
+    pub node_key: Option<String>,
+    /// Registrado pela própria etapa quando ela toca o destino: é o que faz uma
+    /// execução ter de ser conferida antes de qualquer nova tentativa.
+    pub touched_destination: bool,
 }
 
 /// Um deploy registrado no histórico local.
@@ -675,6 +680,205 @@ pub struct DefinitionRevision {
     /// O JSON da definição: comandos, caminhos e limites. Nunca contém o **valor**
     /// das variáveis — só os nomes, como a própria tabela de modelos.
     pub spec: serde_json::Value,
+}
+
+// ---------- grafo do pipeline (plano CI/CD, etapa 3) ----------
+
+/// Os três tipos de nó que o motor sabe executar. Não há tipo sem execução:
+/// `motor` chama uma das quinze etapas reais, `comando` roda comandos pelo
+/// executor escolhido e `aprovacao` espera a decisão de quem usa.
+pub const NODE_KINDS: [&str; 3] = ["motor", "comando", "aprovacao"];
+pub const NODE_EXECUTORS: [&str; 2] = ["local", "ssh"];
+/// Limite do grafo salvo: acima disso o construtor deixa de ser legível e o
+/// histórico de uma execução vira impossível de conferir.
+pub const MAX_NODES: usize = 40;
+
+/// Um nó do grafo, como está salvo.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineNode {
+    pub id: i64,
+    pub profile_id: i64,
+    /// Identificador estável dentro da definição — são as arestas que apontam
+    /// para ele, então ele não pode mudar quando o nó é arrastado na tela.
+    pub node_key: String,
+    pub title: String,
+    pub kind: String,
+    /// Qual das quinze etapas do motor este nó executa (`motor`).
+    pub engine_step: Option<i64>,
+    pub executor: String,
+    /// Nome do ambiente a que o nó se destina; usado pela condição de execução.
+    pub environment: Option<String>,
+    /// Pasta de trabalho do nó, relativa à raiz do projeto (`local`) ou absoluta
+    /// no servidor (`ssh`).
+    pub working_dir: Option<String>,
+    pub commands: Vec<String>,
+    /// As chaves dos nós que precisam terminar antes deste.
+    pub depends_on: Vec<String>,
+    /// Permite rodar junto com os irmãos que estiverem prontos ao mesmo tempo.
+    pub parallel: bool,
+    /// 0 = herdar o prazo do modelo.
+    pub timeout_secs: i64,
+    /// Quantas repetições o nó aceita quando falha. 0 = nenhuma.
+    pub retry_limit: i64,
+    /// Condição de execução: `ramo=<nome>` ou `ambiente=<nome>`; `None` = sempre.
+    pub condition: Option<String>,
+    pub requires_approval: bool,
+    /// Derivado do tipo e do executor, nunca digitado: é o que diz se uma
+    /// execução deste grafo pode ser repetida sem conferir o destino.
+    pub touches_destination: bool,
+    pub x: i64,
+    pub y: i64,
+}
+
+/// O que a interface envia ao salvar o grafo. `id` e `touches_destination` não
+/// vêm de lá: o identificador é a própria chave, e tocar o destino é consequência.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineNodeInput {
+    pub node_key: String,
+    pub title: String,
+    pub kind: String,
+    pub engine_step: Option<i64>,
+    pub executor: Option<String>,
+    pub environment: Option<String>,
+    pub working_dir: Option<String>,
+    pub commands: Option<Vec<String>>,
+    pub depends_on: Option<Vec<String>>,
+    pub parallel: Option<bool>,
+    pub timeout_secs: Option<i64>,
+    pub retry_limit: Option<i64>,
+    pub condition: Option<String>,
+    pub requires_approval: Option<bool>,
+    pub x: Option<i64>,
+    pub y: Option<i64>,
+}
+
+impl PipelineNodeInput {
+    pub fn kind(&self) -> String {
+        self.kind.trim().to_lowercase()
+    }
+
+    pub fn executor(&self) -> String {
+        self.executor
+            .as_deref()
+            .unwrap_or("local")
+            .trim()
+            .to_lowercase()
+    }
+
+    pub fn commands(&self) -> Vec<String> {
+        self.commands.clone().unwrap_or_default()
+    }
+
+    pub fn depends_on(&self) -> Vec<String> {
+        self.depends_on.clone().unwrap_or_default()
+    }
+
+    /// Se o nó mexe no destino. `motor` a partir da etapa de preparação (8),
+    /// que é onde a publicação começa a existir lá; `ssh` em qualquer comando,
+    /// porque o que roda no servidor muda o servidor.
+    pub fn touches_destination(&self) -> bool {
+        match self.kind().as_str() {
+            "motor" => self.engine_step.unwrap_or(0) >= 8,
+            "comando" => self.executor() == "ssh",
+            _ => false,
+        }
+    }
+
+    /// Checagens de um nó sozinho. A forma do grafo (dependências, ciclos,
+    /// paralelismo) é conferida em `pipeline::checar_grafo`, com todos os nós.
+    pub fn validate(&self) -> Result<(), String> {
+        let rotulo = if self.node_key.trim().is_empty() {
+            "nó sem identificador".to_string()
+        } else {
+            format!("nó “{}”", self.node_key.trim())
+        };
+        if self.node_key.trim().is_empty() || self.node_key.len() > 40 {
+            return Err(format!("{rotulo}: o identificador do nó deve ter de 1 a 40 caracteres"));
+        }
+        if !self
+            .node_key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(format!("{rotulo}: o identificador aceita letra, número, hífen e sublinhado"));
+        }
+        let title = self.title.trim();
+        if title.is_empty() || title.chars().count() > 120 {
+            return Err(format!("{rotulo}: dê um nome ao nó (até 120 caracteres)"));
+        }
+        let kind = self.kind();
+        if !NODE_KINDS.contains(&kind.as_str()) {
+            return Err(format!(
+                "{rotulo}: tipo de nó inválido “{kind}”; use motor, comando ou aprovacao"
+            ));
+        }
+        match kind.as_str() {
+            "motor" => {
+                let Some(step) = self.engine_step else {
+                    return Err(format!("{rotulo}: escolha qual das quinze etapas do motor ele roda"));
+                };
+                if !(1..=15).contains(&step) {
+                    return Err(format!("{rotulo}: a etapa do motor vai de 1 a 15"));
+                }
+            }
+            "comando" => {
+                let executor = self.executor();
+                if !NODE_EXECUTORS.contains(&executor.as_str()) {
+                    return Err(format!("{rotulo}: executor inválido “{executor}”; use local ou ssh"));
+                }
+                let commands = self.commands();
+                if commands.iter().all(|c| c.trim().is_empty()) {
+                    return Err(format!("{rotulo}: um nó de comando precisa de pelo menos um comando"));
+                }
+                validate_list(&commands, &rotulo, 20)?;
+                if let Some(dir) = self.working_dir.as_deref().map(str::trim) {
+                    if !dir.is_empty() && executor == "local" {
+                        if dir.starts_with('/') || dir.contains('\\') || dir.contains("..") {
+                            return Err(format!(
+                                "{rotulo}: a pasta de trabalho local deve ser um caminho relativo dentro do projeto"
+                            ));
+                        }
+                    } else if !dir.is_empty() && executor == "ssh" && !is_safe_remote_path(dir) {
+                        return Err(format!(
+                            "{rotulo}: a pasta de trabalho no servidor precisa ser um caminho absoluto, como /srv/site"
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+        let prazo = self.timeout_secs.unwrap_or(0);
+        if !(0..=21_600).contains(&prazo) {
+            return Err(format!("{rotulo}: o prazo do nó vai de 0 (herdar o do modelo) a 21600 segundos"));
+        }
+        let retry = self.retry_limit.unwrap_or(0);
+        if !(0..=3).contains(&retry) {
+            return Err(format!("{rotulo}: a política de repetição aceita de 0 a 3 novas tentativas"));
+        }
+        if let Some(raw) = self.condition.as_deref().map(str::trim) {
+            if !raw.is_empty() {
+                let (chave, valor) = raw
+                    .split_once('=')
+                    .ok_or_else(|| format!("{rotulo}: a condição deve ser ramo=<nome> ou ambiente=<nome>"))?;
+                if !["ramo", "ambiente"].contains(&chave.trim()) {
+                    return Err(format!(
+                        "{rotulo}: condição “{chave}” não existe; o motor conhece ramo e ambiente"
+                    ));
+                }
+                if valor.trim().is_empty() || valor.contains('\n') || valor.len() > 120 {
+                    return Err(format!("{rotulo}: a condição precisa de um valor entre 1 e 120 caracteres"));
+                }
+            }
+        }
+        if let Some(env) = self.environment.as_deref().map(str::trim) {
+            if env.len() > 60 || env.contains('\n') {
+                return Err(format!("{rotulo}: nome de ambiente inválido"));
+            }
+        }
+        Ok(())
+    }
 }
 
 

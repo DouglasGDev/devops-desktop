@@ -12,12 +12,13 @@
 //! [`Secrets::mask`] antes de sair do motor.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU16, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU16, Ordering},
+        mpsc::{self, Sender},
         Arc, Mutex,
     },
     thread,
@@ -31,7 +32,7 @@ use crate::{
     audit, auth,
     db::{self, DbHandle},
     files, git,
-    models::{strategy_needs_server, validate_strategy, DeployProfile, DeployRun, Project, Server},
+    models::{strategy_needs_server, validate_strategy, DeployProfile, DeployRun, PipelineNode, Project, Server},
     security, ssh_test, sshexec,
 };
 
@@ -101,11 +102,21 @@ pub struct ActiveRun {
 #[derive(Clone, Default)]
 pub struct DeployState {
     runs: Arc<Mutex<HashMap<i64, ActiveRun>>>,
+    approvals: Arc<ApprovalBroker>,
 }
 
 impl DeployState {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            runs: Arc::new(Mutex::new(HashMap::new())),
+            approvals: Arc::new(ApprovalBroker::default()),
+        }
+    }
+
+    /// A porta da aprovação manual: a interface responde aqui e o nó que espera
+    /// continua (ou para) com a decisão.
+    pub fn approvals(&self) -> &ApprovalBroker {
+        &self.approvals
     }
 
     fn register(&self, run_id: i64, label: String, cancel: Arc<AtomicBool>) -> Result<(), String> {
@@ -155,6 +166,8 @@ pub struct StepEvent {
     pub command: Option<String>,
     pub exit_code: Option<i64>,
     pub message: Option<String>,
+    /// O nó do grafo que esta linha representa; `None` no pipeline linear.
+    pub node_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -171,6 +184,133 @@ pub struct LogEvent {
 pub struct ActiveInfo {
     pub run_id: i64,
     pub label: String,
+}
+
+// ---------- aprovação manual ----------
+
+/// O pedido que a janela mostra enquanto um nó espera. Vem com o destino e o
+/// ambiente porque é exatamente isso que quem aprova está autorizando.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRequest {
+    pub id: i64,
+    pub run_id: i64,
+    pub node_key: String,
+    pub title: String,
+    pub definition: String,
+    pub environment: String,
+    pub destination: String,
+    pub waits_secs: u64,
+}
+
+/// O que a janela precisa ver para poder decidir: qual corrida, qual nó e o que
+/// ele vai tocar. É uma coisa só, e por isso viaja junto.
+#[derive(Debug, Clone)]
+pub struct PedidoDeAprovacao {
+    pub run_id: i64,
+    pub node_key: String,
+    pub title: String,
+    pub definition: String,
+    pub environment: String,
+    pub destination: String,
+}
+
+/// Como um nó para de esperar. `Denied` e `Expired` são diferentes de `Cancelled`:
+/// a primeira é uma decisão, a segunda é a ausência dela, e a terceira veio de quem
+/// interrompeu a corrida inteira.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    Approved,
+    Denied,
+    Expired,
+    Cancelled,
+}
+
+/// Tempo máximo de espera por uma decisão na janela.
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Fatia de espera: é o que permite perceber o cancelamento sem perder a resposta.
+const APPROVAL_SLICE: Duration = Duration::from_millis(500);
+
+#[derive(Default)]
+struct ApprovalInner {
+    pending: Mutex<HashMap<i64, Sender<Decision>>>,
+    next_id: AtomicI64,
+}
+
+/// Aprovação manual de um nó do grafo. Ninguém aprova por conta própria: sem a
+/// decisão explícita na janela o nó não toca o destino, e a espera tem prazo.
+#[derive(Clone, Default)]
+pub struct ApprovalBroker {
+    inner: Arc<ApprovalInner>,
+}
+
+impl ApprovalBroker {
+    /// Emite o pedido e espera. Só retorna com uma decisão, com o prazo vencido
+    /// ou com a corrida interrompida — nunca "aprovado porque ninguém respondeu".
+    pub fn wait(&self, app: &AppHandle, pedido: PedidoDeAprovacao, cancel: &AtomicBool) -> Decision {
+        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel();
+        {
+            let Ok(mut pending) = self.inner.pending.lock() else {
+                return Decision::Cancelled;
+            };
+            pending.insert(id, tx);
+        }
+        let _ = app.emit(
+            "pipeline-approval",
+            ApprovalRequest {
+                id,
+                run_id: pedido.run_id,
+                node_key: pedido.node_key,
+                title: pedido.title,
+                definition: pedido.definition,
+                environment: pedido.environment,
+                destination: pedido.destination,
+                waits_secs: APPROVAL_TIMEOUT.as_secs(),
+            },
+        );
+        let inicio = std::time::Instant::now();
+        let decision = loop {
+            match rx.recv_timeout(APPROVAL_SLICE) {
+                Ok(decision) => break decision,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break Decision::Cancelled,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if cancel.load(Ordering::SeqCst) {
+                        break Decision::Cancelled;
+                    }
+                    if inicio.elapsed() >= APPROVAL_TIMEOUT {
+                        break Decision::Expired;
+                    }
+                }
+            }
+        };
+        if let Ok(mut pending) = self.inner.pending.lock() {
+            pending.remove(&id);
+        }
+        decision
+    }
+
+    /// A decisão de quem usa na janela.
+    pub fn respond(&self, id: i64, approved: bool) -> Result<(), String> {
+        let tx = self
+            .inner
+            .pending
+            .lock()
+            .map_err(|_| "o registro de aprovações está indisponível")?
+            .remove(&id)
+            .ok_or_else(|| "não há mais nenhum nó esperando esta aprovação".to_string())?;
+        tx.send(if approved { Decision::Approved } else { Decision::Denied })
+            .map_err(|_| "o nó que esperava a aprovação já encerrou".to_string())
+    }
+
+    /// Quantos nós estão parados esperando decisão.
+    pub fn pending(&self) -> usize {
+        self.inner
+            .pending
+            .lock()
+            .map(|p| p.len())
+            .unwrap_or_default()
+    }
 }
 
 // ---------- peças puras ----------
@@ -437,6 +577,7 @@ fn tail(stderr: &str, stdout: &str) -> String {
 }
 
 /// Variáveis do deploy: apenas nomes são persistidos; os valores vivem aqui.
+#[derive(Clone)]
 pub struct Secrets {
     items: Vec<(String, String)>,
 }
@@ -619,10 +760,13 @@ struct Ctx {
     project: Project,
     root: PathBuf,
     broker: auth::AuthBroker,
+    /// Porta da aprovação manual pedida por um nó do grafo. Vive no
+    /// [`DeployState`] porque é estado de execução, como o cancelamento.
+    approvals: Arc<ApprovalBroker>,
     provided: HashMap<String, String>,
     extra: Vec<String>,
     allow_secrets: bool,
-    askpass: Option<auth::AskPass>,
+    askpass: Option<Arc<auth::AskPass>>,
     secrets: Secrets,
     shell: String,
     files: Vec<LocalFile>,
@@ -639,11 +783,91 @@ struct Ctx {
     removed: usize,
     backup: Option<String>,
     confirmation: String,
+    /// A linha do histórico que o nó do grafo em execução ocupa. `None` em
+    /// qualquer execução linear: é assim que `mark` sabe se escreve na posição da
+    /// etapa do motor ou na posição do nó.
+    node_row: Option<NodeRow>,
+    /// Prazo do nó em execução; `None` herda o prazo por etapa do modelo.
+    node_timeout: Option<Duration>,
 }
 
 impl Ctx {
     fn timeout(&self) -> Duration {
-        Duration::from_secs(self.profile.step_timeout_secs.max(10) as u64)
+        self.node_timeout
+            .unwrap_or_else(|| Duration::from_secs(self.profile.step_timeout_secs.max(10) as u64))
+    }
+
+    /// Cópia do contexto para um nó que roda ao mesmo tempo que um irmão. Cada
+    /// ramal tem o seu `Ctx` e a sua linha no histórico, e é por isso que só um
+    /// tipo de nó pode ser paralelo: quem escreve no contexto (as etapas do motor,
+    /// que produzem a lista de arquivos, a release e o backup) nunca divide ramal.
+    fn branch(&self, row: NodeRow, node_timeout: Option<Duration>) -> Ctx {
+        Ctx {
+            app: self.app.clone(),
+            db: self.db.clone(),
+            run_id: self.run_id,
+            cancel: Arc::clone(&self.cancel),
+            touched: AtomicU16::new(self.touched.load(Ordering::Relaxed)),
+            profile: self.profile.clone(),
+            server: self.server.clone(),
+            project: self.project.clone(),
+            root: self.root.clone(),
+            broker: self.broker.clone(),
+            approvals: Arc::clone(&self.approvals),
+            provided: self.provided.clone(),
+            extra: self.extra.clone(),
+            allow_secrets: self.allow_secrets,
+            askpass: self.askpass.clone(),
+            secrets: self.secrets.clone(),
+            shell: self.shell.clone(),
+            files: self.files.clone(),
+            plano: None,
+            release: self.release.clone(),
+            previous: self.previous.clone(),
+            tools: self.tools.clone(),
+            branch: self.branch.clone(),
+            remote_url: self.remote_url.clone(),
+            sent: self.sent,
+            unchanged: self.unchanged,
+            removed: self.removed,
+            backup: self.backup.clone(),
+            confirmation: self.confirmation.clone(),
+            node_row: Some(row),
+            node_timeout,
+        }
+    }
+
+    /// O ambiente que as condições dos nós comparam: o do servidor cadastrado,
+    /// ou `local` quando a publicação acontece nesta máquina.
+    fn environment(&self) -> String {
+        self.server
+            .as_ref()
+            .map(|s| s.environment.clone())
+            .unwrap_or_else(|| "local".to_string())
+    }
+
+    /// O prazo do nó em execução; `None` usa o prazo por etapa do modelo.
+    fn mark_waiting_do_motor(&self) -> usize {
+        for position in 1..=15 {
+            self.mark(position, "waiting", None, None, None);
+        }
+        15
+    }
+
+    /// O que uma corrida de grafo preenche desde o clique: as linhas dos nós que
+    /// ela percorre, na ordem salva. Devolve quantas são — zero é um grafo sem
+    /// nada para executar, e a corrida não abre.
+    fn mark_waiting_dos_nos(
+        &self,
+        nos: &[PipelineNode],
+        alvo: Option<&str>,
+        com_dependencias: bool,
+    ) -> usize {
+        let lista = escopo_do_grafo(nos, alvo, com_dependencias);
+        for &i in &lista {
+            self.marca_no(&NodeRow::of(i, &nos[i]), "waiting", None);
+        }
+        lista.len()
     }
 
     fn cancelled(&self) -> bool {
@@ -680,48 +904,82 @@ impl Ctx {
     }
 
     /// Grava e publica o estado de uma etapa, mascarando qualquer segredo.
+    ///
+    /// Numa execução de grafo a posição que o motor conhece (a etapa 10, por
+    /// exemplo) é traduzida para a linha do nó em execução, com o nome e o
+    /// identificador dele — assim uma etapa do motor funciona igual na linha
+    /// salvante e dentro de um grafo desenhado na tela.
     fn mark(&self, position: i64, status: &str, message: Option<&str>, command: Option<&str>, exit_code: Option<i64>) {
-        self.touched.fetch_or(1u16 << position, Ordering::Relaxed);
+        // O registro de quais etapas do motor foram alcançadas só existe para as
+        // quinze posições do pipeline linear; um nó de grafo fora delas não tem bit.
+        if (1..=15).contains(&position) {
+            self.touched.fetch_or(1u16 << position, Ordering::Relaxed);
+        }
+        let linha = match &self.node_row {
+            Some(row) => Linha::from(row),
+            None => Linha {
+                position,
+                nome: if self.local_mode() { step_name_local(position) } else { step_name(position) },
+                chave: None,
+                tocando: false,
+            },
+        };
+        self.registra(&linha, status, message, command, exit_code);
+    }
+
+    /// Marca a linha de um nó do grafo. Nó sem etapa do motor por trás (um comando,
+    /// uma aprovação, um pulado por dependência) passa por aqui, não por `mark`.
+    fn marca_no(&self, row: &NodeRow, status: &str, message: Option<&str>) {
+        self.registra(&Linha::from(row), status, message, None, None);
+    }
+
+    /// O destino de toda etapa: histórico no banco e evento na tela, com os
+    /// segredos mascaras antes de sair do motor.
+    fn registra(&self, linha: &Linha, status: &str, message: Option<&str>, command: Option<&str>, exit_code: Option<i64>) {
         let message = message.map(|m| self.secrets.mask(m));
         let command = command.map(|c| self.secrets.mask(c));
-        let name = if self.local_mode() {
-            step_name_local(position)
-        } else {
-            step_name(position)
-        };
         if let Ok(conn) = self.db.lock() {
             if let Err(e) = db::upsert_step(
                 &conn,
                 &db::StepUpdate {
                     run_id: self.run_id,
-                    position,
-                    name: &name,
+                    position: linha.position,
+                    name: &linha.nome,
                     status,
                     command: command.as_deref(),
                     exit_code,
                     message: message.as_deref(),
+                    node_key: linha.chave.as_deref(),
+                    touched_destination: linha.tocando,
                 },
             ) {
                 // Etapa sem registro no histórico é dado perdido: mostra na tela.
-                self.log(position, "err", &format!("falha ao registrar a etapa: {e}"));
+                self.log(linha.position, "err", &format!("falha ao registrar a etapa: {e}"));
             }
         }
         let _ = self.app.emit(
             "deploy-step",
             StepEvent {
                 run_id: self.run_id,
-                position,
-                name,
+                position: linha.position,
+                name: linha.nome.clone(),
                 status: status.to_string(),
                 command,
                 exit_code,
                 message,
+                node_key: linha.chave.clone(),
             },
         );
     }
 
     fn log(&self, position: i64, stream: &str, text: &str) {
         let masked = self.secrets.mask(text);
+        // O log pertence à mesma linha do histórico que a etapa está escrevendo.
+        let linha = self
+            .node_row
+            .as_ref()
+            .map(|row| row.position)
+            .unwrap_or(position);
         for line in masked.lines().take(200) {
             if line.trim().is_empty() {
                 continue;
@@ -730,12 +988,31 @@ impl Ctx {
                 "deploy-log",
                 LogEvent {
                     run_id: self.run_id,
-                    position,
+                    position: linha,
                     stream: stream.to_string(),
                     text: line.to_string(),
                 },
             );
         }
+    }
+
+    /// A senha por operação é preparada uma única vez por corrida. Na fila de quinze
+    /// etapas isso acontece na validação; num grafo desenhado sem essa etapa, é o
+    /// primeiro contato com o servidor que prepara.
+    fn garantir_askpass(&mut self) -> Result<(), Fail> {
+        if self.askpass.is_some() || self.local_mode() {
+            return Ok(());
+        }
+        let servidor = self.server_ref()?.clone();
+        self.askpass = auth::prepare(
+            &self.broker,
+            &self.app,
+            &servidor,
+            &format!("Deploy · {}", self.profile.name),
+        )
+        .map_err(Fail::new)?
+        .map(Arc::new);
+        Ok(())
     }
 
     fn remote(&mut self, position: i64, script: &str, label: &str) -> Result<sshexec::ExecResult, Fail> {
@@ -753,11 +1030,12 @@ impl Ctx {
         if self.cancelled() {
             return Err(Fail::cancelled());
         }
+        self.garantir_askpass()?;
         let servidor = self.server_ref()?.clone();
         let timeout = self.timeout();
         let result = sshexec::run_script(
             &servidor,
-            self.askpass.as_ref(),
+            self.askpass.as_deref(),
             shell,
             script,
             &[],
@@ -799,7 +1077,11 @@ impl Ctx {
             return Err(Fail::failed(
                 command.to_string(),
                 Some(result.exit_code.unwrap_or(-1) as i64),
-                detail,
+                if detail.is_empty() {
+                    result.summary()
+                } else {
+                    detail
+                },
             ));
         }
         Ok(result)
@@ -810,12 +1092,13 @@ impl Ctx {
         if self.cancelled() {
             return Err(Fail::cancelled());
         }
+        self.garantir_askpass()?;
         let servidor = self.server_ref()?.clone();
         let timeout = self.timeout();
         files::put_chunk(
             &servidor,
             pares,
-            self.askpass.as_ref(),
+            self.askpass.as_deref(),
             timeout,
             &self.cancel,
         )
@@ -920,7 +1203,660 @@ fn rollback_pipeline(ctx: &mut Ctx) -> Result<String, Fail> {
     Ok(confirmado)
 }
 
-// ---------- etapas ----------
+// ---------- grafo do pipeline (plano CI/CD, etapa 3) ----------
+
+/// A linha do histórico que um nó ocupa durante a corrida. Com ela, `mark` escreve
+/// no nó e não na posição fixa da etapa do motor, e uma mesma etapa do motor serve
+/// ao pipeline linear e ao grafo desenhado na tela.
+#[derive(Debug, Clone)]
+struct NodeRow {
+    position: i64,
+    key: String,
+    title: String,
+    touched: bool,
+}
+
+impl NodeRow {
+    fn of(index: usize, no: &PipelineNode) -> Self {
+        Self {
+            position: index as i64 + 1,
+            key: no.node_key.clone(),
+            title: no.title.clone(),
+            touched: no.touches_destination,
+        }
+    }
+}
+
+/// A linha do histórico que uma marcação escreve: posição, nome exibido, o nó do
+/// grafo por trás dela (se houver) e se ela toca o destino.
+#[derive(Debug, Clone)]
+struct Linha {
+    position: i64,
+    nome: String,
+    chave: Option<String>,
+    tocando: bool,
+}
+
+impl From<&NodeRow> for Linha {
+    fn from(row: &NodeRow) -> Self {
+        Self {
+            position: row.position,
+            nome: row.title.clone(),
+            chave: Some(row.key.clone()),
+            tocando: row.touched,
+        }
+    }
+}
+
+/// Uma etapa do motor: a função que a janela não conhece, só o número dela.
+type Etapa = fn(&mut Ctx) -> Result<Info, Fail>;
+
+/// As quinze etapas do motor, endereçadas pelo número que a definição usa. É a
+/// única tabela de execução: o grafo não conhece comando nenhum, só estas funções.
+fn etapa_do_motor(position: i64) -> Option<Etapa> {
+    Some(match position {
+        1 => validate_step,
+        2 => connection_step,
+        3 => git_step,
+        4 => files_step,
+        5 => secrets_step,
+        6 => tests_step,
+        7 => build_step,
+        8 => prepare_step,
+        9 => backup_step,
+        10 => send_step,
+        11 => update_step,
+        12 => restart_step,
+        13 => health_step,
+        14 => confirm_step,
+        15 => register_step,
+        _ => return None,
+    })
+}
+
+/// O que uma etapa do motor precisa ter rodado antes, porque lê o que aquela
+/// etapa produziu no contexto. É o que impede um grafo desenhado na tela de pedir
+/// "copiar os arquivos" sem que ninguém tenha decidido quais são os arquivos.
+pub fn prequisitos(position: i64) -> &'static [i64] {
+    match position {
+        5..=8 => &[4],
+        9..=15 => &[3, 4, 8],
+        _ => &[],
+    }
+}
+
+/// O diretório de trabalho de um nó local, conferido dentro da raiz do projeto.
+/// Um caminho que dobra para fora da pasta cadastrada não é aceito — é a mesma
+/// contenção que o destino do pipeline faz com `canonicalize`.
+fn dir_do_no(ctx: &Ctx, no: &PipelineNode) -> Result<PathBuf, Fail> {
+    let bruto = no.working_dir.as_deref().unwrap_or("").trim();
+    if bruto.is_empty() {
+        return Ok(ctx.root.clone());
+    }
+    let candidato = ctx.root.join(bruto.replace('\\', "/"));
+    let raiz_real = ctx.root.canonicalize().map_err(|e| {
+        Fail::new(format!("não foi possível abrir a pasta do projeto: {e}"))
+    })?;
+    let real = candidato.canonicalize().map_err(|e| {
+        Fail::new(format!(
+            "a pasta de trabalho “{}” do nó “{}” não existe dentro do projeto: {e}",
+            bruto, no.title
+        ))
+    })?;
+    if !real.starts_with(&raiz_real) {
+        return Err(Fail::new(format!(
+            "a pasta de trabalho “{}” do nó “{}” sai do projeto — o motor só roda dentro da pasta cadastrada",
+            bruto, no.title
+        )));
+    }
+    Ok(real)
+}
+
+/// Roda os comandos de um nó no executor que ele escolheu. Nenhum comando é
+/// montado por concatenação com entrada solta: localmente cada linha vai ao
+/// interpretador desta máquina com o diretório e as variáveis do deploy; no
+/// servidor o lote vira um script POSIX com falha rápida pela stdin da sessão.
+fn rodar_comandos(ctx: &mut Ctx, no: &PipelineNode, posicao: i64) -> Result<usize, Fail> {
+    let linhas: Vec<&str> = no
+        .commands
+        .iter()
+        .map(|c| c.trim())
+        .filter(|c| !c.is_empty())
+        .collect();
+    if linhas.is_empty() {
+        return Err(Fail::new(format!(
+            "o nó “{}” ficou sem comando",
+            no.title
+        )));
+    }
+    // Nas quinze etapas em fila é `step` quem marca a linha como em execução, e é essa
+    // marca que grava a hora de início. Um nó de comando não passa por `step`, então
+    // marca aqui — sem isso o histórico do nó não tem início nem duração.
+    ctx.mark(posicao, "running", Some("em execução"), None, None);
+    if no.executor == "ssh" {
+        let mut script = ctx.script(&format!("# {}\n", no.title));
+        if let Some(dir) = no.working_dir.as_deref().map(str::trim) {
+            if !dir.is_empty() {
+                script.push_str(&format!("cd {}\n", sshexec::shell_quote(dir)));
+            }
+        }
+        for linha in &linhas {
+            script.push_str(&format!(
+                "echo {}\n{linha}\n",
+                sshexec::shell_quote(&format!("+ {linha}"))
+            ));
+        }
+        ctx.remote(
+            posicao,
+            &script,
+            &format!("{} ({} comando(s))", no.title, linhas.len()),
+        )?;
+        return Ok(linhas.len());
+    }
+    let dir = dir_do_no(ctx, no)?;
+    for linha in &linhas {
+        ctx.log(posicao, "out", &format!("+ {linha}"));
+        if ctx.cancelled() {
+            return Err(Fail::cancelled());
+        }
+        let timeout = ctx.timeout();
+        let env = ctx.secrets.env();
+        let resultado = sshexec::run_local_with_env(linha, &dir, &env, timeout, &ctx.cancel)
+            .map_err(Fail::new)?;
+        ctx.log(posicao, "out", &resultado.stdout);
+        ctx.log(posicao, "err", &resultado.stderr);
+        if !resultado.ok() {
+            let detalhe = tail(&resultado.stderr, &resultado.stdout);
+            return Err(Fail::failed(
+                linha.to_string(),
+                Some(resultado.exit_code.unwrap_or(-1) as i64),
+                // Um comando que falha sem escrever nada em lugar nenhum não pode
+                // deixar a linha do histórico sem motivo: fica o resumo do processo.
+                if detalhe.is_empty() {
+                    resultado.summary()
+                } else {
+                    detalhe
+                },
+            ));
+        }
+    }
+    Ok(linhas.len())
+}
+
+/// Como um nó terminou. `Pulado` é diferente de falha: a condição do nó não se
+/// cumpriu, então nada foi executado e nada está errado.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fim {
+    Concluido,
+    Pulado,
+}
+
+/// Roda um nó até o fim: condição, aprovação, execução e repetição. Marca a linha
+/// do histórico correspondente e devolve `Err` quando o nó falhou.
+fn executar_no(ctx: &mut Ctx, index: usize, no: &PipelineNode) -> Result<Fim, Fail> {
+    let row = NodeRow::of(index, no);
+    ctx.node_row = Some(row.clone());
+    ctx.node_timeout = if no.timeout_secs > 0 {
+        Some(Duration::from_secs(no.timeout_secs as u64))
+    } else {
+        None
+    };
+    let resultado = executar_conteudo(ctx, no, &row);
+    ctx.node_row = None;
+    ctx.node_timeout = None;
+    // A linha final do nó é escrita a partir do próprio nó: `mark` nesta altura já não
+    // tem `node_row`, e pela posição do grafo cairia na tabela das quinze etapas — um nó
+    // de comando chamado `preparo` ganharia o nome de uma etapa do motor.
+    match resultado {
+        Ok(Fim::Concluido) => {
+            // Uma etapa do motor já escreveu a própria linha final dentro de `step`,
+            // com nome, status e a mensagem do resultado — reescrever aqui apagaria a
+            // mensagem dela e transformaria um "pulada" em "concluída". Quem não tem
+            // etapa por trás, comando e aprovação, termina por aqui.
+            if no.kind != "motor" {
+                let motivo = match no.kind.as_str() {
+                    "aprovacao" => "aprovado na janela".to_string(),
+                    _ => format!(
+                        "{} comando(s) {}",
+                        no.commands.iter().filter(|c| !c.trim().is_empty()).count(),
+                        if no.executor == "ssh" { "no servidor" } else { "nesta máquina" }
+                    ),
+                };
+                ctx.registra(&Linha::from(&row), "done", Some(&motivo), None, None);
+            }
+            Ok(Fim::Concluido)
+        }
+        // A linha já foi marcada como pulada, com o motivo.
+        Ok(Fim::Pulado) => Ok(Fim::Pulado),
+        Err(fail) => {
+            let mensagem = if no.retry_limit > 0 {
+                format!("{} — {} tentativa(s) usada(s)", fail.message, no.retry_limit + 1)
+            } else {
+                fail.message.clone()
+            };
+            ctx.registra(
+                &Linha::from(&row),
+                "failed",
+                Some(&mensagem),
+                fail.command.as_deref(),
+                fail.exit_code,
+            );
+            Err(fail)
+        }
+    }
+}
+
+/// A parte de um nó que pode falhar e ser repetida, separada para o laço de
+/// repetição não repetir a aprovação nem a checagem de condição.
+fn executar_conteudo(ctx: &mut Ctx, no: &PipelineNode, row: &NodeRow) -> Result<Fim, Fail> {
+    if ctx.cancelled() {
+        return Err(Fail::cancelled());
+    }
+    if !condicao_atendida(ctx, no) {
+        ctx.mark(
+            row.position,
+            "skipped",
+            Some(&format!(
+                "condição “{}” não atendida",
+                no.condition.as_deref().unwrap_or("")
+            )),
+            None,
+            None,
+        );
+        return Ok(Fim::Pulado);
+    }
+    let precisa_aprovar = no.requires_approval || no.kind == "aprovacao";
+    if precisa_aprovar {
+        ctx.mark(row.position, "running", Some("esperando aprovação"), None, None);
+        let decisao = ctx.approvals.wait(
+            &ctx.app,
+            PedidoDeAprovacao {
+                run_id: ctx.run_id,
+                node_key: no.node_key.clone(),
+                title: no.title.clone(),
+                definition: ctx.profile.name.clone(),
+                environment: ctx.environment(),
+                destination: ctx.base(),
+            },
+            &ctx.cancel,
+        );
+        registrar_aprovacao(ctx, no, decisao);
+        match decisao {
+            Decision::Approved => {}
+            Decision::Denied => {
+                return Err(Fail::new(format!(
+                    "o nó “{}” foi rejeitado na janela — nada que ele faria foi executado",
+                    no.title
+                )))
+            }
+            Decision::Expired => {
+                return Err(Fail::new(format!(
+                    "ninguém respondeu ao pedido de aprovação do nó “{}” dentro do prazo de {} minutos",
+                    no.title,
+                    APPROVAL_TIMEOUT.as_secs() / 60
+                )))
+            }
+            Decision::Cancelled => return Err(Fail::cancelled()),
+        }
+    }
+    if no.kind == "aprovacao" {
+        return Ok(Fim::Concluido);
+    }
+    let mut tentativa = 0;
+    loop {
+        let resultado = match no.kind.as_str() {
+            "motor" => {
+                let Some(number) = no.engine_step else {
+                    return Err(Fail::new(format!(
+                        "o nó “{}” não aponta para nenhuma etapa do motor",
+                        no.title
+                    )));
+                };
+                let Some(etapa) = etapa_do_motor(number) else {
+                    return Err(Fail::new(format!(
+                        "o nó “{}” aponta para a etapa {number}, que o motor não tem",
+                        no.title
+                    )));
+                };
+                // `step` é a mesma função que o pipeline linear usa: marca a linha
+                // do nó, escreve a mensagem da etapa e devolve o erro real.
+                step(ctx, number, etapa)
+            }
+            "comando" => rodar_comandos(ctx, no, row.position).map(|_| ()),
+            _ => Ok(()),
+        };
+        match resultado {
+            Ok(()) => return Ok(Fim::Concluido),
+            Err(fail) if fail.cancelled => return Err(fail),
+            Err(fail) if tentativa < no.retry_limit => {
+                tentativa += 1;
+                ctx.log(
+                    row.position,
+                    "err",
+                    &format!(
+                        "{} — repetindo o nó (tentativa {}/{})",
+                        fail.message, tentativa, no.retry_limit
+                    ),
+                );
+            }
+            Err(fail) => return Err(fail),
+        }
+    }
+}
+
+/// O resultado da espera de aprovação vira auditoria: decisão, hora e o que foi
+/// autorizado. O nome de quem decidiu é o de quem está diante da janela.
+fn registrar_aprovacao(ctx: &Ctx, no: &PipelineNode, decisao: Decision) {
+    let texto = match decisao {
+        Decision::Approved => "aprovado na janela",
+        Decision::Denied => "rejeitado na janela",
+        Decision::Expired => "sem resposta dentro do prazo",
+        Decision::Cancelled => "interrompido",
+    };
+    if let Ok(conn) = ctx.db.lock() {
+        let _ = audit::log(
+            &conn,
+            match decisao {
+                Decision::Approved => "info",
+                Decision::Cancelled => "warning",
+                _ => "error",
+            },
+            "deploy",
+            "Aprovação de etapa",
+            ctx.server.as_ref().map(|s| s.name.as_str()),
+            Some(&ctx.project.name),
+            None,
+            Some(&format!(
+                "modelo {} · nó “{}” · {} · execução #{}",
+                ctx.profile.name, no.title, texto, ctx.run_id
+            )),
+        );
+    }
+}
+
+/// A condição do nó, avaliada com o que o motor sabe da corrida: o ramo em que o
+/// Git está e o ambiente do destino.
+fn condicao_atendida(ctx: &Ctx, no: &PipelineNode) -> bool {
+    let bruto = match no.condition.as_deref() {
+        Some(raw) if !raw.trim().is_empty() => raw.trim().to_string(),
+        _ => return true,
+    };
+    let (chave, valor) = match bruto.split_once('=') {
+        Some(pair) => pair,
+        None => return true,
+    };
+    match chave.trim() {
+        "ramo" => ctx.branch == valor.trim(),
+        "ambiente" => ctx.environment().eq_ignore_ascii_case(valor.trim()),
+        _ => true,
+    }
+}
+
+/// Situação de um nó dentro da corrida que está rodando agora.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sit {
+    Feito,
+    /// A condição do nó não se cumpriu: nada foi executado e nada está errado.
+    Pulado,
+    Falho,
+    /// Não rodou porque uma dependência sua falhou — direto ou através de outro nó
+    /// travado. É diferente de `Pulado`: aqui a corrida parou antes de chegar nele,
+    /// e por isso um nó travado trava os nós abaixo dele também.
+    Bloqueado,
+}
+
+/// Os índices que a corrida percorre: o grafo inteiro, ou um nó e — quando pedido
+/// em modo de diagnóstico — a corrente de dependências dele. Índice é a ordem
+/// salva, que é a mesma ordem da tela e a posição da linha no histórico.
+fn escopo_do_grafo(nos: &[PipelineNode], alvo: Option<&str>, com_dependencias: bool) -> Vec<usize> {
+    let Some(chave) = alvo else {
+        return (0..nos.len()).collect();
+    };
+    let Some(posicao) = nos.iter().position(|n| n.node_key == chave) else {
+        return Vec::new();
+    };
+    if !com_dependencias {
+        return vec![posicao];
+    }
+    let mut visitas = vec![posicao];
+    let mut fila = vec![posicao];
+    while let Some(atual) = fila.pop() {
+        for dep in &nos[atual].depends_on {
+            if let Some(i) = nos.iter().position(|n| &n.node_key == dep) {
+                if !visitas.contains(&i) {
+                    visitas.push(i);
+                    fila.push(i);
+                }
+            }
+        }
+    }
+    visitas.sort_unstable();
+    visitas
+}
+
+/// Todo dependente do escopo já terminou (bem ou pulado por condição) e o nó pode
+/// rodar. Dependência fora do escopo não trava nada: é o caso da execução isolada
+/// de um nó de comando, em que quem testa escolhe rodar aquele nó sozinho.
+fn pronto(
+    no: &PipelineNode,
+    situacao: &HashMap<usize, Sit>,
+    indice_por_chave: &HashMap<&str, usize>,
+    dentro: &HashSet<usize>,
+) -> bool {
+    no.depends_on.iter().all(|dep| {
+        let Some(i) = indice_por_chave.get(dep.as_str()).copied() else {
+            return true;
+        };
+        if !dentro.contains(&i) {
+            return true;
+        }
+        matches!(situacao.get(&i), Some(Sit::Feito) | Some(Sit::Pulado))
+    })
+}
+
+/// Dependência que falhou — ou que travou por outra que falhou: o nó não roda, e
+/// isso é registrado como travado com o motivo, nunca como sucesso. Sem o
+/// `Bloqueado` na conta, a falha pararia só o filho direto e o neto do nó que
+/// falhou publicaria do mesmo jeito.
+fn bloqueado(
+    no: &PipelineNode,
+    situacao: &HashMap<usize, Sit>,
+    indice_por_chave: &HashMap<&str, usize>,
+    dentro: &HashSet<usize>,
+) -> bool {
+    no.depends_on.iter().any(|dep| {
+        let quem_ela_espera = indice_por_chave
+            .get(dep.as_str())
+            .copied()
+            .filter(|i| dentro.contains(i))
+            .and_then(|i| situacao.get(&i));
+        matches!(
+            quem_ela_espera,
+            Some(&Sit::Falho) | Some(&Sit::Bloqueado)
+        )
+    })
+}
+
+/// O escalonador do grafo: cada nó roda quando as dependências dele terminaram,
+/// ramais paralelos ao mesmo tempo, e nada depois de uma dependência falhar. Não
+/// há um segundo motor — um nó do tipo `motor` chama a mesma função das quinze
+/// etapas, e um nó `comando` usa o mesmo executor de comandos do contexto.
+fn grafo(
+    ctx: &mut Ctx,
+    nos: &[PipelineNode],
+    alvo: Option<&str>,
+    com_dependencias: bool,
+) -> Result<String, Fail> {
+    let lista = escopo_do_grafo(nos, alvo, com_dependencias);
+    if lista.is_empty() {
+        return Err(Fail::new(match alvo {
+            Some(chave) => format!("o nó “{chave}” não pertence a esta definição"),
+            None => "a definição não tem nenhum nó para executar".to_string(),
+        }));
+    }
+    for &i in &lista {
+        ctx.marca_no(&NodeRow::of(i, &nos[i]), "waiting", None);
+    }
+    let dentro: HashSet<usize> = lista.iter().copied().collect();
+    let indice_por_chave: HashMap<&str, usize> = nos
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.node_key.as_str(), i))
+        .collect();
+    let mut situacao: HashMap<usize, Sit> = HashMap::new();
+    let mut restantes: Vec<usize> = lista.clone();
+    let mut falha: Option<Fail> = None;
+    let mut maior_paralelo = 1usize;
+
+    while !restantes.is_empty() {
+        if ctx.cancelled() {
+            for &i in &restantes {
+                ctx.marca_no(&NodeRow::of(i, &nos[i]), "skipped", Some("corrida interrompida"));
+            }
+            return Err(Fail::cancelled());
+        }
+        // A cascada é fechada até não mudar mais: um nó travado por falha trava os
+        // nós abaixo dele, e isso só aparece na volta seguinte se não for resolvido
+        // aqui dentro.
+        let mut apareceram_travados = true;
+        while apareceram_travados {
+            let bloqueados: Vec<usize> = restantes
+                .iter()
+                .copied()
+                .filter(|&i| bloqueado(&nos[i], &situacao, &indice_por_chave, &dentro))
+                .collect();
+            apareceram_travados = !bloqueados.is_empty();
+            for i in bloqueados {
+                ctx.marca_no(
+                    &NodeRow::of(i, &nos[i]),
+                    "skipped",
+                    Some("uma dependência sua falhou nesta corrida"),
+                );
+                situacao.insert(i, Sit::Bloqueado);
+                restantes.retain(|&j| j != i);
+            }
+        }
+        let prontos: Vec<usize> = restantes
+            .iter()
+            .copied()
+            .filter(|&i| pronto(&nos[i], &situacao, &indice_por_chave, &dentro))
+            .collect();
+        if prontos.is_empty() {
+            for &i in &restantes {
+                ctx.marca_no(
+                    &NodeRow::of(i, &nos[i]),
+                    "skipped",
+                    Some("as dependências deste nó nunca ficaram prontas"),
+                );
+            }
+            return Err(Fail::new(
+                "o grafo parou: existe nó com dependência que não se completa",
+            ));
+        }
+        // Paralelo só entre nós de comando marcados como paralelos. Uma etapa do
+        // motor produz estado para as seguintes (arquivos, release, backup) e por
+        // isso nunca divide ramal.
+        let em_paralelo = prontos.len() > 1
+            && prontos
+                .iter()
+                .all(|&i| nos[i].parallel && nos[i].kind == "comando");
+        if em_paralelo {
+            maior_paralelo = maior_paralelo.max(prontos.len());
+            let mut ramos = Vec::new();
+            for &i in &prontos {
+                let no = nos[i].clone();
+                let row = NodeRow::of(i, &no);
+                let prazo = prazo_do_no(&no);
+                let mut ramal = ctx.branch(row, prazo);
+                let spawned = thread::Builder::new()
+                    .name(format!("deploy-{}-no-{}", ctx.run_id, i + 1))
+                    .spawn(move || executar_no(&mut ramal, i, &no));
+                match spawned {
+                    Ok(handle) => ramos.push((i, handle)),
+                    Err(e) => {
+                        ctx.marca_no(
+                            &NodeRow::of(i, &nos[i]),
+                            "failed",
+                            Some(&format!("não foi possível abrir o ramal: {e}")),
+                        );
+                        situacao.insert(i, Sit::Falho);
+                        restantes.retain(|&j| j != i);
+                        falha.get_or_insert_with(|| {
+                            Fail::new(format!("falha ao iniciar o ramal paralelo: {e}"))
+                        });
+                    }
+                }
+            }
+            for (i, handle) in ramos {
+                let titulo = nos[i].title.clone();
+                let resultado = handle.join().unwrap_or_else(|_| {
+                    Err(Fail::new(format!("o ramal “{titulo}” quebrou durante a execução")))
+                });
+                registrar_saida(&mut situacao, &mut restantes, &mut falha, i, resultado);
+            }
+            continue;
+        }
+        let i = prontos[0];
+        let resultado = executar_no(ctx, i, &nos[i]);
+        if matches!(resultado, Err(ref f) if f.cancelled) {
+            for &j in &restantes {
+                ctx.marca_no(&NodeRow::of(j, &nos[j]), "skipped", Some("corrida interrompida"));
+            }
+            return Err(Fail::cancelled());
+        }
+        registrar_saida(&mut situacao, &mut restantes, &mut falha, i, resultado);
+    }
+
+    if let Some(fail) = falha {
+        return Err(fail);
+    }
+    let total = lista.len();
+    let feitos = situacao.values().filter(|s| **s == Sit::Feito).count();
+    let pulados = situacao.values().filter(|s| **s == Sit::Pulado).count();
+    let travados = situacao.values().filter(|s| **s == Sit::Bloqueado).count();
+    let mut extra = String::new();
+    if pulados > 0 {
+        extra.push_str(&format!(" · {pulados} pulado(s) por condição"));
+    }
+    if travados > 0 {
+        extra.push_str(&format!(" · {travados} travado(s) por falha"));
+    }
+    let ramais = if maior_paralelo > 1 {
+        format!(" · até {maior_paralelo} ramais ao mesmo tempo")
+    } else {
+        String::new()
+    };
+    Ok(format!("grafo · {feitos} de {total} nós{extra}{ramais}"))
+}
+
+/// Prazo do nó, ou `None` para herdar o prazo por etapa do modelo.
+fn prazo_do_no(no: &PipelineNode) -> Option<Duration> {
+    if no.timeout_secs > 0 {
+        Some(Duration::from_secs(no.timeout_secs as u64))
+    } else {
+        None
+    }
+}
+
+fn registrar_saida(
+    situacao: &mut HashMap<usize, Sit>,
+    restantes: &mut Vec<usize>,
+    falha: &mut Option<Fail>,
+    i: usize,
+    resultado: Result<Fim, Fail>,
+) {
+    match resultado {
+        Ok(Fim::Concluido) => situacao.insert(i, Sit::Feito),
+        Ok(Fim::Pulado) => situacao.insert(i, Sit::Pulado),
+        Err(fail) => {
+            if falha.is_none() {
+                *falha = Some(fail);
+            }
+            situacao.insert(i, Sit::Falho)
+        }
+    };
+    restantes.retain(|&j| j != i);
+}
 
 fn validate_step(ctx: &mut Ctx) -> Result<Info, Fail> {
     if ctx.local_mode() {
@@ -1042,11 +1978,7 @@ fn validate_remoto(ctx: &mut Ctx) -> Result<Info, Fail> {
     let servidor = ctx.server_ref()?;
     checar_definicao(&ctx.profile, &ctx.root, Some(servidor)).map_err(Fail::new)?;
     checar_pasta_e_variaveis(ctx)?;
-    if ctx.askpass.is_none() {
-        let servidor = ctx.server_ref()?.clone();
-        ctx.askpass = auth::prepare(&ctx.broker, &ctx.app, &servidor, &format!("Deploy · {}", ctx.profile.name))
-            .map_err(Fail::new)?;
-    }
+    ctx.garantir_askpass()?;
     let servidor = ctx.server_ref()?;
     let auth_desc = match &ctx.askpass {
         Some(_) => "senha informada agora (não gravada)".to_string(),
@@ -1094,7 +2026,7 @@ fn connection_step(ctx: &mut Ctx) -> Result<Info, Fail> {
         servidor.port,
         &servidor.username,
         identity.as_deref(),
-        ctx.askpass.as_ref(),
+        ctx.askpass.as_deref(),
     );
     ctx.log(2, "out", &result.message);
     if !result.ok {
@@ -2228,6 +3160,16 @@ fn procedencia(profile: &DeployProfile, servidor: &Option<Server>, root: &Path) 
     }
 }
 
+/// O pedido de uma corrida, do jeito que a janela o faz: de qual definição, o que
+/// percorrer — a definição inteira ou um nó de diagnóstico — e com que autorização.
+pub struct PedidoDeCorrida {
+    pub profile_id: i64,
+    pub alvo: Option<String>,
+    pub com_dependencias: bool,
+    pub secret_values: HashMap<String, String>,
+    pub allow_secrets: bool,
+}
+
 pub fn start(
     app: AppHandle,
     state: &DeployState,
@@ -2237,11 +3179,66 @@ pub fn start(
     secret_values: HashMap<String, String>,
     allow_secrets: bool,
 ) -> Result<i64, String> {
-    let (profile, servidor, project, root, extra, run_id) = {
+    corrida(
+        app,
+        state,
+        db,
+        broker,
+        PedidoDeCorrida {
+            profile_id,
+            alvo: None,
+            com_dependencias: false,
+            secret_values,
+            allow_secrets,
+        },
+    )
+}
+
+/// Execução de diagnóstico de um nó: ele sozinho, ou ele e a corrente de
+/// dependências que produz o estado que ele lê. Serve para conferir um ramo do grafo
+/// sem publicar nada além dele — e por isso o nó que toca o destino exige a mesma
+/// autorização explícita de segredos de uma corrida inteira.
+pub fn run_no(
+    app: AppHandle,
+    state: &DeployState,
+    db: DbHandle,
+    broker: auth::AuthBroker,
+    mut pedido: PedidoDeCorrida,
+) -> Result<i64, String> {
+    let alvo = pedido.alvo.take().unwrap_or_default();
+    let alvo = alvo.trim();
+    if alvo.is_empty() {
+        return Err("diga qual nó você quer executar".to_string());
+    }
+    pedido.alvo = Some(alvo.to_string());
+    corrida(app, state, db, broker, pedido)
+}
+
+/// Toda corrida que publica abre por aqui. O que roda é o que a tela mostra: uma
+/// definição com grafo salvo executa o grafo, e sem nós ela permanece o pipeline
+/// linear de quinze etapas — a etapa 3 acrescenta nós, não um segundo caminho.
+fn corrida(
+    app: AppHandle,
+    state: &DeployState,
+    db: DbHandle,
+    broker: auth::AuthBroker,
+    pedido: PedidoDeCorrida,
+) -> Result<i64, String> {
+    let alvo = pedido.alvo.clone();
+    let com_dependencias = pedido.com_dependencias;
+    let profile_id = pedido.profile_id;
+    let (profile, servidor, project, root, extra, run_id, nos) = {
         let conn = db.lock().map_err(|_| "o banco local está indisponível".to_string())?;
         let profile = db::get_deploy_profile(&conn, profile_id)?;
         let servidor = servidor_do_modelo(&conn, &profile)?;
         let project = db::get_project(&conn, profile.project_id)?;
+        let nos = db::list_pipeline_nodes(&conn, profile_id)?;
+        if alvo.is_some() && nos.is_empty() {
+            return Err(format!(
+                "a definição “{}” não tem grafo salvo — não há nó para executar sozinho",
+                profile.name
+            ));
+        }
         let extra = security::extra_patterns(
             db::setting_value(&conn, SECRET_PATTERNS_SETTING)?.as_deref(),
         );
@@ -2251,18 +3248,37 @@ pub fn start(
             &conn,
             "info",
             "deploy",
-            "Deploy iniciado",
+            match &alvo {
+                Some(_) => "Diagnóstico de nó iniciado",
+                None => "Deploy iniciado",
+            },
             servidor.as_ref().map(|s| s.name.as_str()),
             Some(&project.name),
             None,
             Some(&format!(
-                "modelo {} · estratégia {} · execução #{run_id}{}",
+                "modelo {} · estratégia {} · execução #{run_id}{}{}",
                 profile.name,
                 profile.strategy,
-                if servidor.is_none() { " · nesta máquina" } else { "" }
+                if servidor.is_none() { " · nesta máquina" } else { "" },
+                match &alvo {
+                    Some(chave) if com_dependencias =>
+                        format!(" · nó “{chave}” com dependências"),
+                    Some(chave) => format!(" · nó “{chave}”"),
+                    None if nos.is_empty() => String::new(),
+                    None => format!(" · grafo com {} nó(s)", nos.len()),
+                }
             )),
         );
-        (profile, servidor, project, root, extra, run_id)
+        (profile, servidor, project, root, extra, run_id, nos)
+    };
+    let percurso = if nos.is_empty() {
+        Percurso::Linear
+    } else {
+        Percurso::Grafo {
+            nos,
+            alvo,
+            com_dependencias,
+        }
     };
     run(
         app,
@@ -2275,9 +3291,9 @@ pub fn start(
         project,
         root,
         extra,
-        false,
-        secret_values,
-        allow_secrets,
+        percurso,
+        pedido.secret_values,
+        pedido.allow_secrets,
         None,
     )
 }
@@ -2355,7 +3371,7 @@ pub fn rollback(
         project,
         root,
         extra,
-        true,
+        Percurso::Reversao,
         secret_values,
         true,
         previous,
@@ -2374,13 +3390,17 @@ fn run(
     project: Project,
     root: PathBuf,
     extra: Vec<String>,
-    rollback: bool,
+    percurso: Percurso,
     secret_values: HashMap<String, String>,
     allow_secrets: bool,
     previous: Option<String>,
 ) -> Result<i64, String> {
     let cancel = Arc::new(AtomicBool::new(false));
-    let operacao = if rollback { "Rollback" } else { "Deploy" };
+    let operacao = match &percurso {
+        Percurso::Reversao => "Rollback",
+        Percurso::Grafo { alvo: Some(_), .. } => "Diagnóstico",
+        _ => "Deploy",
+    };
     let destino = servidor
         .as_ref()
         .map(|s| s.name.clone())
@@ -2417,15 +3437,35 @@ fn run(
         project,
         root,
         broker,
+        approvals: state.approvals.clone(),
+        node_row: None,
+        node_timeout: None,
     };
-    // todas as etapas aparecem como "aguardando" assim que o clique acontece
-    for position in 1..=15 {
-        ctx.mark(position, "waiting", None, None, None);
+    let linhas = match &percurso {
+        // todas as etapas aparecem como "aguardando" assim que o clique acontece
+        Percurso::Linear | Percurso::Reversao => ctx.mark_waiting_do_motor(),
+        Percurso::Grafo { nos, alvo, com_dependencias } => {
+            ctx.mark_waiting_dos_nos(nos, alvo.as_deref(), *com_dependencias)
+        }
+    };
+    if linhas == 0 {
+        state.forget(run_id);
+        if let Ok(conn) = db.lock() {
+            let _ = db::finish_run(
+                &conn,
+                run_id,
+                "failed",
+                None,
+                None,
+                Some("o grafo da definição não tem nenhum nó para esta execução"),
+            );
+        }
+        return Err("o grafo da definição não tem nenhum nó para esta execução".to_string());
     }
     let thread_state = state.clone();
     let spawned = thread::Builder::new()
         .name(format!("deploy-{run_id}"))
-        .spawn(move || execute(ctx, thread_state, rollback));
+        .spawn(move || execute(ctx, thread_state, percurso));
     if let Err(e) = spawned {
         state.forget(run_id);
         if let Ok(conn) = db.lock() {
@@ -2443,17 +3483,41 @@ fn run(
     Ok(run_id)
 }
 
-fn execute(ctx: Ctx, state: DeployState, rollback: bool) {
+/// O que uma corrida percorre. `Linear` é o pipeline de quinze etapas do capítulo
+/// 10, e é por onde toda definição sem grafo salvo continua rodando — a etapa 3
+/// não reescreve o caminho existente, ela acrescenta nós que chamam as mesmas
+/// etapas. `Reversao` é o retorno assistido, que permanece linear por definição:
+/// reverter é sempre a mesma sequência curta conferida no destino.
+#[derive(Debug, Clone)]
+pub enum Percurso {
+    Linear,
+    Reversao,
+    Grafo {
+        nos: Vec<PipelineNode>,
+        /// `Some` é o modo de diagnóstico: um nó, e as dependências dele quando
+        /// pedidas.
+        alvo: Option<String>,
+        com_dependencias: bool,
+    },
+}
+
+fn execute(ctx: Ctx, state: DeployState, percurso: Percurso) {
     let mut ctx = ctx;
-    let resultado = if rollback {
-        rollback_pipeline(&mut ctx)
-    } else {
-        pipeline(&mut ctx)
+    let grafico = matches!(&percurso, Percurso::Grafo { .. });
+    let reversao = matches!(&percurso, Percurso::Reversao);
+    let resultado = match &percurso {
+        Percurso::Reversao => rollback_pipeline(&mut ctx),
+        Percurso::Linear => pipeline(&mut ctx),
+        Percurso::Grafo { nos, alvo, com_dependencias } => {
+            grafo(&mut ctx, nos, alvo.as_deref(), *com_dependencias)
+        }
     };
-    let flags = ctx.touched.load(Ordering::Relaxed);
-    for position in 1..=15 {
-        if flags & (1u16 << position) == 0 {
-            ctx.mark(position, "skipped", Some("etapa não alcançada"), None, None);
+    if !grafico {
+        let flags = ctx.touched.load(Ordering::Relaxed);
+        for position in 1..=15 {
+            if flags & (1u16 << position) == 0 {
+                ctx.mark(position, "skipped", Some("etapa não alcançada"), None, None);
+            }
         }
     }
     let (status, detail) = match &resultado {
@@ -2463,7 +3527,7 @@ fn execute(ctx: Ctx, state: DeployState, rollback: bool) {
             fail.message.clone(),
         ),
     };
-    finalize(&ctx, status, &detail, rollback);
+    finalize(&ctx, status, &detail, reversao);
     state.forget(ctx.run_id);
 }
 
@@ -2864,6 +3928,109 @@ mod tests {
         }
         assert_eq!(step_name_local(2), "Abrir a pasta de destino");
         assert_eq!(step_name_local(10), "Copiar os arquivos para o destino");
+    }
+
+    /// Um nó do grafo para as checagens do escalonador, que só olham chave, tipo,
+    /// etapa e dependências.
+    fn no_de_grafo(chave: &str, tipo: &str, etapa: Option<i64>, dep: &[&str]) -> PipelineNode {
+        PipelineNode {
+            id: 0,
+            profile_id: 1,
+            node_key: chave.to_string(),
+            title: chave.to_string(),
+            kind: tipo.to_string(),
+            engine_step: etapa,
+            executor: "local".to_string(),
+            environment: None,
+            working_dir: None,
+            commands: Vec::new(),
+            depends_on: dep.iter().map(|d| d.to_string()).collect(),
+            parallel: false,
+            timeout_secs: 0,
+            retry_limit: 0,
+            condition: None,
+            requires_approval: false,
+            touches_destination: false,
+            x: 0,
+            y: 0,
+        }
+    }
+
+    /// O mesmo desenho que a tela produz: dois ramais depois da coleta, um portão
+    /// de aprovação antes da cópia, e o registro no fim.
+    fn grafo_de_teste() -> Vec<PipelineNode> {
+        vec![
+            no_de_grafo("validar", "motor", Some(1), &[]),
+            no_de_grafo("git", "motor", Some(3), &["validar"]),
+            no_de_grafo("coleta", "motor", Some(4), &["git"]),
+            no_de_grafo("preparo", "comando", None, &["coleta"]),
+            no_de_grafo("publicar", "motor", Some(8), &["coleta"]),
+            no_de_grafo("gate", "aprovacao", None, &["preparo", "publicar"]),
+            no_de_grafo("copia", "motor", Some(10), &["gate"]),
+            no_de_grafo("historico", "motor", Some(15), &["copia"]),
+        ]
+    }
+
+    #[test]
+    fn o_escopo_do_diagnostico_e_o_no_sozinho_ou_a_corrente_dele() {
+        let nos = grafo_de_teste();
+        assert_eq!(escopo_do_grafo(&nos, None, false), (0..8).collect::<Vec<usize>>());
+        assert_eq!(escopo_do_grafo(&nos, Some("copia"), false), vec![6]);
+        assert_eq!(escopo_do_grafo(&nos, Some("copia"), true), vec![0, 1, 2, 3, 4, 5, 6]);
+        assert!(escopo_do_grafo(&nos, Some("que_nao_existe"), true).is_empty());
+    }
+
+    #[test]
+    fn dependencia_fora_do_escopo_nao_trava_e_dentro_trava_so_com_falha() {
+        let nos = grafo_de_teste();
+        let indice: HashMap<&str, usize> = nos
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.node_key.as_str(), i))
+            .collect();
+        let copia = &nos[6];
+        let mut situacao = HashMap::new();
+        situacao.insert(5usize, Sit::Falho);
+
+        let so_a_copia: HashSet<usize> = [6usize].into_iter().collect();
+        assert!(pronto(copia, &situacao, &indice, &so_a_copia));
+        assert!(!bloqueado(copia, &situacao, &indice, &so_a_copia));
+
+        let todo: HashSet<usize> = (0..8).collect();
+        assert!(!pronto(copia, &situacao, &indice, &todo));
+        assert!(bloqueado(copia, &situacao, &indice, &todo));
+
+        // Pulado por condição não é falha: quem depende dele roda mesmo assim.
+        situacao.insert(5usize, Sit::Pulado);
+        assert!(pronto(copia, &situacao, &indice, &todo));
+        assert!(!bloqueado(copia, &situacao, &indice, &todo));
+    }
+
+    #[test]
+    fn falha_trava_a_corrente_inteira_e_a_condicao_nao_propaga_nada() {
+        let nos = grafo_de_teste();
+        let indice: HashMap<&str, usize> = nos
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.node_key.as_str(), i))
+            .collect();
+        let todo: HashSet<usize> = (0..8).collect();
+        let gate = &nos[5];
+        let mut situacao = HashMap::new();
+
+        // `coleta` (2) falhou: `preparo` (3) está travado, e o portão acima dele
+        // também — falha não para no filho direto.
+        situacao.insert(2usize, Sit::Falho);
+        situacao.insert(3usize, Sit::Bloqueado);
+        assert!(bloqueado(gate, &situacao, &indice, &todo));
+        assert!(!pronto(gate, &situacao, &indice, &todo));
+
+        // O mesmo nó de cima, pulado porque a condição não se cumpriu: nada abaixo
+        // dele está travado, e o portão roda depois que o outro ramal terminar.
+        situacao.insert(3usize, Sit::Pulado);
+        situacao.insert(4usize, Sit::Feito);
+        assert!(!bloqueado(gate, &situacao, &indice, &todo));
+        assert!(pronto(gate, &situacao, &indice, &todo));
     }
 
     #[test]

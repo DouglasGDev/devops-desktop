@@ -20,7 +20,7 @@ use crate::{
     git, git_probe, github, infra,
     models::{
         AuditEntry, ConnectionTestResult, DefinitionRevision, DeployProfile, DeployProfileInput, DeployRun, EditorInstalado,
-        ImportSshHost, Project, RemoteEntry, Routine,
+        ImportSshHost, Project, PipelineNode, PipelineNodeInput, RemoteEntry, Routine,
         RoutineInput, SearchProjectRow, SearchResults, SearchServerRow, Server, ServerInput,
         SshDiscoveryReport, TerminalHistoryEntry, TerminalSessionInfo, ToolVersions,
     },
@@ -794,6 +794,127 @@ async fn pipeline_retry(
         run_id,
         secret_values,
     )
+}
+
+// O grafo desenhado na tela é a definição: salvar nós sobe a versão, e o que a
+// execução percorre é exatamente o que está aqui. Nada roda fora destas portas.
+
+#[tauri::command]
+async fn pipeline_nodes(
+    state: State<'_, AppState>,
+    definition_id: i64,
+) -> Result<Vec<PipelineNode>, String> {
+    pipeline::nodes(&state.db, definition_id)
+}
+
+#[tauri::command]
+async fn pipeline_save_nodes(
+    state: State<'_, AppState>,
+    definition_id: i64,
+    nodes: Vec<PipelineNodeInput>,
+) -> Result<Vec<PipelineNode>, String> {
+    pipeline::save_nodes(&state.db, definition_id, &nodes)
+}
+
+#[tauri::command]
+async fn pipeline_check_nodes(
+    state: State<'_, AppState>,
+    definition_id: i64,
+    nodes: Vec<PipelineNodeInput>,
+) -> Result<String, String> {
+    for no in &nodes {
+        no.validate()?;
+    }
+    let lista = nodes
+        .iter()
+        .map(pipeline::NoParaChecar::from)
+        .collect::<Vec<_>>();
+    let tem_servidor = {
+        let conn = lock_db(&state.db)?;
+        db::get_deploy_profile(&conn, definition_id)?.server_id.is_some()
+    };
+    pipeline::checar_grafo(&lista, tem_servidor)
+}
+
+/// As quinze etapas do motor, com o nome que o próprio motor dá a cada uma no
+/// modo do modelo. É a lista que o construtor oferece — nada de duplicá-la na
+/// interface.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EtapaDoMotor {
+    pub position: i64,
+    pub name: String,
+}
+
+#[tauri::command]
+async fn pipeline_engine_steps(
+    state: State<'_, AppState>,
+    definition_id: i64,
+) -> Result<Vec<EtapaDoMotor>, String> {
+    let tem_servidor = {
+        let conn = lock_db(&state.db)?;
+        db::get_deploy_profile(&conn, definition_id)?.server_id.is_some()
+    };
+    Ok((1..=15)
+        .map(|p| EtapaDoMotor {
+            position: p,
+            name: if tem_servidor {
+                deploy::step_name(p)
+            } else {
+                deploy::step_name_local(p)
+            },
+        })
+        .collect())
+}
+
+/// O pedido de execução de um nó, como a tela do construtor o faz.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RodarNo {
+    definition_id: i64,
+    node_key: String,
+    with_dependencies: bool,
+    secret_values: HashMap<String, String>,
+    allow_secrets: bool,
+}
+
+#[tauri::command]
+async fn pipeline_run_node(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    passwords: State<'_, AuthBroker>,
+    deploys: State<'_, deploy::DeployState>,
+    input: RodarNo,
+) -> Result<i64, String> {
+    deploy::run_no(
+        app,
+        &deploys,
+        state.db.clone(),
+        (*passwords).clone(),
+        deploy::PedidoDeCorrida {
+            profile_id: input.definition_id,
+            alvo: Some(input.node_key),
+            com_dependencias: input.with_dependencies,
+            secret_values: input.secret_values,
+            allow_secrets: input.allow_secrets,
+        },
+    )
+}
+
+#[tauri::command]
+async fn pipeline_approve(
+    deploys: State<'_, deploy::DeployState>,
+    request_id: i64,
+    approved: bool,
+) -> Result<(), String> {
+    deploys.approvals().respond(request_id, approved)
+}
+
+#[tauri::command]
+async fn pipeline_approvals_pending(
+    deploys: State<'_, deploy::DeployState>,
+) -> Result<usize, String> {
+    Ok(deploys.approvals().pending())
 }
 
 //
@@ -3126,6 +3247,13 @@ pub fn register_all(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri
         pipeline_validate,
         pipeline_retry_policy,
         pipeline_retry,
+        pipeline_nodes,
+        pipeline_save_nodes,
+        pipeline_check_nodes,
+        pipeline_engine_steps,
+        pipeline_run_node,
+        pipeline_approve,
+        pipeline_approvals_pending,
         github_status,
         github_set_client_id,
         github_connect_start,

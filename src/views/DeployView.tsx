@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, onDeployDone, onDeployLog, onDeployStep } from "../lib/api";
+import { api, onDeployDone, onDeployLog, onDeployStep, onPipelineApproval } from "../lib/api";
 import { formatBytes, formatDateTime } from "../lib/format";
 import type {
+  ApprovalRequest,
   DeployActive,
   DeployPreflight,
   DeployProfile,
   DeployRun,
+  EngineStep,
   LogEvent,
   ViewId,
 } from "../types";
 import { useApp } from "../store/AppContext";
-import { AlertTriangleIcon, KeyIcon, RefreshIcon, RocketIcon, UndoIcon } from "../components/Icons";
+import { AlertTriangleIcon, CheckIcon, KeyIcon, RefreshIcon, RocketIcon, UndoIcon, XIcon } from "../components/Icons";
+import { PipelineGraph } from "../components/deploy/PipelineGraph";
 import { StepPipeline } from "../components/deploy/StepPipeline";
 import {
   Badge,
@@ -51,8 +54,15 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
   const [runs, setRuns] = useState<DeployRun[]>([]);
   const [active, setActive] = useState<DeployActive[]>([]);
   const [retryBlock, setRetryBlock] = useState<string | null>(null);
+  const [aba, setAba] = useState<"executar" | "grafo">("executar");
+  const [engineSteps, setEngineSteps] = useState<EngineStep[]>([]);
+  const [aprovacao, setAprovacao] = useState<ApprovalRequest | null>(null);
   const [secretsFor, setSecretsFor] = useState<
-    { kind: "deploy" } | { kind: "rollback"; runId: number } | { kind: "retry"; runId: number } | null
+    | { kind: "deploy" }
+    | { kind: "rollback"; runId: number }
+    | { kind: "retry"; runId: number }
+    | { kind: "no"; nodeKey: string; comDependencias: boolean }
+    | null
   >(null);
 
   // Os listeners são montados uma vez; eles filtram pela execução atual por
@@ -88,6 +98,7 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
     let unstep: (() => void) | undefined;
     let unlog: (() => void) | undefined;
     let undone: (() => void) | undefined;
+    let unapr: (() => void) | undefined;
     let alive = true;
 
     void (async () => {
@@ -166,6 +177,12 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
             : `Deploy #${finished.id} terminou como “${finished.status}”: ${finished.detail ?? "sem detalhes"}`,
         );
       });
+      unapr = await onPipelineApproval((pedido) => {
+        // Um nó do grafo parou esperando decisão. O pedido é mostrado seja qual
+        // for a execução na tela: sem ele o motor fica à espera até o prazo.
+        setAprovacao(pedido);
+        setAba("executar");
+      });
     })();
 
     return () => {
@@ -173,6 +190,7 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
       unstep?.();
       unlog?.();
       undone?.();
+      unapr?.();
     };
   }, [loadHistory, openRun, pushToast]);
 
@@ -194,6 +212,66 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
   const pedirExecucao = () => {
     if (!profile) return;
     setSecretsFor({ kind: "deploy" });
+  };
+
+  // As quinze etapas do motor, com os nomes que o próprio motor usa neste modo.
+  useEffect(() => {
+    if (!profile) {
+      setEngineSteps([]);
+      return;
+    }
+    let alive = true;
+    void api
+      .pipelineEngineSteps(profile.id)
+      .then((lista) => {
+        if (alive) setEngineSteps(lista);
+      })
+      .catch((e) => {
+        if (alive) pushToast("error", `Não foi possível ler as etapas do motor: ${String(e)}`);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [profile, pushToast]);
+
+  const rodarNo = (nodeKey: string, comDependencias: boolean) => {
+    setAba("executar");
+    setSecretsFor({ kind: "no", nodeKey, comDependencias });
+  };
+
+  const executarNo = async (nodeKey: string, comDependencias: boolean, secretValues: Record<string, string>) => {
+    if (!profile) return;
+    try {
+      const id = await api.pipelineRunNode({
+        definitionId: profile.id,
+        nodeKey,
+        withDependencies: comDependencias,
+        secretValues,
+        allowSecrets,
+      });
+      setAllowSecrets(false);
+      setLogs([]);
+      await openRun(id);
+      setRunning(true);
+      await loadHistory();
+    } catch (e) {
+      pushToast("error", `Não foi possível executar o nó “${nodeKey}”: ${String(e)}`);
+    }
+  };
+
+  const decidir = async (aprovado: boolean) => {
+    if (!aprovacao) return;
+    const pedido = aprovacao;
+    setAprovacao(null);
+    try {
+      await api.pipelineApprove(pedido.id, aprovado);
+      pushToast(
+        aprovado ? "success" : "info",
+        aprovado ? `Nó “${pedido.nodeKey}” aprovado.` : `Nó “${pedido.nodeKey}” rejeitado.`,
+      );
+    } catch (e) {
+      pushToast("error", `A decisão não chegou ao motor: ${String(e)}`);
+    }
   };
 
   const iniciar = async (secretValues: Record<string, string>) => {
@@ -278,7 +356,7 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
   /** O modelo de quem a execução-alvo saiu — pode não ser o modelo escolhido na tela. */
   const modeloDoAlvo = (): DeployProfile | null => {
     if (!secretsFor) return profile;
-    if (secretsFor.kind === "deploy") return profile;
+    if (secretsFor.kind === "deploy" || secretsFor.kind === "no") return profile;
     const origem =
       runs.find((r) => r.id === secretsFor.runId) ?? (run?.id === secretsFor.runId ? run : null);
     if (!origem) return profile;
@@ -419,6 +497,38 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
         ) : null}
       </Card>
 
+      <div className="flex items-center gap-1 border-b border-zinc-200 dark:border-zinc-800">
+        {(["executar", "grafo"] as const).map((opcao) => (
+          <button
+            key={opcao}
+            onClick={() => setAba(opcao)}
+            className={`-mb-px border-b-2 px-3 py-1.5 text-sm capitalize transition ${
+              aba === opcao
+                ? "border-teal-500 font-medium text-teal-700 dark:text-teal-300"
+                : "border-transparent text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+            }`}
+          >
+            {opcao}
+          </button>
+        ))}
+      </div>
+
+      <div className={aba === "grafo" ? "" : "hidden"}>
+        {profile ? (
+          <PipelineGraph
+            definitionId={profile.id}
+            hasServer={profile.serverId !== null}
+            engineSteps={engineSteps}
+            runSteps={run?.steps ?? []}
+            running={running}
+            onRunNode={rodarNo}
+            onSaved={() => void recarregarModelos()}
+          />
+        ) : null}
+      </div>
+
+      {aba === "executar" ? (
+        <>
       {run ? (
         <Card className="p-4">
           <div className="flex flex-wrap items-start justify-between gap-2">
@@ -459,6 +569,9 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
                 ? `definição v${run.definitionVersion}`
                 : "definição anterior à primeira versão registrada"}
             </span>
+            {run.steps.some((s) => s.nodeKey) ? (
+              <span>· grafo com {run.steps.filter((s) => s.nodeKey).length} nó(s)</span>
+            ) : null}
             {run.environment ? <span>· {run.environment}</span> : null}
             {run.destination ? <span className="font-mono">· {run.destination}</span> : null}
             {run.commitSha ? (
@@ -544,6 +657,34 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
           </ul>
         )}
       </Card>
+        </>
+      ) : null}
+
+      {aprovacao ? (
+        <Modal
+          open
+          onClose={() => setAprovacao(null)}
+          title={`Aprovação · nó “${aprovacao.nodeKey}” · execução #${aprovacao.runId}`}
+          width="max-w-md"
+        >
+          <div className="space-y-1.5 text-sm">
+            <p className="font-medium">{aprovacao.title}</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">{aprovacao.definition}</p>
+            <p className="flex flex-wrap gap-2 pt-1 text-xs">
+              <Badge tone="info">{aprovacao.environment}</Badge>
+              <span className="font-mono text-zinc-500 dark:text-zinc-400">{aprovacao.destination}</span>
+            </p>
+          </div>
+          <div className="mt-4 flex justify-end gap-2">
+            <Button variant="danger" onClick={() => void decidir(false)}>
+              <XIcon className="size-3.5" /> Rejeitar
+            </Button>
+            <Button variant="primary" onClick={() => void decidir(true)}>
+              <CheckIcon className="size-3.5" /> Aprovar
+            </Button>
+          </div>
+        </Modal>
+      ) : null}
 
       {secretsFor ? (
         <SecretsDialog
@@ -554,10 +695,18 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
               ? `Variáveis do rollback · execução #${secretsFor.runId}`
               : secretsFor.kind === "retry"
                 ? `Variáveis da nova tentativa · execução #${secretsFor.runId}`
-                : `Variáveis do deploy · ${profile?.name ?? ""}`
+                : secretsFor.kind === "no"
+                  ? `Variáveis do nó “${secretsFor.nodeKey}”`
+                  : `Variáveis do deploy · ${profile?.name ?? ""}`
           }
           actionLabel={
-            secretsFor.kind === "rollback" ? "Reverter" : secretsFor.kind === "retry" ? "Repetir" : "Publicar"
+            secretsFor.kind === "rollback"
+              ? "Reverter"
+              : secretsFor.kind === "retry"
+                ? "Repetir"
+                : secretsFor.kind === "no"
+                  ? "Executar nó"
+                  : "Publicar"
           }
           onClose={() => setSecretsFor(null)}
           onSubmit={(values) => {
@@ -565,6 +714,7 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
             setSecretsFor(null);
             if (alvo.kind === "rollback") void reverter(alvo.runId, values);
             else if (alvo.kind === "retry") void repetir(alvo.runId, values);
+            else if (alvo.kind === "no") void executarNo(alvo.nodeKey, alvo.comDependencias, values);
             else void iniciar(values);
           }}
         />

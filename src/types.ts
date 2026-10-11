@@ -456,6 +456,10 @@ export interface DeployRunStep {
   message: string | null;
   startedAt: string | null;
   finishedAt: string | null;
+  /** O nó do grafo desta linha; `null` no pipeline linear de quinze etapas. */
+  nodeKey: string | null;
+  /** Se a linha escreveu no destino — é o que decide se dá para repetir. */
+  touchedDestination: boolean;
 }
 
 export interface DeployRun {
@@ -500,6 +504,78 @@ export interface RetryPolicy {
   reason: string | null;
 }
 
+// ---------- Grafo do pipeline (plano CI/CD, etapa 3) ----------
+
+/** Os três tipos que o motor sabe executar: uma etapa dele, um comando, uma espera. */
+export type NodeKind = "motor" | "comando" | "aprovacao";
+
+export type NodeExecutor = "local" | "ssh";
+
+/** Uma das quinze etapas do motor, com o nome que o motor dá a ela no modo do modelo. */
+export interface EngineStep {
+  position: number;
+  name: string;
+}
+
+/** Um nó como está salvo na definição. É o que o motor percorre. */
+export interface PipelineNode {
+  id: number;
+  profileId: number;
+  nodeKey: string;
+  title: string;
+  kind: NodeKind;
+  /** Etapa do motor (1..15) que este nó executa; só faz sentido em `motor`. */
+  engineStep: number | null;
+  executor: NodeExecutor;
+  environment: string | null;
+  workingDir: string | null;
+  commands: string[];
+  dependsOn: string[];
+  parallel: boolean;
+  /** 0 = herdar o prazo do modelo. */
+  timeoutSecs: number;
+  retryLimit: number;
+  /** `ramo=<nome>` ou `ambiente=<nome>`; `null` = executa sempre. */
+  condition: string | null;
+  requiresApproval: boolean;
+  /** Derivado do tipo e do executor pelo backend — a tela lê, não edita. */
+  touchesDestination: boolean;
+  x: number;
+  y: number;
+}
+
+/** O que a tela envia para salvar. `touchesDestination` é derivado, não digitado. */
+export type PipelineNodeInput = {
+  nodeKey: string;
+  title: string;
+  kind: NodeKind;
+  engineStep?: number | null;
+  executor?: NodeExecutor | null;
+  environment?: string | null;
+  workingDir?: string | null;
+  commands?: string[] | null;
+  dependsOn?: string[] | null;
+  parallel?: boolean | null;
+  timeoutSecs?: number | null;
+  retryLimit?: number | null;
+  condition?: string | null;
+  requiresApproval?: boolean | null;
+  x?: number | null;
+  y?: number | null;
+};
+
+/** Um pedido de aprovação que o motor emitiu e está esperando. */
+export interface ApprovalRequest {
+  id: number;
+  runId: number;
+  nodeKey: string;
+  title: string;
+  definition: string;
+  environment: string;
+  destination: string;
+  waitsSecs: number;
+}
+
 export interface StepEvent {
   runId: number;
   position: number;
@@ -508,6 +584,8 @@ export interface StepEvent {
   command: string | null;
   exitCode: number | null;
   message: string | null;
+  /** O nó do grafo que esta linha é; `null` no pipeline linear. */
+  nodeKey: string | null;
 }
 
 export interface LogEvent {

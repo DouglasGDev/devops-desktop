@@ -43,7 +43,7 @@ está em [docs/ENTREGAS.md](docs/ENTREGAS.md).
 | **Terminal** | Sessões PTY múltiplas ligadas a um servidor, com redimensionamento, histórico de comandos local e encerramento limpo ao fechar a janela. |
 | **Git** | Status, stage por arquivo ou por trecho (hunk), diff linha a linha, commit (com amend), gráfico de histórico de commits, árvore dos arquivos rastreados com o conteúdo que o Git guarda no HEAD, branches locais/remotas, criar/renomear/excluir/alternar, merge, rebase, resolução de conflito com lado escolhido, fetch/pull/push, tags, remotes, clone, reverter commit e mover a cabeça do ramo, publicação pelo Git (comandos locais + push + tag), teste de acesso ao remoto e abrir o repositório no editor (VS Code/Cursor/system). Funciona sozinho: nenhuma dessas ações depende de haver um servidor cadastrado. |
 | **Acesso da máquina** | Detectar o que está instalado (`ssh`, `ssh-add`, `git`, `gh`), quantas chaves o `ssh-agent` tem, a identidade que o git resolve, os editores encontrados no disco e a conta ativa do `gh`; dizer se a máquina já está liberada para publicar e, quando não está, abrir o navegador no fluxo de autorização do GitHub e confirmar `liberado como @login`. |
-| **Deploy** | Cinco estratégias reais: **A** SFTP sincronizado, **B** Git no servidor, **C** build local + artefatos, **D** sequência de scripts, **E** Docker/Compose. Pipeline visual de até 15 etapas com log, código de saída, verificação de ferramentas no servidor antes de executar, cancelamento cooperativo, release anterior preservada e rollback assistido. O destino pode ser **esta máquina** (sem SSH, com **C** ou **D**): comparação por conteúdo, cópia só do que mudou, ponto de recuperação em `.devops-backups` e reversão que repõe inclusive os arquivos removidos da limpeza. |
+| **Deploy** | Cinco estratégias reais: **A** SFTP sincronizado, **B** Git no servidor, **C** build local + artefatos, **D** sequência de scripts, **E** Docker/Compose. Pipeline visual de até 15 etapas com log, código de saída, verificação de ferramentas no servidor antes de executar, cancelamento cooperativo, release anterior preservada e rollback assistido; ou um **grafo** desenhado na tela (etapas do motor, comandos e aprovações, com dependências, prazo, repetição e condição por nó) que o mesmo motor percorre. O destino pode ser **esta máquina** (sem SSH, com **C** ou **D**): comparação por conteúdo, cópia só do que mudou, ponto de recuperação em `.devops-backups` e reversão que repõe inclusive os arquivos removidos da limpeza. |
 | **Segurança** | Bloqueio de commit/push quando o conteúdo que o Git publicaria contém segredo, varredura de projeto, regras extras configuráveis, remoção assistida do índice sem apagar o arquivo local. |
 | **Dashboard** | Estado dos servidores, deploys recentes e resultado, falhas do histórico, transferências em andamento, alertas de configuração e métricas reais de CPU, memória, disco, containers e serviços — lidas do servidor só quando você pedir. |
 | **GitHub** (opcional) | Conectar a conta pelo fluxo de dispositivo do OAuth e trabalhar o repositório de dentro do app: bandeja com o que é seu (revisão pedida, seus PRs, suas issues), pull request com diff real, conversa de comentários, revisão (aprovar / pedir alterações) e mesclar com método escolhido, abrir um PR a partir de um ramo desta máquina, mapear a pasta local de um repo publicado — o app mostra o caminho exato e abre a pasta no Explorador — e abrir ali mesmo a seção Git completa daquela pasta (aba **Local**), issues com descrição e comentários, execuções do Actions com reexecução, visão geral que liga o remoto às pastas locais (clonar, vincular como `origin`) e criação de repositório. Tudo com confirmação nas ações que escrevem; sem conta conectada, a aba mostra só a conta e o Client ID. |
@@ -392,6 +392,25 @@ pedidos de novo.
 **Execução interrompida**: se o aplicativo for fechado com um pipeline rodando, a abertura seguinte marca essa execução
 como interrompida, com o motivo, e nenhuma publicação é refeita por conta própria.
 
+**Grafo do pipeline (aba Deploy → grafo).** Além da fila das quinze etapas, o modelo pode ter um grafo desenhado na tela:
+nós de três tipos — **etapa do motor**, **comando** (nesta máquina ou no servidor) e **aprovação** — ligados por arestas
+de dependência, arrastáveis com o mouse. O que é desenhado é o que o motor percorre: salvar passa pelo validador do
+backend, e não existe um segundo motor — um nó de etapa do motor chama a mesma função das quinze etapas, um nó de comando
+usa o mesmo executor do contexto, e a aprovação espera a mesma decisão explícita da janela. A validação recusa ciclo,
+dependência inexistente, mais de 40 nós e — a checagem que dá trabalho — um nó de comando paralelo a um nó que escreve no
+contexto do motor. Também recusa etapa do motor sem ancestrais que produzam o que ela lê: pôr "copiar os arquivos para o
+destino" sem nenhum ancestral que tenha verificado o Git ou preparado a release é recusado com a lista do que falta.
+Cada nó pode ter prazo, novas tentativas, condição (`ramo=…`, `ambiente=…`) e aprovação; `touchesDestination` é derivado
+do nó (etapa do motor a partir da 8, qualquer comando no servidor), e é essa marca — não a posição no grafo — que diz se
+uma execução ainda pode ser repetida sem conferir o destino. Uma etapa que falha trava toda a corrente abaixo dela — as
+linhas dos nós que não rodaram aparecem como travadas, nunca como sucesso —, enquanto um nó pulado porque a condição dele
+não se cumpriu deixa os dependentes seguirem. Diagnóstico continua sendo o mesmo motor: **Rodar sozinho**
+executa aquele nó, **Com dependências** executa o ramo que ele precisa. Cada linha do histórico termina com a mensagem do
+próprio nó — um nó de comando diz quantos comandos rodaram e onde, a aprovação diz que a decisão veio da janela, e uma
+etapa do motor conserva a mensagem que ela mesma escreveu, inclusive quando é "pulada". Definir um grafo não apaga nada:
+um modelo sem nós salvos percorre as quinze etapas em fila, exatamente como antes, e a conferência devolve
+`sem grafo · as quinze etapas do motor, em fila`.
+
 ### 9.7 GitHub
 
 A aba **GitHub** é um posto de trabalho, não uma listagem: tudo que aparece vem de uma chamada autenticada a
@@ -520,8 +539,8 @@ Resumo do que é garantido pelo código, não só pela interface:
         ├── git.rs           # wrapper do Git nativo (argv separado, -z, validação)
         ├── git_probe.rs     # detecção de repositório e estado
         ├── security.rs      # regras e varredura de segredos (§8)
-        ├── deploy.rs        # motor de deploy e pipeline de etapas (§9/§10)
-        ├── pipeline.rs      # contrato do pipeline: definição versionada, procedência, política de repetição
+        ├── deploy.rs        # motor de deploy, pipeline de etapas e escalonador do grafo (§9/§10)
+        ├── pipeline.rs      # contrato do pipeline: definição versionada, procedência, política de repetição, validador do grafo
         ├── infra.rs         # métricas reais do servidor (§12)
         ├── github.rs        # fluxo de dispositivo OAuth e chamadas a api.github.com
         ├── auth.rs          # broker de senha por operação (SSH_ASKPASS em memória)
@@ -542,7 +561,7 @@ cd src-tauri
 cargo test --lib
 ```
 
-Cobertura atual do backend (208 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
+Cobertura atual do backend (229 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
 timeout e cancelamento, sessões PTY, ciclo completo de Git em repositório temporário (status, stage por hunk, commit,
 log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), trabalho guardado e
 reprodução de commit no git real (`stash push` tira a alteração da pasta e `stash list` mostra exatamente a entrada que o
@@ -613,7 +632,17 @@ destino libera, falha depois dela bloqueia com a etapa e o status na frase, `run
 registrada bloqueia, `success` libera — incluindo o rollback, que **pula** as etapas de destino marcando-as `skipped` e
 por isso não pode ser lido como "chegou ao destino". A varredura de execuções órfãs é testada no banco migrado: `running`
 vira `cancelled` com o motivo, a etapa em andamento vira `failed`, a segunda passagem não encontra nada e uma execução já
-terminada não é tocada. Nenhum teste de rede é feito: as rotas que falam com o GitHub são exercitadas só na máquina, com dados de
+terminada não é tocada. O grafo da aba **Deploy** é coberto junto: o validador recusa aresta para nó que não existe,
+auto-dependência, ciclo (nomes dos nós que o formam), dois nós com a mesma chave, identificador vazio, mais de 40 nós,
+tipo que o motor não conhece, etapa fora de 1..=15, `ssh` sem servidor cadastrado e paralelismo em nó que não é de
+comando — e aceita o desenho bem formado dizendo o que ele é; a etapa do motor **sem ancestral que produza o que ela lê**
+é recusada com a lista do que falta, e o pré-requisito reconhecido vale também quando vem através de terceiros.
+`touches_destination` é derivado (motor a partir da 8, qualquer comando no servidor), e é ele — não a posição no desenho —
+que a política de repetição consulta: grafo que só rodou teste é repetível, grafo que tocou o destino não. Salvar o grafo
+sobe a versão da definição e grava o retrato com chaves, arestas e os x/y da tela. O escalonador é testado à parte: o
+escopo do diagnóstico é o nó sozinho ou a corrente inteira dele (na ordem salva, que é a ordem da tela), dependência fora
+do escopo não trava um nó isolado, e dentro do escopo só **falha** trava — `pulado` por condição deixa o dependente rodar.
+Nenhum teste de rede é feito: as rotas que falam com o GitHub são exercitadas só na máquina, com dados de
 resposta fixos dentro do próprio teste.
 
 Esses testes usam os binários **reais** do sistema: é requisito da aplicação (e da suíte) ter `git` e `ssh` no `PATH`.

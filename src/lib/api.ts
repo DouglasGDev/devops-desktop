@@ -15,6 +15,10 @@ import type {
   DefinitionSummary,
   LogEvent,
   StepEvent,
+  ApprovalRequest,
+  EngineStep,
+  PipelineNode,
+  PipelineNodeInput,
   FileContent,
   FileDiff,
   GitActionOutcome,
@@ -98,6 +102,12 @@ export function onAuthRequest(handler: (e: AuthRequest) => void): Promise<Unlist
   return listen<AuthRequest>("auth-request", (ev) => handler(ev.payload));
 }
 
+// Um nó do grafo pediu autorização explícita. Sem resposta da janela o motor não
+// toca o destino: ele espera até o prazo e então registra a ausência de decisão.
+export function onPipelineApproval(handler: (e: ApprovalRequest) => void): Promise<UnlistenFn> {
+  return listen<ApprovalRequest>("pipeline-approval", (ev) => handler(ev.payload));
+}
+
 export const api = {
   getSettings: () => invoke<Record<string, string>>("get_settings"),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
@@ -162,6 +172,27 @@ export const api = {
   pipelineRetryPolicy: (runId: number) => invoke<RetryPolicy>("pipeline_retry_policy", { runId }),
   pipelineRetry: (runId: number, secretValues: Record<string, string>) =>
     invoke<number>("pipeline_retry", { runId, secretValues }),
+
+  // Grafo do pipeline: os nós salvos são a definição, e o que roda é o que está
+  // desenhado aqui. Nada deste bloco executa comando — conferir forma é `pipelineCheckNodes`,
+  // e rodar é `pipelineRunNode` / `deployStart`.
+  pipelineNodes: (definitionId: number) => invoke<PipelineNode[]>("pipeline_nodes", { definitionId }),
+  pipelineEngineSteps: (definitionId: number) =>
+    invoke<EngineStep[]>("pipeline_engine_steps", { definitionId }),
+  pipelineSaveNodes: (definitionId: number, nodes: PipelineNodeInput[]) =>
+    invoke<PipelineNode[]>("pipeline_save_nodes", { definitionId, nodes }),
+  pipelineCheckNodes: (definitionId: number, nodes: PipelineNodeInput[]) =>
+    invoke<string>("pipeline_check_nodes", { definitionId, nodes }),
+  pipelineRunNode: (input: {
+    definitionId: number;
+    nodeKey: string;
+    withDependencies: boolean;
+    secretValues: Record<string, string>;
+    allowSecrets: boolean;
+  }) => invoke<number>("pipeline_run_node", { input }),
+  pipelineApprove: (requestId: number, approved: boolean) =>
+    invoke<void>("pipeline_approve", { requestId, approved }),
+  pipelineApprovalsPending: () => invoke<number>("pipeline_approvals_pending"),
 
   queryAuditLog: (params: {
     category?: string | null;

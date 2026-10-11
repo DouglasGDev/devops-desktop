@@ -15,7 +15,10 @@
 //! só com história: a definição versionada, a conferência dela sem executar, a
 //! procedência de cada execução e a nova tentativa só quando ela é segura.
 
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use rusqlite::Connection;
 use serde::Serialize;
@@ -25,13 +28,263 @@ use crate::{
     audit, auth,
     db::{self, DbHandle},
     deploy,
-    models::{DefinitionRevision, DeployProfile, DeployRun},
+    models::{
+        DefinitionRevision, DeployProfile, DeployRun, DeployRunStep, PipelineNode,
+        PipelineNodeInput, MAX_NODES, NODE_EXECUTORS,
+    },
 };
 
 /// Primeira etapa que toca o destino: 9 cria o backup/ponto de recuperação no
 /// destino, 10 envia, 11 em diante mudam o que está lá. Antes da 9 nada aconteceu
 /// fora da pasta do projeto, então repetir é seguro.
 const PRIMEIRA_ETAPA_NO_DESTINO: i64 = 9;
+
+// ---------- o grafo desenhado na tela ----------
+
+/// O essencial de um nó para conferir a forma do grafo. Vem da tela (antes de
+/// salvar) ou do banco (na hora de validar ou de executar), e é por isso que a
+/// conferência existe uma única vez: o que a tela mostra é o que o motor roda, e
+/// as duas pontas passam pelo mesmo checker.
+#[derive(Debug, Clone)]
+pub struct NoParaChecar {
+    pub chave: String,
+    pub rotulo: String,
+    pub kind: String,
+    pub etapa: Option<i64>,
+    pub executor: String,
+    pub dependencias: Vec<String>,
+    pub paralelo: bool,
+}
+
+impl From<&PipelineNode> for NoParaChecar {
+    fn from(no: &PipelineNode) -> Self {
+        Self {
+            chave: no.node_key.clone(),
+            rotulo: format!("nó “{}”", no.node_key),
+            kind: no.kind.clone(),
+            etapa: no.engine_step,
+            executor: no.executor.clone(),
+            dependencias: no.depends_on.clone(),
+            paralelo: no.parallel,
+        }
+    }
+}
+
+impl From<&PipelineNodeInput> for NoParaChecar {
+    fn from(no: &PipelineNodeInput) -> Self {
+        Self {
+            chave: no.node_key.clone(),
+            rotulo: format!("nó “{}”", no.node_key.trim()),
+            kind: no.kind(),
+            etapa: no.engine_step,
+            executor: no.executor(),
+            dependencias: no.depends_on(),
+            paralelo: no.parallel.unwrap_or(false),
+        }
+    }
+}
+
+/// O grafo de uma definição, conferido com o que ela tem fora do desenho: um nó que
+/// roda no servidor exige um servidor cadastrado. É a porta que a tela usa ao salvar
+/// e que `validate` usa antes de executar, então um grafo inválido não chega ao motor.
+pub fn checar_grafo(nos: &[NoParaChecar], tem_servidor: bool) -> Result<String, String> {
+    if nos.is_empty() {
+        return Ok("sem grafo · as quinze etapas do motor, em fila".to_string());
+    }
+    for no in nos {
+        if no.executor == "ssh" && !tem_servidor {
+            return Err(format!(
+                "{} roda no servidor por SSH, e esta definição publica nesta máquina — escolha um servidor ou troque o executor para local",
+                no.rotulo
+            ));
+        }
+    }
+    checar_forma(nos)
+}
+
+/// Os nós de que um nó depende, direta ou indiretamente. Caminho sobre as arestas
+/// ao contrário, com memória, porque um grafo de quarenta nós pode ser conferido
+/// inteiro sem custar nada.
+fn ancestrais(no: &NoParaChecar, todos: &HashMap<&str, &NoParaChecar>) -> HashSet<String> {
+    let mut vistos = HashSet::new();
+    let mut fila: Vec<&str> = no.dependencias.iter().map(|d| d.as_str()).collect();
+    while let Some(chave) = fila.pop() {
+        if !vistos.insert(chave.to_string()) {
+            continue;
+        }
+        if let Some(antes) = todos.get(chave) {
+            fila.extend(antes.dependencias.iter().map(|d| d.as_str()));
+        }
+    }
+    vistos
+}
+
+/// A forma do grafo: identificadores únicos, arestas que apontam para nós que
+/// existem, nenhum ciclo, paralelismo onde o motor aguenta, e cada etapa do motor
+/// alcançada por quem produz o estado que ela lê.
+///
+/// O último item é o que impede um desenho bonito de ser uma corrida quebrada: um
+/// nó "copiar os arquivos" sem um nó "reunir os arquivos" antes não tem o que
+/// copiar, e o motor falharia no meio da execução dizendo isso.
+pub fn checar_forma(nos: &[NoParaChecar]) -> Result<String, String> {
+    if nos.is_empty() {
+        return Err("um grafo precisa de pelo menos um nó — sem grafo a definição roda as quinze etapas em fila".to_string());
+    }
+    if nos.len() > MAX_NODES {
+        return Err(format!("o grafo aceita no máximo {MAX_NODES} nós"));
+    }
+    let todos: HashMap<&str, &NoParaChecar> = nos
+        .iter()
+        .map(|n| (n.chave.trim(), n))
+        .collect();
+    if todos.len() != nos.len() {
+        let mut vistas: HashSet<&str> = HashSet::new();
+        let repetida = nos
+            .iter()
+            .map(|n| n.chave.trim())
+            .find(|c| !vistas.insert(*c))
+            .unwrap_or("");
+        return Err(format!("dois nós compartilham o identificador “{repetida}”"));
+    }
+    for no in nos {
+        if no.chave.trim().is_empty() {
+            return Err("há nó sem identificador".to_string());
+        }
+        for dep in &no.dependencias {
+            if dep.trim() == no.chave.trim() {
+                return Err(format!("{} depende dele mesmo", no.rotulo));
+            }
+            if !todos.contains_key(dep.trim()) {
+                return Err(format!(
+                    "{} depende de “{}”, que não existe neste grafo",
+                    no.rotulo,
+                    dep.trim()
+                ));
+            }
+        }
+        if no.paralelo && no.kind != "comando" {
+            return Err(format!(
+                "{} está marcado para rodar em paralelo, e só um nó de comando pode dividir ramal com um irmão — as etapas do motor produzem estado para as seguintes",
+                no.rotulo
+            ));
+        }
+    }
+    if let Some(sobrou) = achar_ciclo(nos, &todos) {
+        return Err(format!(
+            "o grafo tem um ciclo: {} nunca terminam de esperar um pelo outro",
+            sobrou
+                .iter()
+                .map(|c| format!("“{c}”"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let mut etapas = 0usize;
+    let mut comandos = 0usize;
+    let mut aprovacoes = 0usize;
+    for no in nos {
+        match no.kind.as_str() {
+            "motor" => {
+                etapas += 1;
+                let Some(numero) = no.etapa else {
+                    return Err(format!("{} não aponta para nenhuma etapa do motor", no.rotulo));
+                };
+                if !(1..=15).contains(&numero) {
+                    return Err(format!("{} aponta para a etapa {numero}, que o motor não tem", no.rotulo));
+                }
+                let antes: HashSet<i64> = ancestrais(no, &todos)
+                    .iter()
+                    .filter_map(|c| todos.get(c.as_str()))
+                    .filter(|n| n.kind == "motor")
+                    .filter_map(|n| n.etapa)
+                    .collect();
+                let faltam: Vec<String> = deploy::prequisitos(numero)
+                    .iter()
+                    .filter(|p| !antes.contains(p))
+                    .map(|p| format!("etapa {p} ({} · {})", deploy::step_name(*p), motivo_da_etapa(*p)))
+                    .collect();
+                if !faltam.is_empty() {
+                    return Err(format!(
+                        "{} roda a etapa {numero}, mas nenhuma dependência dele produz o que ela lê: {}",
+                        no.rotulo,
+                        faltam.join(", ")
+                    ));
+                }
+            }
+            "comando" => {
+                comandos += 1;
+                if !NODE_EXECUTORS.contains(&no.executor.as_str()) {
+                    return Err(format!(
+                        "{} usa o executor “{}”, que o motor não tem",
+                        no.rotulo, no.executor
+                    ));
+                }
+            }
+            "aprovacao" => aprovacoes += 1,
+            outro => {
+                return Err(format!(
+                    "{} é do tipo “{outro}”, e o motor só conhece motor, comando e aprovacao",
+                    no.rotulo
+                ))
+            }
+        }
+    }
+    Ok(format!(
+        "grafo de {} nó(s) · {etapas} etapa(s) do motor, {comandos} de comando, {aprovacoes} de aprovação",
+        nos.len()
+    ))
+}
+
+/// O que a etapa produz, dito como o erro de dependência precisa dizer.
+fn motivo_da_etapa(position: i64) -> &'static str {
+    match position {
+        3 => "lê o ramo e o commit de origem",
+        4 => "decide quais arquivos vão mudar",
+        8 => "cria a release no destino",
+        _ => "produz estado para as etapas seguintes",
+    }
+}
+
+/// Ciclo é o que impede o grafo de ter uma ordem. A procura é Kahn: todo nó sem
+/// dependência sai do grafo e libera quem depende dele; se sobrar nó, sobrou ciclo,
+/// e os identificadores que sobraram são a prova dele.
+fn achar_ciclo(nos: &[NoParaChecar], todos: &HashMap<&str, &NoParaChecar>) -> Option<Vec<String>> {
+    let mut indepesas: HashMap<&str, usize> = nos
+        .iter()
+        .map(|n| {
+            (
+                n.chave.trim(),
+                n.dependencias
+                    .iter()
+                    .filter(|d| todos.contains_key(d.trim()))
+                    .count(),
+            )
+        })
+        .collect();
+    let mut fila: Vec<&str> = indepesas
+        .iter()
+        .filter(|(_, q)| **q == 0)
+        .map(|(c, _)| *c)
+        .collect();
+    let mut removidos = 0usize;
+    while let Some(chave) = fila.pop() {
+        removidos += 1;
+        for no in nos.iter().filter(|n| n.dependencias.iter().any(|d| d.trim() == chave)) {
+            if let Some(q) = indepesas.get_mut(no.chave.trim()) {
+                *q -= 1;
+                if *q == 0 {
+                    fila.push(no.chave.trim());
+                }
+            }
+        }
+    }
+    (removidos != nos.len()).then(|| {
+        nos.iter()
+            .filter(|n| indepesas.get(n.chave.trim()).copied().unwrap_or(0) > 0)
+            .map(|n| n.chave.clone())
+            .collect()
+    })
+}
 
 /// Uma definição como o contrato a entrega: o modelo salvo e a última execução dele.
 #[derive(Debug, Clone, Serialize)]
@@ -77,6 +330,48 @@ pub fn revisions(db: &DbHandle, definition_id: i64) -> Result<Vec<DefinitionRevi
     db::list_revisions(&conn, definition_id)
 }
 
+/// O grafo salvo de uma definição, na ordem em que a tela o desenha.
+pub fn nodes(db: &DbHandle, definition_id: i64) -> Result<Vec<PipelineNode>, String> {
+    let conn = db.lock().map_err(|_| "o banco local está indisponível".to_string())?;
+    db::list_pipeline_nodes(&conn, definition_id)
+}
+
+/// Gravar o grafo é gravar a definição: sobe a versão, o retrato novo entra no
+/// histórico, e nada executa. Cada nó é conferido sozinho e o grafo inteiro é
+/// conferido junto — a validação não é um favor à tela, é a garantia de que o
+/// desenho que você vê é o caminho que o motor percorre.
+pub fn save_nodes(
+    db: &DbHandle,
+    definition_id: i64,
+    nos: &[PipelineNodeInput],
+) -> Result<Vec<PipelineNode>, String> {
+    let conn = db.lock().map_err(|_| "o banco local está indisponível".to_string())?;
+    let perfil = db::get_deploy_profile(&conn, definition_id)?;
+    for no in nos {
+        no.validate()?;
+    }
+    let lista: Vec<NoParaChecar> = nos.iter().map(NoParaChecar::from).collect();
+    checar_grafo(&lista, perfil.server_id.is_some())?;
+    let gravados = db::replace_pipeline_nodes(&conn, definition_id, nos)?;
+    let _ = audit::log(
+        &conn,
+        "info",
+        "deploy",
+        "Grafo do pipeline salvo",
+        None,
+        Some(&perfil.name),
+        None,
+        Some(&format!(
+            "definição #{} · v{} · {} nó(s){}",
+            definition_id,
+            perfil.version + 1,
+            gravados.len(),
+            if gravados.is_empty() { " · volta à fila de quinze etapas" } else { "" }
+        )),
+    );
+    Ok(gravados)
+}
+
 /// Conferir a definição sem executar nada: as mesmas checagens da etapa 1 do motor,
 /// através da mesma função. Os valores das variáveis não entram aqui — eles só
 /// existem na hora da execução, e o motor continua cobrando a ausência deles.
@@ -96,13 +391,17 @@ pub fn validate(db: &DbHandle, definition_id: i64) -> Result<String, String> {
         ));
     }
     deploy::checar_definicao(&perfil, raiz, servidor.as_ref())?;
+    let nos = db::list_pipeline_nodes(&conn, definition_id)?;
+    let lista: Vec<NoParaChecar> = nos.iter().map(NoParaChecar::from).collect();
+    let grafo = checar_grafo(&lista, servidor.is_some())?;
     Ok(format!(
-        "definição “{}” v{} · {} · destino {} · {}",
+        "definição “{}” v{} · {} · destino {} · {} · {}",
         perfil.name,
         perfil.version,
         perfil.strategy,
         perfil.remote_path.trim(),
-        if servidor.is_some() { "servidor SSH" } else { "nesta máquina" }
+        if servidor.is_some() { "servidor SSH" } else { "nesta máquina" },
+        grafo
     ))
 }
 
@@ -144,12 +443,7 @@ pub fn politica(execucao: &DeployRun) -> Result<(), String> {
     if execucao.status == "success" {
         return Ok(());
     }
-    let tocou_destino = execucao
-        .steps
-        .iter()
-        .any(|s| s.position >= PRIMEIRA_ETAPA_NO_DESTINO
-            && matches!(s.status.as_str(), "running" | "done" | "failed"));
-    if tocou_destino {
+    if execucao.steps.iter().any(tocou_o_destino) {
         return Err(format!(
             "a execução #{} chegou a mexer no destino ({}), então o resultado lá é desconhecido — confira o destino antes de repetir",
             execucao.id,
@@ -159,13 +453,24 @@ pub fn politica(execucao: &DeployRun) -> Result<(), String> {
     Ok(())
 }
 
+/// Se a linha da execução registra trabalho no destino. Numa execução linear é a
+/// posição a partir da etapa 9; numa execução de grafo a posição é a linha do
+/// desenho, e quem diz o que aconteceu lá é a marca que a própria etapa registrou.
+fn tocou_o_destino(etapa: &DeployRunStep) -> bool {
+    matches!(etapa.status.as_str(), "running" | "done" | "failed")
+        && (etapa.touched_destination
+            || (etapa.node_key.is_none() && etapa.position >= PRIMEIRA_ETAPA_NO_DESTINO))
+}
+
 fn descricao_da_etapa(execucao: &DeployRun) -> String {
     execucao
         .steps
         .iter()
-        .filter(|s| s.position >= PRIMEIRA_ETAPA_NO_DESTINO)
-        .filter(|s| matches!(s.status.as_str(), "running" | "done" | "failed"))
-        .map(|s| format!("etapa {}: {} · {}", s.position, s.name, s.status))
+        .filter(|s| tocou_o_destino(s))
+        .map(|s| match &s.node_key {
+            Some(chave) => format!("nó “{chave}”: {} · {}", s.name, s.status),
+            None => format!("etapa {}: {} · {}", s.position, s.name, s.status),
+        })
         .next()
         .unwrap_or_else(|| "etapa de destino".to_string())
 }
@@ -246,6 +551,33 @@ mod tests {
     use super::*;
 
     fn execucao(status: &str, etapas: Vec<(i64, &str)>) -> DeployRun {
+        let steps = etapas
+            .iter()
+            .map(|(position, st)| linha(*position, st, None, false))
+            .collect();
+        run_com(status, steps)
+    }
+
+    /// Uma linha do histórico como ela é salva. Os campos do grafo entram aqui
+    /// porque a política de nova tentativa lê exatamente eles.
+    fn linha(position: i64, status: &str, node_key: Option<&str>, touched: bool) -> DeployRunStep {
+        DeployRunStep {
+            position,
+            name: node_key
+                .map(|c| format!("nó {c}"))
+                .unwrap_or_else(|| format!("etapa {position}")),
+            status: status.into(),
+            command: None,
+            exit_code: None,
+            message: None,
+            started_at: None,
+            finished_at: None,
+            node_key: node_key.map(str::to_string),
+            touched_destination: touched,
+        }
+    }
+
+    fn run_com(status: &str, steps: Vec<DeployRunStep>) -> DeployRun {
         DeployRun {
             id: 7,
             profile_id: 3,
@@ -262,20 +594,19 @@ mod tests {
             destination: Some("/var/www/site".into()),
             environment: Some("production".into()),
             commit_sha: Some("abc".into()),
-            steps: etapas
-                .into_iter()
-                .map(|(position, st)| crate::models::DeployRunStep {
-                    position,
-                    name: format!("etapa {position}"),
-                    status: st.into(),
-                    command: None,
-                    exit_code: None,
-                    message: None,
-                    started_at: None,
-                    finished_at: None,
-                })
-                .collect(),
+            steps,
         }
+    }
+
+    /// Execução de grafo: as linhas são a ordem do desenho, e o que diz se o destino
+    /// foi tocado é a marca que o próprio nó registrou.
+    fn execucao_de_nos(status: &str, nos: Vec<(&str, &str, bool)>) -> DeployRun {
+        let steps = nos
+            .iter()
+            .enumerate()
+            .map(|(i, (chave, st, toca))| linha(i as i64 + 1, st, Some(chave), *toca))
+            .collect();
+        run_com(status, steps)
     }
 
     #[test]
@@ -316,6 +647,28 @@ mod tests {
             vec![(1, "done"), (9, "skipped"), (10, "skipped"), (11, "failed")],
         );
         assert!(politica(&volta).unwrap_err().contains("etapa 11"));
+    }
+
+    #[test]
+    fn grafo_que_so_testou_e_repetivel_embora_os_nos_sejam_a_linha_do_desenho() {
+        // posições 1, 2 e 3 seriam "antes do destino" na fila; num grafo elas não
+        // significam nada, e quem responde é a marca que o nó registrou
+        let antes = execucao_de_nos(
+            "failed",
+            vec![("testes", "done", false), ("build", "done", false), ("lint", "failed", false)],
+        );
+        assert!(politica(&antes).is_ok());
+    }
+
+    #[test]
+    fn grafo_que_tocou_o_destino_nao_repete_sem_conferir() {
+        let depois = execucao_de_nos(
+            "failed",
+            vec![("coleta", "done", false), ("envio", "done", true), ("ativa", "failed", true)],
+        );
+        let err = politica(&depois).unwrap_err();
+        assert!(err.contains("resultado lá é desconhecido"), "{err}");
+        assert!(err.contains("nó “envio”"), "{err}");
     }
 
     /// Banco no esquema atual, com as tabelas mínimas para uma execução existir.
@@ -365,5 +718,166 @@ mod tests {
         let conn = conn_com_execucao("failed");
         assert_eq!(recover_open_runs(&conn), 0);
         assert_eq!(db::get_run(&conn, 1).unwrap().status, "failed");
+    }
+
+    fn no(chave: &str, kind: &str, etapa: Option<i64>, dependencias: &[&str]) -> NoParaChecar {
+        NoParaChecar {
+            chave: chave.into(),
+            rotulo: format!("nó “{chave}”"),
+            kind: kind.into(),
+            etapa,
+            executor: "local".into(),
+            dependencias: dependencias.iter().map(|d| d.to_string()).collect(),
+            paralelo: false,
+        }
+    }
+
+    fn no_no_servidor(chave: &str) -> NoParaChecar {
+        let mut n = no(chave, "comando", None, &[]);
+        n.executor = "ssh".into();
+        n
+    }
+
+    /// O desenho que a etapa 3 promete aceitar: fila do motor com um ramal de
+    /// comando e uma aprovação no meio.
+    fn grafo_valido() -> Vec<NoParaChecar> {
+        vec![
+            no("validar", "motor", Some(1), &[]),
+            no("git", "motor", Some(3), &["validar"]),
+            no("coleta", "motor", Some(4), &["git"]),
+            no("prepara", "motor", Some(8), &["coleta"]),
+            no("migracao", "comando", None, &["prepara"]),
+            no("envio", "motor", Some(10), &["prepara", "migracao"]),
+            no("ativa", "motor", Some(11), &["envio"]),
+            no("confere", "aprovacao", None, &["ativa"]),
+        ]
+    }
+
+    #[test]
+    fn grafo_bem_formado_passa_e_diz_o_que_e() {
+        let resumo = checar_forma(&grafo_valido()).unwrap();
+        assert!(resumo.contains("8 nó(s)"), "{resumo}");
+        assert!(resumo.contains("6 etapa(s) do motor"), "{resumo}");
+    }
+
+    #[test]
+    fn sem_nos_nao_ha_grafo_para_conferir() {
+        assert!(checar_forma(&[]).is_err());
+        // mas uma definição sem grafo é um estado válido: é a fila de quinze etapas
+        assert!(checar_grafo(&[], false).unwrap().contains("fila"));
+    }
+
+    #[test]
+    fn aresta_para_no_que_nao_existe_e_recusada() {
+        let mut nos = grafo_valido();
+        nos.push(no("depois", "comando", None, &["fantasma"]));
+        let err = checar_forma(&nos).unwrap_err();
+        assert!(err.contains("não existe neste grafo"), "{err}");
+    }
+
+    #[test]
+    fn no_que_depende_de_si_mesmo_e_recusado() {
+        let mut nos = grafo_valido();
+        nos[4].dependencias.push("migracao".into());
+        let err = checar_forma(&nos).unwrap_err();
+        assert!(err.contains("depende dele mesmo"), "{err}");
+    }
+
+    #[test]
+    fn ciclo_e_recusado_com_os_nos_que_o_formam() {
+        let mut nos = grafo_valido();
+        // "prepara" passa a esperar "confere", que já espera "ativa", que espera "prepara"
+        nos[3].dependencias.push("confere".into());
+        let err = checar_forma(&nos).unwrap_err();
+        assert!(err.contains("ciclo"), "{err}");
+        assert!(err.contains("confere"), "{err}");
+    }
+
+    #[test]
+    fn etapa_do_motor_sem_quem_produz_o_estado_dela_e_recusada() {
+        // "envio" (etapa 10) depende só do coletor: ninguém criou a release no
+        // destino e o ramo de origem nunca foi lido
+        let nos = vec![
+            no("coleta", "motor", Some(4), &[]),
+            no("prepara", "motor", Some(8), &["coleta"]),
+            no("envio", "motor", Some(10), &["coleta"]),
+        ];
+        let err = checar_forma(&nos).unwrap_err();
+        assert!(err.contains("roda a etapa 10"), "{err}");
+        assert!(err.contains("etapa 3"), "{err}");
+        assert!(err.contains("etapa 8"), "{err}");
+    }
+
+    #[test]
+    fn prerequisito_atraves_de_terceiros_vale() {
+        // "envio" não aponta para o coletor nem para o preparador: quem atende a
+        // etapa 4 e a etapa 8 é a cadeia que passa pela aprovação
+        let nos = vec![
+            no("validar", "motor", Some(1), &[]),
+            no("git", "motor", Some(3), &["validar"]),
+            no("coleta", "motor", Some(4), &["git"]),
+            no("prepara", "motor", Some(8), &["coleta"]),
+            no("portao", "aprovacao", None, &["prepara"]),
+            no("envio", "motor", Some(10), &["portao"]),
+        ];
+        assert!(checar_forma(&nos).is_ok());
+    }
+
+    #[test]
+    fn paralelismo_so_em_no_de_comando() {
+        let mut nos = grafo_valido();
+        nos[5].paralelo = true; // "envio" é etapa do motor
+        let err = checar_forma(&nos).unwrap_err();
+        assert!(err.contains("só um nó de comando pode dividir ramal"), "{err}");
+        // um nó de comando marcado para dividir ramal passa
+        let mut outros = grafo_valido();
+        outros[4].paralelo = true; // "migracao"
+        assert!(checar_forma(&outros).is_ok());
+    }
+
+    #[test]
+    fn dois_nos_com_o_mesmo_identificador_sao_recusados() {
+        let mut nos = grafo_valido();
+        nos.push(no("migracao", "comando", None, &[]));
+        let err = checar_forma(&nos).unwrap_err();
+        assert!(err.contains("compartilham o identificador “migracao”"), "{err}");
+    }
+
+    #[test]
+    fn no_de_ssh_exige_servidor_na_definicao() {
+        let nos = vec![no_no_servidor("migracao")];
+        let err = checar_grafo(&nos, false).unwrap_err();
+        assert!(err.contains("publica nesta máquina"), "{err}");
+        assert!(checar_grafo(&nos, true).unwrap().contains("1 nó(s)"));
+    }
+
+    #[test]
+    fn no_sem_identificador_e_recusado() {
+        let mut nos = grafo_valido();
+        nos[0].chave = " ".into();
+        assert!(checar_forma(&nos).unwrap_err().contains("sem identificador"));
+    }
+
+    #[test]
+    fn mais_nos_do_que_a_tela_aguenta_e_recusado() {
+        let nos: Vec<NoParaChecar> = (0..=MAX_NODES)
+            .map(|i| no(&format!("n{i}"), "comando", None, &[]))
+            .collect();
+        let err = checar_forma(&nos).unwrap_err();
+        assert!(err.contains("no máximo"), "{err}");
+    }
+
+    #[test]
+    fn etapa_fora_das_quinze_do_motor_e_recusada() {
+        let nos = vec![no("estranha", "motor", Some(16), &[])];
+        let err = checar_forma(&nos).unwrap_err();
+        assert!(err.contains("que o motor não tem"), "{err}");
+    }
+
+    #[test]
+    fn tipo_de_no_que_o_motor_nao_conhece_e_recusado() {
+        let nos = vec![no("magica", "agenda", None, &[])];
+        let err = checar_forma(&nos).unwrap_err();
+        assert!(err.contains("motor, comando e aprovacao"), "{err}");
     }
 }

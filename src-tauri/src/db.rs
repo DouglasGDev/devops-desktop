@@ -5,7 +5,8 @@ use tauri::Manager;
 
 use crate::models::{
     AuditEntry, DefinitionRevision, DeployProfile, DeployProfileInput, DeployRun, DeployRunStep,
-    Project, Routine, RoutineInput, RoutineParam, Server, ServerInput, TerminalHistoryEntry,
+    PipelineNode, PipelineNodeInput, Project, Routine, RoutineInput, RoutineParam, Server,
+    ServerInput, TerminalHistoryEntry,
 };
 
 pub struct AppState {
@@ -243,6 +244,40 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE deploy_runs ADD COLUMN destination TEXT;
     ALTER TABLE deploy_runs ADD COLUMN environment TEXT;
     ALTER TABLE deploy_runs ADD COLUMN commit_sha TEXT;
+    "#,
+    // v7 — construtor visual do pipeline (plano CI/CD, etapa 3). O grafo é parte da
+    // definição, então os nós pertencem ao modelo de deploy e a nenhuma tabela nova
+    // de "pipeline": uma definição, um validador, um motor. `toca_destino` não é
+    // escolha de quem desenha — é derivado do tipo do nó na gravação, porque é o que
+    // decide se uma execução pode ser repetida sem conferir o destino. As duas
+    // colunas em `deploy_run_steps` amarram cada linha do histórico ao nó que a
+    // produziu; numa execução linear elas ficam vazias, como sempre estiveram.
+    r#"
+    CREATE TABLE IF NOT EXISTS pipeline_nodes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        profile_id INTEGER NOT NULL REFERENCES deploy_profiles(id) ON DELETE CASCADE,
+        node_key TEXT NOT NULL,
+        title TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('motor','comando','aprovacao')),
+        engine_step INTEGER,
+        executor TEXT NOT NULL DEFAULT 'local' CHECK (executor IN ('local','ssh')),
+        environment TEXT,
+        working_dir TEXT,
+        commands TEXT NOT NULL DEFAULT '[]',
+        depends_on TEXT NOT NULL DEFAULT '[]',
+        parallel INTEGER NOT NULL DEFAULT 0,
+        timeout_secs INTEGER NOT NULL DEFAULT 0,
+        retry_limit INTEGER NOT NULL DEFAULT 0,
+        condition TEXT,
+        requires_approval INTEGER NOT NULL DEFAULT 0,
+        touches_destination INTEGER NOT NULL DEFAULT 0,
+        x INTEGER NOT NULL DEFAULT 0,
+        y INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (profile_id, node_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_pipeline_nodes_profile ON pipeline_nodes(profile_id, x, y);
+    ALTER TABLE deploy_run_steps ADD COLUMN node_key TEXT;
+    ALTER TABLE deploy_run_steps ADD COLUMN touched_destination INTEGER NOT NULL DEFAULT 0;
     "#,
 ];
 
@@ -836,10 +871,11 @@ pub fn get_deploy_profile(conn: &Connection, id: i64) -> Result<DeployProfile, S
 }
 
 /// O retrato JSON do que a definição era naquela versão. São os campos que o motor
-/// lê — comandos, caminhos e limites. Os **valores** das variáveis nunca aparecem
-/// aqui: a definição guarda só os nomes, e o valor continua sendo digitado a cada
-/// execução.
-fn spec_da_definicao(p: &DeployProfile) -> String {
+/// lê — comandos, caminhos e limites — **e o grafo**, porque num pipeline visual a
+/// ordem das etapas é parte da definição: sem ela a versão não diz o que foi
+/// executado. Os **valores** das variáveis nunca aparecem aqui: a definição guarda
+/// só os nomes, e o valor continua sendo digitado a cada execução.
+fn spec_da_definicao(p: &DeployProfile, nodes: &[PipelineNode]) -> String {
     let mapa = serde_json::json!({
         "nome": p.name,
         "servidorId": p.server_id,
@@ -859,6 +895,7 @@ fn spec_da_definicao(p: &DeployProfile) -> String {
         "releases": p.releases_enabled,
         "apagarExcedentes": p.delete_extras,
         "prazoPorEtapaSegundos": p.step_timeout_secs,
+        "nos": nodes,
     });
     serde_json::to_string(&mapa).unwrap_or_else(|_| "{}".to_string())
 }
@@ -867,10 +904,11 @@ fn spec_da_definicao(p: &DeployProfile) -> String {
 /// a migração v6 semeia a versão 1 com o que já estava salvo, e o primeiro salvamento
 /// depois disso reescreve a mesma linha com o mesmo número.
 fn gravar_revisao(conn: &Connection, p: &DeployProfile) -> Result<(), String> {
+    let nos = list_pipeline_nodes(conn, p.id).unwrap_or_default();
     conn.execute(
         "INSERT INTO pipeline_revisions (profile_id, version, spec, saved_at) VALUES (?1, ?2, ?3, ?4) \
          ON CONFLICT(profile_id, version) DO UPDATE SET spec = excluded.spec, saved_at = excluded.saved_at",
-        rusqlite::params![p.id, p.version, spec_da_definicao(p), p.updated_at],
+        rusqlite::params![p.id, p.version, spec_da_definicao(p, &nos), p.updated_at],
     )
     .map_err(|e| format!("falha ao registrar a versão da definição: {e}"))?;
     Ok(())
@@ -1057,6 +1095,122 @@ pub fn set_default_deploy_profile(conn: &Connection, id: i64) -> Result<DeployPr
     get_deploy_profile(conn, id)
 }
 
+// ---------- nós do grafo (plano CI/CD, etapa 3) ----------
+
+const NODE_COLUMNS: &str = "id, profile_id, node_key, title, kind, engine_step, executor, \
+     environment, working_dir, commands, depends_on, parallel, timeout_secs, retry_limit, \
+     condition, requires_approval, touches_destination, x, y";
+
+fn row_to_node(row: &Row) -> rusqlite::Result<PipelineNode> {
+    let commands: String = row.get("commands")?;
+    let depends: String = row.get("depends_on")?;
+    Ok(PipelineNode {
+        id: row.get("id")?,
+        profile_id: row.get("profile_id")?,
+        node_key: row.get("node_key")?,
+        title: row.get("title")?,
+        kind: row.get("kind")?,
+        engine_step: row.get("engine_step")?,
+        executor: row.get("executor")?,
+        environment: row.get("environment")?,
+        working_dir: row.get("working_dir")?,
+        commands: json_list(&commands),
+        depends_on: json_list(&depends),
+        parallel: row.get("parallel")?,
+        timeout_secs: row.get("timeout_secs")?,
+        retry_limit: row.get("retry_limit")?,
+        condition: row.get("condition")?,
+        requires_approval: row.get("requires_approval")?,
+        touches_destination: row.get("touches_destination")?,
+        x: row.get("x")?,
+        y: row.get("y")?,
+    })
+}
+
+/// Os nós salvos de uma definição, na ordem em que aparecem na tela. Lista vazia
+/// significa uma coisa só: a definição roda o pipeline linear de quinze etapas que
+/// já existia — não há grafo "escondido" nem default inventado.
+pub fn list_pipeline_nodes(conn: &Connection, profile_id: i64) -> Result<Vec<PipelineNode>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {NODE_COLUMNS} FROM pipeline_nodes WHERE profile_id = ?1 ORDER BY x, y, node_key"
+        ))
+        .map_err(|e| format!("falha ao preparar o grafo do pipeline: {e}"))?;
+    let rows = stmt
+        .query_map([profile_id], row_to_node)
+        .map_err(|e| format!("falha ao ler o grafo do pipeline: {e}"))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| format!("falha ao ler o grafo do pipeline: {e}"))?);
+    }
+    Ok(out)
+}
+
+/// Grava o grafo de uma definição: substitui os nós e sobe a versão da definição,
+/// porque o grafo **é** a definição. A conferência da forma do grafo vem antes, em
+/// `pipeline::checar_grafo`; aqui entra o que ela já aceitou.
+pub fn replace_pipeline_nodes(
+    conn: &Connection,
+    profile_id: i64,
+    nodes: &[PipelineNodeInput],
+) -> Result<Vec<PipelineNode>, String> {
+    // A definição precisa existir: sem isso um identificador errado criaria nós
+    // órfãos que o SQLite recusaria, e a mensagem dele não diz o que falta.
+    get_deploy_profile(conn, profile_id)?;
+    conn.execute(
+        "DELETE FROM pipeline_nodes WHERE profile_id = ?1",
+        [profile_id],
+    )
+    .map_err(|e| format!("falha ao limpar o grafo do pipeline: {e}"))?;
+    for node in nodes {
+        let executor = match node.kind().as_str() {
+            "comando" => node.executor(),
+            _ => "local".to_string(),
+        };
+        conn.execute(
+            "INSERT INTO pipeline_nodes (profile_id, node_key, title, kind, engine_step, executor, \
+             environment, working_dir, commands, depends_on, parallel, timeout_secs, retry_limit, \
+             condition, requires_approval, touches_destination, x, y) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+            rusqlite::params![
+                profile_id,
+                node.node_key.trim(),
+                node.title.trim(),
+                node.kind(),
+                node.engine_step,
+                executor,
+                clean_optional(&node.environment),
+                clean_optional(&node.working_dir),
+                to_json_list(&node.commands())?,
+                to_json_list(&node.depends_on())?,
+                node.parallel.unwrap_or(false) as i64,
+                node.timeout_secs.unwrap_or(0),
+                node.retry_limit.unwrap_or(0),
+                clean_optional(&node.condition),
+                node.requires_approval.unwrap_or(false) as i64,
+                node.touches_destination() as i64,
+                node.x.unwrap_or(0),
+                node.y.unwrap_or(0),
+            ],
+        )
+        .map_err(|e| {
+            if e.to_string().contains("UNIQUE") {
+                format!("o grafo tem dois nós com o mesmo identificador “{}”", node.node_key.trim())
+            } else {
+                format!("falha ao gravar o nó “{}”: {e}", node.node_key.trim())
+            }
+        })?;
+    }
+    conn.execute(
+        "UPDATE deploy_profiles SET version = version + 1, updated_at = ?1 WHERE id = ?2",
+        rusqlite::params![now_rfc3339(), profile_id],
+    )
+    .map_err(|e| format!("falha ao versionar a definição: {e}"))?;
+    let salvo = get_deploy_profile(conn, profile_id)?;
+    gravar_revisao(conn, &salvo)?;
+    list_pipeline_nodes(conn, profile_id)
+}
+
 /// Registra um comando do executor no histórico local. Segredos conhecidos são
 /// mascarados antes da gravação — o histórico nunca guarda tokens ou senhas.
 pub fn record_terminal_command(
@@ -1137,6 +1291,11 @@ pub struct StepUpdate<'a> {
     pub command: Option<&'a str>,
     pub exit_code: Option<i64>,
     pub message: Option<&'a str>,
+    /// O nó do grafo que produziu esta linha; `None` no pipeline linear.
+    pub node_key: Option<&'a str>,
+    /// Se a etapa mexe no destino. É o que autoriza (ou não) repetir a execução
+    /// sem conferir o que aconteceu lá fora.
+    pub touched_destination: bool,
 }
 
 /// Cria ou atualiza a linha de uma etapa. `command` nunca contém segredos: o
@@ -1144,16 +1303,19 @@ pub struct StepUpdate<'a> {
 pub fn upsert_step(conn: &Connection, etapa: &StepUpdate) -> Result<(), String> {
     let now = now_rfc3339();
     conn.execute(
-        "INSERT INTO deploy_run_steps (run_id, position, name, status, command, exit_code, message, started_at, finished_at) \
+        "INSERT INTO deploy_run_steps (run_id, position, name, status, command, exit_code, message, \
+           started_at, finished_at, node_key, touched_destination) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CASE WHEN ?4 = 'running' THEN ?8 ELSE NULL END, \
-           CASE WHEN ?4 IN ('done','failed','skipped') THEN ?8 ELSE NULL END) \
+           CASE WHEN ?4 IN ('done','failed','skipped') THEN ?8 ELSE NULL END, ?9, ?10) \
          ON CONFLICT(run_id, position) DO UPDATE SET \
            name = excluded.name, \
            status = excluded.status, \
            command = COALESCE(excluded.command, deploy_run_steps.command), \
            exit_code = COALESCE(excluded.exit_code, deploy_run_steps.exit_code), \
-           message = COALESCE(excluded.message, deploy_run_steps.message), \
+           message = CASE WHEN excluded.status IN ('done','failed','skipped') \
+             THEN excluded.message ELSE COALESCE(excluded.message, deploy_run_steps.message) END, \
            started_at = COALESCE(deploy_run_steps.started_at, excluded.started_at), \
+           touched_destination = MAX(deploy_run_steps.touched_destination, excluded.touched_destination), \
            finished_at = CASE WHEN excluded.status IN ('done','failed','skipped') \
              THEN excluded.finished_at ELSE deploy_run_steps.finished_at END",
         rusqlite::params![
@@ -1164,7 +1326,9 @@ pub fn upsert_step(conn: &Connection, etapa: &StepUpdate) -> Result<(), String> 
             etapa.command,
             etapa.exit_code,
             etapa.message,
-            now
+            now,
+            etapa.node_key,
+            etapa.touched_destination as i64,
         ],
     )
     .map_err(|e| format!("falha ao registrar etapa do deploy: {e}"))?;
@@ -1197,6 +1361,8 @@ fn row_to_step(row: &Row) -> rusqlite::Result<DeployRunStep> {
         message: row.get("message")?,
         started_at: row.get("started_at")?,
         finished_at: row.get("finished_at")?,
+        node_key: row.get("node_key")?,
+        touched_destination: row.get("touched_destination")?,
     })
 }
 
@@ -1240,7 +1406,8 @@ pub fn get_run(conn: &Connection, run_id: i64) -> Result<DeployRun, String> {
         .map_err(|e| format!("execução de deploy #{run_id} não encontrada: {e}"))?;
     let mut stmt = conn
         .prepare(
-            "SELECT position, name, status, command, exit_code, message, started_at, finished_at \
+            "SELECT position, name, status, command, exit_code, message, started_at, finished_at, \
+             node_key, touched_destination \
              FROM deploy_run_steps WHERE run_id = ?1 ORDER BY position",
         )
         .map_err(|e| format!("falha ao consultar etapas do deploy: {e}"))?;
@@ -1579,6 +1746,22 @@ mod tests {
             detail TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_runs_started ON deploy_runs(started_at DESC);
+        -- as linhas de etapa também eram estreitas: nada ligava uma linha a um nó do
+        -- grafo, porque o grafo ainda não existia.
+        DROP TABLE deploy_run_steps;
+        CREATE TABLE deploy_run_steps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL REFERENCES deploy_runs(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'waiting',
+            command TEXT,
+            exit_code INTEGER,
+            message TEXT,
+            started_at TEXT,
+            finished_at TEXT
+        );
+        CREATE UNIQUE INDEX idx_run_steps_run ON deploy_run_steps(run_id, position);
         PRAGMA foreign_keys=ON;";
 
     #[test]
@@ -1616,17 +1799,12 @@ mod tests {
         let run_id: i64 = conn
             .query_row("SELECT id FROM deploy_runs WHERE profile_id = ?1", [modelo_id], |r| r.get(0))
             .unwrap();
-        upsert_step(
-            &conn,
-            &StepUpdate {
-                run_id,
-                position: 1,
-                name: "Validar configurações e credenciais",
-                status: "done",
-                command: None,
-                exit_code: Some(0),
-                message: Some("modelo pronto"),
-            },
+        // a linha de etapa também entra por SQL cru: pelas funções de hoje ela pediria
+        // as colunas do grafo, que uma base dessa época não tinha.
+        conn.execute(
+            "INSERT INTO deploy_run_steps (run_id, position, name, status, command, exit_code, message) \
+             VALUES (?1, 1, 'Validar configurações e credenciais', 'done', NULL, 0, 'modelo pronto')",
+            [run_id],
         )
         .unwrap();
 
@@ -1652,6 +1830,10 @@ mod tests {
         let execucao = get_run(&conn, run_id).unwrap();
         assert_eq!(execucao.profile_id, modelo_id);
         assert_eq!(execucao.steps.len(), 1);
+        // a linha antiga continua linear: sem nó e sem marca de destino
+        assert_eq!(execucao.steps[0].node_key, None);
+        assert!(!execucao.steps[0].touched_destination);
+        assert_eq!(execucao.steps[0].status, "done");
         assert_eq!(execucao.server_name.as_deref(), Some("web-prod"));
         // e a execução antiga não finge procedência: ela simplesmente não tem
         assert_eq!(execucao.definition_version, None);
@@ -1931,5 +2113,138 @@ mod tests {
 
         // preferência ausente → quem decide o padrão é a camada de comandos
         assert_eq!(setting_value(&conn, "terminal_history_enabled").unwrap(), None);
+    }
+
+    #[test]
+    fn a_marca_terminal_do_no_e_quem_manda_na_mensagem_da_linha() {
+        let conn = mem_db();
+        let projeto = insert_project(&conn, "site", "C:/projetos/site", true, None, None).unwrap();
+        let mut entrada = profile_input_no_servidor(projeto.id, None);
+        entrada.releases_enabled = false;
+        entrada.remote_path = "C:/publicados/site".into();
+        let modelo = upsert_deploy_profile(&conn, &entrada).unwrap();
+        let execucao = insert_run(&conn, modelo.id, &proc_de_teste(&modelo.remote_path)).unwrap();
+
+        let grava = |posicao: i64, status: &str, mensagem: Option<&str>| {
+            upsert_step(
+                &conn,
+                &StepUpdate {
+                    run_id: execucao,
+                    position: posicao,
+                    name: "preparo",
+                    status,
+                    command: None,
+                    exit_code: None,
+                    message: mensagem,
+                    node_key: Some("preparo"),
+                    touched_destination: false,
+                },
+            )
+            .unwrap();
+        };
+        let le = |posicao: i64| -> (String, Option<String>, Option<String>) {
+            conn.query_row(
+                "SELECT status, message, started_at FROM deploy_run_steps WHERE run_id = ?1 AND position = ?2",
+                rusqlite::params![execucao, posicao],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+        };
+
+        // O texto "em execução" serve enquanto o nó roda, e é essa marca que grava a
+        // hora de início — sem ela o histórico do nó de comando não tem duração.
+        grava(4, "waiting", None);
+        grava(4, "running", Some("em execução"));
+        let (estado, mensagem, inicio) = le(4);
+        assert_eq!(estado, "running");
+        assert_eq!(mensagem.as_deref(), Some("em execução"));
+        assert!(inicio.is_some());
+
+        // A linha final de um nó de comando não tem texto próprio para dizer: ela tem de
+        // perder o que dizia da execução, e não pode herdar "em execução" para sempre.
+        grava(4, "done", None);
+        let (estado, mensagem, inicio) = le(4);
+        assert_eq!(estado, "done");
+        assert_eq!(mensagem, None, "o texto de execução não sobrevive à linha concluída");
+        assert!(inicio.is_some(), "a hora de início fica: é o que diz quando o nó começou");
+
+        // Já a etapa do motor escreve a própria linha final com a mensagem do resultado,
+        // e nada apaga o que ela disse.
+        grava(5, "running", Some("em execução"));
+        grava(5, "done", Some("2 arquivo(s) selecionados"));
+        assert_eq!(le(5).1.as_deref(), Some("2 arquivo(s) selecionados"));
+    }
+
+    #[test]
+    fn grafo_salvo_vira_definicao_versionada_com_a_ordem_da_tela() {
+        let conn = mem_db();
+        let projeto = insert_project(&conn, "site", "C:/projetos/site", true, None, None).unwrap();
+        let mut sem_servidor = profile_input_no_servidor(projeto.id, None);
+        sem_servidor.releases_enabled = false;
+        sem_servidor.remote_path = "C:/publicados/site".into();
+        let modelo = upsert_deploy_profile(&conn, &sem_servidor).unwrap();
+
+        let no = |chave: &str, kind: &str, etapa: Option<i64>, deps: &[&str], x: i64| PipelineNodeInput {
+            node_key: chave.into(),
+            title: chave.into(),
+            kind: kind.into(),
+            engine_step: etapa,
+            executor: Some("local".into()),
+            environment: None,
+            working_dir: None,
+            commands: Some(vec!["echo pronto".into()]),
+            depends_on: Some(deps.iter().map(|d| d.to_string()).collect()),
+            parallel: Some(false),
+            timeout_secs: Some(0),
+            retry_limit: Some(1),
+            condition: Some("ramo=main".into()),
+            requires_approval: Some(etapa == Some(10)),
+            x: Some(x),
+            y: Some(0),
+        };
+
+        replace_pipeline_nodes(
+            &conn,
+            modelo.id,
+            &[
+                no("migracao", "comando", None, &["coleta"], 10),
+                no("coleta", "motor", Some(4), &[], 20),
+                no("envio", "motor", Some(10), &["coleta"], 30),
+            ],
+        )
+        .unwrap();
+
+        // lido na ordem do desenho (x), com as arestas e o resto do nó intactos
+        let lidos = list_pipeline_nodes(&conn, modelo.id).unwrap();
+        assert_eq!(lidos.len(), 3);
+        assert_eq!(lidos[0].node_key, "migracao");
+        assert_eq!(lidos[0].commands, vec!["echo pronto".to_string()]);
+        assert_eq!(lidos[1].depends_on, Vec::<String>::new());
+        assert_eq!(lidos[2].depends_on, vec!["coleta".to_string()]);
+        assert_eq!(lidos[2].condition.as_deref(), Some("ramo=main"));
+        assert!(lidos[2].requires_approval);
+        assert!(!lidos[0].requires_approval);
+        // tocar o destino é derivado do tipo: a etapa 4 escreve na pasta do projeto,
+        // a 10 escreve no destino, um comando local não escreve no destino
+        assert!(!lidos[0].touches_destination);
+        assert!(!lidos[1].touches_destination);
+        assert!(lidos[2].touches_destination);
+
+        // gravar o grafo é mudar a definição: a versão sobe e o retrato traz os nós
+        let depois = get_deploy_profile(&conn, modelo.id).unwrap();
+        assert_eq!(depois.version, modelo.version + 1);
+        let retratos = list_revisions(&conn, modelo.id).unwrap();
+        assert_eq!(retratos[0].version, depois.version);
+        assert_eq!(retratos[0].spec["nos"].as_array().unwrap().len(), 3);
+
+        // substituir por nada volta à fila de quinze etapas, sem perder a história
+        let sem_no = replace_pipeline_nodes(&conn, modelo.id, &[]).unwrap();
+        assert!(sem_no.is_empty());
+        assert_eq!(list_pipeline_nodes(&conn, modelo.id).unwrap().len(), 0);
+        assert_eq!(list_revisions(&conn, modelo.id).unwrap()[0].spec["nos"].as_array().unwrap().len(), 0);
+
+        // e um nó fora do tipo que o motor conhece é recusado pelo SQLite
+        let quebrado = no("estranho", "agenda", None, &[], 40);
+        assert!(replace_pipeline_nodes(&conn, modelo.id, &[quebrado]).is_err());
     }
 }

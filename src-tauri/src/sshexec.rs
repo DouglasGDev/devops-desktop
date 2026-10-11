@@ -38,7 +38,7 @@ impl ExecResult {
             return "interrompido pelo usuário".to_string();
         }
         if self.timed_out {
-            return "tempo limite da etapa excedido — o processo remoto foi encerrado".to_string();
+            return "tempo limite excedido — o processo foi encerrado".to_string();
         }
         match self.exit_code {
             Some(0) => "concluído com sucesso".to_string(),
