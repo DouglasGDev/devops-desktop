@@ -1,0 +1,79 @@
+name: Problema ou funcionalidade
+description: Abrir uma issue sobre o aplicativo (devops-desktop)
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Problema de **segurança** não se reporta aqui: use a security advisory privada
+        (veja [SECURITY.md](https://github.com/DouglasGDev/devops-desktop/blob/main/SECURITY.md)).
+  - type: textarea
+    id: quadro
+    attributes:
+      label: O que você está tentando fazer
+      description: A tarefa real, no seu trabalho — não o recurso do app.
+      placeholder: Publicar a build do meu site numa pasta desta máquina depois do build.
+    validations:
+      required: true
+  - type: textarea
+    id: aconteceu
+    attributes:
+      label: O que aconteceu
+      description: Copie o texto exatamente como o aplicativo mostrou. Lista vazia que é vazia é resposta válida.
+      placeholder: |
+        A etapa 4 falhou com "nenhum arquivo corresponde aos caminhos configurados".
+    validations:
+      required: true
+  - type: textarea
+    id: esperava
+    attributes:
+      label: O que você esperava
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Parte do aplicativo
+      options:
+        - Servidores / conexão SSH
+        - Terminal
+        - Arquivos (SFTP)
+        - Git
+        - GitHub
+        - Deploy
+        - Projetos
+        - Painel
+        - Configurações
+        - Compilação / instalador
+        - Outro
+    validations:
+      required: true
+  - type: input
+    id: versao
+    attributes:
+      label: Versão do aplicativo
+      description: O nome do arquivo do instalador, ou "dev" se você compilou.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: sistema
+    attributes:
+      label: Sistema operacional
+      placeholder: Windows 11 24H2 / Ubuntu 24.04 / macOS 15
+    validations:
+      required: true
+  - type: textarea
+    id: ferramentas
+    attributes:
+      label: Ferramentas na máquina
+      description: Saída de `git --version`, `ssh -V` e `gh --version` (se tiver). É o que a suíte de testes usa de verdade.
+      render: text
+  - type: checkboxes
+    id: confirma
+    attributes:
+      label: Confirmações
+      options:
+        - label: Não há senha, token, chave privada, `.env` ou banco local colado ou anexado aqui.
+          required: true
+        - label: Li o README (utilização e modelo de segurança) e nada do que descrevi está lá resolvido.
+          required: false

@@ -376,6 +376,22 @@ justamente o que o comando produz, a etapa de identificação espera em vez de f
 com o mesmo recado de caminho). Na **D** nada é copiado: a publicação são os comandos, e os caminhos de inclusão não
 entram em jogo — nem na pré-vistoria, que usa a mesma regra.
 
+**Definição versionada e procedência.** O modelo de deploy é a definição do pipeline, e cada salvamento sobe o número
+dela (`v1`, `v2`, …) deixando guardado o retrato do que ela era — estratégia, destino, branch, inclusion/exclusion,
+comandos, checagens de saúde e os **nomes** das variáveis. Os valores nunca entram no retrato. Em
+**Projetos → Modelos de deploy** o botão de conferência roda as mesmas checagens da primeira etapa do motor, sem executar
+nada (por isso a tela nunca aprova o que o motor recusaria), e o botão de histórico lista as versões salvas.
+Cada execução registra de onde saiu: versão da definição, destino, ambiente e o commit da pasta no instante em que a
+execução abriu. Execuções antigas, anteriores a esse registro, aparecem sem procedência em vez de ganharem uma
+inventada.
+**Repetir** só é oferecido quando é seguro: se alguma etapa a partir da criação do ponto de recuperação no destino
+chegou a trabalhar, o resultado lá é desconhecido e o botão devolve o motivo com a etapa e o status em causa, pedindo
+que o destino seja conferido antes de publicar de novo. Uma execução que terminou bem pode ser republicada; uma sem
+nenhuma etapa registrada não pode. Repetir nunca herda a autorização de segredos da execução anterior — os valores são
+pedidos de novo.
+**Execução interrompida**: se o aplicativo for fechado com um pipeline rodando, a abertura seguinte marca essa execução
+como interrompida, com o motivo, e nenhuma publicação é refeita por conta própria.
+
 ### 9.7 GitHub
 
 A aba **GitHub** é um posto de trabalho, não uma listagem: tudo que aparece vem de uma chamada autenticada a
@@ -505,6 +521,7 @@ Resumo do que é garantido pelo código, não só pela interface:
         ├── git_probe.rs     # detecção de repositório e estado
         ├── security.rs      # regras e varredura de segredos (§8)
         ├── deploy.rs        # motor de deploy e pipeline de etapas (§9/§10)
+        ├── pipeline.rs      # contrato do pipeline: definição versionada, procedência, política de repetição
         ├── infra.rs         # métricas reais do servidor (§12)
         ├── github.rs        # fluxo de dispositivo OAuth e chamadas a api.github.com
         ├── auth.rs          # broker de senha por operação (SSH_ASKPASS em memória)
@@ -525,7 +542,7 @@ cd src-tauri
 cargo test --lib
 ```
 
-Cobertura atual do backend (200 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
+Cobertura atual do backend (208 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
 timeout e cancelamento, sessões PTY, ciclo completo de Git em repositório temporário (status, stage por hunk, commit,
 log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), trabalho guardado e
 reprodução de commit no git real (`stash push` tira a alteração da pasta e `stash list` mostra exatamente a entrada que o
@@ -587,7 +604,16 @@ coluna do servidor anulável provando que modelo, execução e etapas sobrevivem
 `ON CONFLICT (run_id, position)` registrar cada etapa, a exclusão de servidor ou projeto levando os modelos e o histórico
 deles junto (com a contagem que a interface mostra), o critério de cópia por CRC32, a varredura local que espelha o
 `find` do servidor, a poda de pastas vazias que **não** toca na guarda de arquivos e o ambiente entregue aos processos
-locais sem passar pela linha de comando. Nenhum teste de rede é feito: as rotas que falam com o GitHub são exercitadas só na máquina, com dados de
+locais sem passar pela linha de comando. O contrato de pipeline é coberto junto: a migração que recria o esquema antigo
+prova que modelo, execução e etapas sobrevivem, que a definição que já existia ganha a versão 1 **e** o retrato dela, que
+salvar de novo sobe a versão deixando os dois retratos, e que a execução antiga continua sem procedência em vez de ganhar
+uma falsa; `head_sha` devolve o commit real do `HEAD` e `None` onde não há repositório (com prazo próprio, porque quem o
+chama segura a alça do banco); e a política de repetição é testada nas cinco situações — falha antes da etapa que toca o
+destino libera, falha depois dela bloqueia com a etapa e o status na frase, `running` bloqueia, execução sem etapa
+registrada bloqueia, `success` libera — incluindo o rollback, que **pula** as etapas de destino marcando-as `skipped` e
+por isso não pode ser lido como "chegou ao destino". A varredura de execuções órfãs é testada no banco migrado: `running`
+vira `cancelled` com o motivo, a etapa em andamento vira `failed`, a segunda passagem não encontra nada e uma execução já
+terminada não é tocada. Nenhum teste de rede é feito: as rotas que falam com o GitHub são exercitadas só na máquina, com dados de
 resposta fixos dentro do próprio teste.
 
 Esses testes usam os binários **reais** do sistema: é requisito da aplicação (e da suíte) ter `git` e `ssh` no `PATH`.
@@ -646,10 +672,25 @@ git (casa por `dono/repo`, não por `github.com`).
 
 ## 14. Contribuição e licença
 
+O projeto é aberto a contribuição de qualquer pessoa, e o convite está em
+[**CONTRIBUTING.md**](CONTRIBUTING.md) — ele diz como preparar o ambiente, quais checagens toda PR precisa passar e o
+que o projeto aceita.
+
+**Licença de contribuição:** não há CLA nem formulário para assinar. Ao abrir a PR você declara que tem direito de
+enviar aquele código e que ele entra **sob a mesma licença MIT do projeto** (regra "inbound = outbound": o que entra sob
+a MIT sai sob a MIT), mantendo a sua autoria. Se você prefere registrar isso no commit, `git commit -s` (Signed-off-by /
+DCO) é bem-vindo, mas não obrigatório. Quem não puder aceitar esse termos (código que pertence ao empregador, por
+exemplo) deve abrir issue em vez de PR.
+
+Fluxo curto:
+
 1. Abra uma issue descrevendo o problema ou a proposta.
-2. Crie um branch a partir de `main`; mantenha `cargo test --lib` e `npm run build` verdes.
+2. Crie um branch a partir de `main`; mantenha `cargo test` e `npm run build` verdes.
 3. Não inclua chaves, tokens, `.env` nem banco local no commit — a guarda de segredos do próprio projeto vale para
    este repositório.
+
+Problema de segurança se reporta em particular, por security advisory: veja
+[**SECURITY.md**](SECURITY.md).
 
 Distribuído sob a licença **MIT** — veja [LICENSE](LICENSE).
 
