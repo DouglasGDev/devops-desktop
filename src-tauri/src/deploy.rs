@@ -949,38 +949,99 @@ fn checar_pasta_e_variaveis(ctx: &mut Ctx) -> Result<(), Fail> {
     Ok(())
 }
 
-fn validate_remoto(ctx: &mut Ctx) -> Result<Info, Fail> {
-    validate_strategy(&ctx.profile.strategy).map_err(Fail::new)?;
-    if !ctx.profile.remote_path.trim().starts_with('/') {
-        return Err(Fail::new("o diretório remoto precisa ser um caminho absoluto"));
-    }
-    checar_pasta_e_variaveis(ctx)?;
-    let servidor = ctx.server_ref()?;
-    let sem_destino = servidor.host.trim().is_empty()
-        && servidor.ssh_alias.as_deref().unwrap_or("").trim().is_empty();
-    if sem_destino {
-        return Err(Fail::new(format!(
-            "o servidor “{}” está sem host e sem alias",
-            servidor.name
-        )));
-    }
-    // Cada estratégia tem o seu requisito mínimo; o resto cai no `_ => {}` e é
-    // validado pelas etapas seguintes.
-    match ctx.profile.strategy.as_str() {
-        "git" if ctx.profile.git_branch.as_deref().unwrap_or("").trim().is_empty() => {
-            return Err(Fail::new("o deploy por Git exige a branch de origem"));
+/// As checagens da etapa 1 que dependem só do que está gravado na definição — nada
+/// de disco, rede ou segredo digitado. São as mesmas que o motor executa antes de
+/// qualquer trabalho, e é por isso que o contrato de pipeline (`pipeline_validate`)
+/// chama esta função em vez de ter uma lista própria de regras: dois lugares com
+/// regras diferentes é como uma tela passa a dizer "ok" para algo que o motor
+/// depois recusa.
+pub fn checar_definicao(
+    profile: &DeployProfile,
+    raiz: &Path,
+    servidor: Option<&Server>,
+) -> Result<(), String> {
+    validate_strategy(&profile.strategy)?;
+    match servidor {
+        None => {
+            if strategy_needs_server(&profile.strategy) {
+                return Err(format!(
+                    "a estratégia {} publica em um servidor, e este modelo não tem servidor. Escolha script ou artefatos.",
+                    profile.strategy
+                ));
+            }
+            let destino = PathBuf::from(
+                profile
+                    .remote_path
+                    .trim()
+                    .trim_end_matches('/')
+                    .trim_end_matches('\\'),
+            );
+            if !destino.is_absolute() {
+                return Err(format!(
+                    "a pasta de destino precisa ser um caminho absoluto, e “{}” não é",
+                    profile.remote_path.trim()
+                ));
+            }
+            if profile.strategy == "script"
+                && profile.prepare_commands.iter().all(|c| c.trim().is_empty())
+                && profile.build_commands.iter().all(|c| c.trim().is_empty())
+                && profile.restart_commands.iter().all(|c| c.trim().is_empty())
+            {
+                return Err(
+                    "um deploy por script nesta máquina precisa de pelo menos um comando de preparação, build ou reinicialização"
+                        .into(),
+                );
+            }
+            // Copiar o projeto para dentro dele mesmo (ou apagar o projeto ao "limpar o
+            // destino") é o único jeito de perder trabalho com um modelo sem servidor.
+            let origem = raiz.canonicalize().unwrap_or_else(|_| raiz.to_path_buf());
+            let alvo = destino.canonicalize().unwrap_or_else(|_| destino.clone());
+            if alvo == origem || origem.starts_with(&alvo) {
+                return Err(format!(
+                    "a pasta de destino ({}) é o projeto ou um lugar de onde ele estaria dentro — escolha uma pasta separada",
+                    profile.remote_path.trim()
+                ));
+            }
+            if alvo.starts_with(&origem) {
+                return Err(format!(
+                    "a pasta de destino ({}) está dentro do projeto ({}) — publique em uma pasta fora do código-fonte",
+                    profile.remote_path.trim(),
+                    origem.display()
+                ));
+            }
         }
-        "script" if ctx.profile.prepare_commands.iter().all(|c| c.trim().is_empty()) => {
-            return Err(Fail::new("o deploy por script precisa de pelo menos um comando"));
+        Some(s) => {
+            if !profile.remote_path.trim().starts_with('/') {
+                return Err("o diretório remoto precisa ser um caminho absoluto".into());
+            }
+            if s.host.trim().is_empty() && s.ssh_alias.as_deref().unwrap_or("").trim().is_empty() {
+                return Err(format!("o servidor “{}” está sem host e sem alias", s.name));
+            }
+            // Cada estratégia tem o seu requisito mínimo; o resto cai no `_ => {}` e é
+            // validado pelas etapas seguintes.
+            match profile.strategy.as_str() {
+                "git" if profile.git_branch.as_deref().unwrap_or("").trim().is_empty() => {
+                    return Err("o deploy por Git exige a branch de origem".into());
+                }
+                "script" if profile.prepare_commands.iter().all(|c| c.trim().is_empty()) => {
+                    return Err("o deploy por script precisa de pelo menos um comando".into());
+                }
+                "docker" if profile.build_commands.is_empty() && profile.restart_commands.is_empty() => {
+                    return Err(
+                        "o deploy com Docker precisa de comandos de build ou de atualização".into(),
+                    );
+                }
+                _ => {}
+            }
         }
-        "docker" if ctx.profile.build_commands.is_empty() && ctx.profile.restart_commands.is_empty() => {
-            return Err(Fail::new(
-                "o deploy com Docker precisa de comandos de build ou de atualização",
-            ));
-        }
-        _ => {}
     }
+    Ok(())
+}
 
+fn validate_remoto(ctx: &mut Ctx) -> Result<Info, Fail> {
+    let servidor = ctx.server_ref()?;
+    checar_definicao(&ctx.profile, &ctx.root, Some(servidor)).map_err(Fail::new)?;
+    checar_pasta_e_variaveis(ctx)?;
     if ctx.askpass.is_none() {
         let servidor = ctx.server_ref()?.clone();
         ctx.askpass = auth::prepare(&ctx.broker, &ctx.app, &servidor, &format!("Deploy · {}", ctx.profile.name))
@@ -1009,50 +1070,8 @@ fn validate_remoto(ctx: &mut Ctx) -> Result<Info, Fail> {
 /// Modelo sem servidor: tudo acontece nesta máquina, então o que se confere aqui
 /// é a pasta de destino e o perigo de ela bater no próprio projeto.
 fn validate_local(ctx: &mut Ctx) -> Result<Info, Fail> {
-    validate_strategy(&ctx.profile.strategy).map_err(Fail::new)?;
-    if strategy_needs_server(&ctx.profile.strategy) {
-        return Err(Fail::new(format!(
-            "a estratégia {} publica em um servidor, e este modelo não tem servidor. Escolha script ou artefatos.",
-            ctx.profile.strategy
-        )));
-    }
     checar_pasta_e_variaveis(ctx)?;
-    let destino = ctx.destino_path();
-    if !destino.is_absolute() {
-        return Err(Fail::new(format!(
-            "a pasta de destino precisa ser um caminho absoluto, e “{}” não é",
-            ctx.base()
-        )));
-    }
-    if ctx.profile.strategy == "script"
-        && ctx.profile.prepare_commands.iter().all(|c| c.trim().is_empty())
-        && ctx.profile.build_commands.iter().all(|c| c.trim().is_empty())
-        && ctx.profile.restart_commands.iter().all(|c| c.trim().is_empty())
-    {
-        return Err(Fail::new(
-            "um deploy por script nesta máquina precisa de pelo menos um comando de preparação, build ou reinicialização",
-        ));
-    }
-    // Copiar o projeto para dentro dele mesmo (ou apagar o projeto ao "limpar o
-    // destino") é o único jeito de perder trabalho com um modelo sem servidor.
-    let origem = ctx.root.canonicalize().unwrap_or_else(|_| ctx.root.clone());
-    let alvo = destino.canonicalize().unwrap_or_else(|_| destino.clone());
-    if alvo == origem || origem.starts_with(&alvo) {
-        return Err(Fail::new(format!(
-            "a pasta de destino ({}) é o projeto ou um lugar de onde ele estaria dentro — escolha uma pasta separada",
-            ctx.base()
-        )));
-    }
-    // O contrário também atrapalha: destino dentro do projeto significaria copiar
-    // arquivos para dentro da própria seleção, e a limpeza do destino apagaria
-    // arquivos do projeto.
-    if alvo.starts_with(&origem) {
-        return Err(Fail::new(format!(
-            "a pasta de destino ({}) está dentro do projeto ({}) — publique em uma pasta fora do código-fonte",
-            ctx.base(),
-            origem.display()
-        )));
-    }
+    checar_definicao(&ctx.profile, &ctx.root, None).map_err(Fail::new)?;
     Ok(Info::done(format!(
         "modelo “{}” · {} · destino {} · nesta máquina, sem SSH · {} variável(is)",
         ctx.profile.name,
@@ -2193,6 +2212,22 @@ fn rollback_local(ctx: &mut Ctx) -> Result<Info, Fail> {
 
 /// Carrega modelo/servidor/projeto, abre a linha de execução e dispara o
 /// pipeline em uma thread própria.
+/// O que fica gravado na execução sobre a sua origem. É lido no instante em que a
+/// execução abre: a definição pode mudar depois e o histórico não muda junto. O
+/// commit vem do git da pasta do projeto — `None` quando a pasta não é repositório
+/// ou não tem commit, e a tela mostra isso como "sem commit", não como inventado.
+fn procedencia(profile: &DeployProfile, servidor: &Option<Server>, root: &Path) -> db::Procedencia {
+    db::Procedencia {
+        definition_version: profile.version,
+        destination: profile.remote_path.clone(),
+        environment: servidor
+            .as_ref()
+            .map(|s| s.environment.clone())
+            .unwrap_or_else(|| "local".to_string()),
+        commit_sha: git::head_sha(root),
+    }
+}
+
 pub fn start(
     app: AppHandle,
     state: &DeployState,
@@ -2211,7 +2246,7 @@ pub fn start(
             db::setting_value(&conn, SECRET_PATTERNS_SETTING)?.as_deref(),
         );
         let root = PathBuf::from(&project.local_path);
-        let run_id = db::insert_run(&conn, profile_id)?;
+        let run_id = db::insert_run(&conn, profile_id, &procedencia(&profile, &servidor, &root))?;
         let _ = audit::log(
             &conn,
             "info",
@@ -2282,7 +2317,7 @@ pub fn rollback(
             db::setting_value(&conn, SECRET_PATTERNS_SETTING)?.as_deref(),
         );
         let root = PathBuf::from(&project.local_path);
-        let novo = db::insert_run(&conn, profile.id)?;
+        let novo = db::insert_run(&conn, profile.id, &procedencia(&profile, &servidor, &root))?;
         let _ = audit::log(
             &conn,
             "warning",

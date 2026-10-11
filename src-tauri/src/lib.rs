@@ -10,6 +10,7 @@ mod git_probe;
 mod github;
 mod infra;
 mod models;
+mod pipeline;
 mod proc;
 mod ssh_config;
 mod ssh_test;
@@ -27,6 +28,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let conn = db::init(app.handle())?;
+            // Nenhuma execução sobrevive ao fechamento do aplicativo: antes de
+            // mostrar o banco, o que estava `'running'` vira interrompido.
+            pipeline::recover_open_runs(&conn);
             app.manage(db::AppState::new(conn));
             app.manage(terminal::TerminalState::new());
             app.manage(files_transfer::TransferState::new());

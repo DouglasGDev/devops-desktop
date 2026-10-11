@@ -1,12 +1,33 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../lib/api";
+import { formatDateTime } from "../../lib/format";
 import { useApp } from "../../store/AppContext";
-import type { DeployProfile, Project } from "../../types";
-import { TrashIcon, PencilIcon, PlusIcon, StarIcon } from "../Icons";
+import type { DefinitionRevision, DeployProfile, Project } from "../../types";
+import { CheckIcon, HistoryIcon, TrashIcon, PencilIcon, PlusIcon, StarIcon } from "../Icons";
 import { Badge, Button, Confirm, DESTINO_LOCAL, ENV_TONES, Spinner, STRATEGY_LABELS } from "../ui";
 import { ProfileForm } from "./ProfileForm";
 
 type Editing = { kind: "new" } | { kind: "existing"; profile: DeployProfile } | null;
+
+/** O retrato de uma versão da definição, resumido numa linha. */
+function resumoDoRetrato(r: DefinitionRevision): string {
+  const s = r.spec as {
+    estrategia?: string;
+    destino?: string;
+    ramo?: string | null;
+    variaveis?: string[];
+    testes?: string[];
+  };
+  return [
+    s.estrategia,
+    s.destino,
+    s.ramo ? `branch ${s.ramo}` : null,
+    `${s.testes?.length ?? 0} teste(s)`,
+    `${s.variaveis?.length ?? 0} variável(is)`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
 
 /** Modelos de deploy de um projeto: quem publica, para onde e como. */
 export function ProjectProfiles({ project }: { project: Project }) {
@@ -16,6 +37,11 @@ export function ProjectProfiles({ project }: { project: Project }) {
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Editing>(null);
   const [deleting, setDeleting] = useState<DeployProfile | null>(null);
+  const [revisoesDe, setRevisoesDe] = useState<number | null>(null);
+  const [revisoes, setRevisoes] = useState<DefinitionRevision[]>([]);
+  const [lendoRevisoes, setLendoRevisoes] = useState(false);
+  const [conferindo, setConferindo] = useState<number | null>(null);
+  const [conferido, setConferido] = useState<Record<number, { ok: boolean; msg: string }>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -54,6 +80,36 @@ export function ProjectProfiles({ project }: { project: Project }) {
     }
   };
 
+  /** Conferência pelo contrato de pipeline: as checagens do motor, sem executar nada. */
+  const conferir = async (profile: DeployProfile) => {
+    setConferindo(profile.id);
+    try {
+      const msg = await api.pipelineValidate(profile.id);
+      setConferido((atual) => ({ ...atual, [profile.id]: { ok: true, msg } }));
+    } catch (e) {
+      setConferido((atual) => ({ ...atual, [profile.id]: { ok: false, msg: String(e) } }));
+    } finally {
+      setConferindo(null);
+    }
+  };
+
+  const abrirRevisoes = async (profile: DeployProfile) => {
+    if (revisoesDe === profile.id) {
+      setRevisoesDe(null);
+      return;
+    }
+    setRevisoesDe(profile.id);
+    setLendoRevisoes(true);
+    try {
+      setRevisoes(await api.pipelineRevisions(profile.id));
+    } catch (e) {
+      pushToast("error", `Falha ao ler as versões do modelo: ${String(e)}`);
+      setRevisoes([]);
+    } finally {
+      setLendoRevisoes(false);
+    }
+  };
+
   return (
     <div className="space-y-2">
       {loading ? (
@@ -88,6 +144,7 @@ export function ProjectProfiles({ project }: { project: Project }) {
                 <Badge tone={ENV_TONES[p.serverEnvironment ?? "other"] ?? "neutral"}>
                   {p.serverName ?? DESTINO_LOCAL}
                 </Badge>
+                <Badge tone="neutral">v{p.version}</Badge>
               </p>
               <p className="truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400" title={p.remotePath}>
                 {p.remotePath}
@@ -110,6 +167,24 @@ export function ProjectProfiles({ project }: { project: Project }) {
               <Button
                 size="sm"
                 variant="ghost"
+                title="Conferir a definição sem executar nada"
+                loading={conferindo === p.id}
+                onClick={() => void conferir(p)}
+              >
+                <CheckIcon className="size-3.5" />
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                title="Versões salvas desta definição"
+                loading={lendoRevisoes && revisoesDe === p.id}
+                onClick={() => void abrirRevisoes(p)}
+              >
+                <HistoryIcon className="size-3.5" />
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
                 title="Editar modelo"
                 onClick={() => setEditing({ kind: "existing", profile: p })}
               >
@@ -119,6 +194,33 @@ export function ProjectProfiles({ project }: { project: Project }) {
                 <TrashIcon className="size-3.5" />
               </Button>
             </div>
+            {conferido[p.id] ? (
+              <p
+                className={`w-full text-[11px] ${
+                  conferido[p.id].ok
+                    ? "text-teal-700 dark:text-teal-300"
+                    : "text-red-700 dark:text-red-300"
+                }`}
+              >
+                {conferido[p.id].msg}
+              </p>
+            ) : null}
+            {revisoesDe === p.id ? (
+              <ul className="w-full space-y-1 border-t border-zinc-100 pt-2 dark:border-zinc-800">
+                {revisoes.map((r) => (
+                  <li key={r.version} className="flex flex-wrap items-baseline gap-x-2 text-[11px]">
+                    <span className="font-medium">v{r.version}</span>
+                    <span className="text-zinc-500 dark:text-zinc-400">{formatDateTime(r.savedAt)}</span>
+                    <span className="truncate font-mono text-zinc-400 dark:text-zinc-500">{resumoDoRetrato(r)}</span>
+                  </li>
+                ))}
+                {!lendoRevisoes && revisoes.length === 0 ? (
+                  <li className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                    Nenhuma versão registrada ainda.
+                  </li>
+                ) : null}
+              </ul>
+            ) : null}
           </li>
         ))}
       </ul>

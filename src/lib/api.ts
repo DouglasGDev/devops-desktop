@@ -11,6 +11,8 @@ import type {
   DeployProfileInput,
   DeployPreflight,
   DeployRun,
+  DefinitionRevision,
+  DefinitionSummary,
   LogEvent,
   StepEvent,
   FileContent,
@@ -38,6 +40,7 @@ import type {
   RemoteInfo,
   RepoStatus,
   ResetMode,
+  RetryPolicy,
   Routine,
   RoutineInput,
   SearchResults,
@@ -146,6 +149,19 @@ export const api = {
   deployRuns: (projectId: number | null, limit?: number | null) =>
     invoke<DeployRun[]>("deploy_runs", { projectId, limit: limit ?? null }),
   deployRun: (runId: number) => invoke<DeployRun>("deploy_run", { runId }),
+
+  // Contrato de pipeline: a definição versionada, a conferência dela sem executar
+  // nada e a nova tentativa só quando ela é segura. Rodar e interromper continuam
+  // sendo `deployStart` e `deployCancel`.
+  pipelineDefinitions: (projectId: number | null) =>
+    invoke<DefinitionSummary[]>("pipeline_definitions", { projectId }),
+  pipelineRevisions: (definitionId: number) =>
+    invoke<DefinitionRevision[]>("pipeline_revisions", { definitionId }),
+  pipelineValidate: (definitionId: number) =>
+    invoke<string>("pipeline_validate", { definitionId }),
+  pipelineRetryPolicy: (runId: number) => invoke<RetryPolicy>("pipeline_retry_policy", { runId }),
+  pipelineRetry: (runId: number, secretValues: Record<string, string>) =>
+    invoke<number>("pipeline_retry", { runId, secretValues }),
 
   queryAuditLog: (params: {
     category?: string | null;

@@ -496,6 +496,9 @@ pub struct DeployProfile {
     pub is_default: bool,
     pub created_at: String,
     pub updated_at: String,
+    /// Número da definição salva mais recente. Cada alteração sobe este número e
+    /// deixa um retrato do que era a definição em `pipeline_revisions`.
+    pub version: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -650,7 +653,28 @@ pub struct DeployRun {
     pub release_dir: Option<String>,
     pub previous_release: Option<String>,
     pub detail: Option<String>,
+    /// A versão da definição que estava salva quando a execução abriu. Um modelo
+    /// editado depois não reescreve a procedência de uma execução antiga.
+    pub definition_version: Option<i64>,
+    /// Pasta ou diretório de destino, copiado da definição no momento da execução.
+    pub destination: Option<String>,
+    /// Ambiente do destino (`production`, `staging`…) lido do cadastro; `local`
+    /// quando não há servidor.
+    pub environment: Option<String>,
+    /// Commit de origem lido do git da pasta do projeto ao abrir a execução.
+    pub commit_sha: Option<String>,
     pub steps: Vec<DeployRunStep>,
+}
+
+/// Um retrato salvo da definição do pipeline, por versão.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefinitionRevision {
+    pub version: i64,
+    pub saved_at: String,
+    /// O JSON da definição: comandos, caminhos e limites. Nunca contém o **valor**
+    /// das variáveis — só os nomes, como a própria tabela de modelos.
+    pub spec: serde_json::Value,
 }
 
 

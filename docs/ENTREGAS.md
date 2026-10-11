@@ -10,7 +10,7 @@ cada parte e o que ainda não existe**. Escrito em 2026-10-10 sobre o commit `fa
 ```bash
 node ./node_modules/typescript/bin/tsc --noEmit     # tipos do frontend
 npm run build                                        # tsc + bundle
-(cd src-tauri && cargo test)                         # 200 testes de backend
+(cd src-tauri && cargo test)                         # 208 testes de backend
 (cd src-tauri && cargo clippy --all-targets -- -D warnings)
 node scripts/confira-repo.ts                         # o comparador remoto↔pasta, 9 formas reais de URL
 
@@ -38,15 +38,16 @@ Armadilhas já conhecidas nesta máquina:
 | Checagem | Resultado real |
 | --- | --- |
 | `tsc --noEmit` | saída vazia, código 0 |
-| `npm run build` | `✓ built in 3.00s`; 82 módulos; único aviso é o de chunk > 500 kB (`dist/assets/index-Cko7uGOK.js`, 843,08 kB / 229,31 kB gzip) |
-| `cargo test` (todos os alvos) | `200 passed; 0 failed; 0 ignored` em `devops_desktop_lib` (16,24 s); `main.rs` e doc-tests com 0 testes |
-| `cargo clippy --all-targets -- -D warnings` | `Finished` sem aviso (com `-D warnings`, qualquer aviso derrubaria o comando) |
+| `npm run build` | `✓ built in 6.62s`; único aviso é o de chunk > 500 kB (`dist/assets/index-Cp6MoOD2.js`, 847.124 B) |
+| `cargo test` (todos os alvos) | `208 passed; 0 failed; 0 ignored` em `devops_desktop_lib` (19,39 s); `main.rs` e doc-tests com 0 testes |
+| `cargo clippy --all-targets -- -D warnings` | `Finished \`dev\` profile` sem aviso (com `-D warnings`, qualquer aviso derrubaria o comando) |
 | `node scripts/confira-repo.ts` | `todas as 9 formas conferem`, código 0 |
-| Migração `user_version` 5 no banco real | `servers 0 · projects 1 · settings 3 · routines 9` idênticas antes e depois; `deploy_profiles.server_id` com `notnull = 0`; `idx_run_steps_run` com `unique = 1`; `sqlite_autoindex_deploy_profiles_1` (UNIQUE `project_id,name`) preservado; `PRAGMA foreign_key_check` vazio; `integrity_check` = `ok`. Cópia prévia em `%TEMP%\devops-db-backup\devops-desktop-v4.db` |
+| Migração `user_version` 6 no banco real | cabeçalho lido em `AppData/Roaming/com.douglasgdev.devopsdesktop/devops-desktop.db`: `user_version 6`, `page_size 4096`. As colunas novas e a tabela `pipeline_revisions` existem de verdade porque as leituras abaixo as devolveram preenchidas, vindas do mesmo arquivo |
 | **Fluxo sem servidor na janela real** (CDP, §4.1) | modelo `serverId: null` salvo · pré-vistoria `2 arquivo(s), 72.1 KB` · publicar #1 `success` com as 15 etapas · guarda `.devops-backups/1` com o README antigo **e** o excedente movido · reverter #2 `2 arquivo(s) reposto(s)` (conferido no disco) · publicar #3 `1 copiado · 1 já igual` (CRC32) · destino dentro do projeto **recusado na etapa 1** sem tocar no disco · caminho duplicado recusado (`o projeto já tem um modelo de deploy chamado "…"`) · remover o modelo → `deploy_runs` 5 → 0 e `audit_log` 57 → 58 (o histórico fica na auditoria, como a confirmação diz) · UI do modo local conferida no exe: destino "Nesta máquina (sem SSH)", estratégias só **C**/**D**, rótulo "Guardar o que já está no destino antes de sobrescrever", sem o checkbox de releases, e os quatro diálogos (pré-vistoria → publicar → reverter → remover) lidos na tela |
 | As quatro portas do "o deploy gera o próprio artefato" (exe das 11:01) | **W1** artefatos sem seleção + build gerando `saindo-do-build.txt`: 61 copiados, arquivo conferido no destino · **W2** artefatos declarando `gerado-pela-preparacao.txt` que **ainda não existe**: etapa 4 anuncia, preparação gera, 1 copiado, `success` · **W3** caminho que nenhum comando gera: `failed` na etapa 8 com "depois da preparação não sobrou nenhum arquivo para enviar — confira os caminhos" · **W4** `script`: `success` sem copiar nada (destino ficou vazio, como projetado) |
-| Frontend embutido no executável | conferido **dentro da janela**: o pacote das 09:37 servia `index-5zynmBe_.js` enquanto `dist/` já tinha `index-Cko7uGOK.js` (frontend velho dentro de um binário novo). O binário final (11:01, 18.129.920 B) serve o mesmo hash de `dist/assets/` |
-| Instalador | `npm run tauri build` → `DevOps Desktop_0.1.0_x64-setup.exe` (4,62 MiB) e `.msi` (6,66 MiB) |
+| **Contrato de pipeline na janela real** (CDP, etapa 2 do plano CI/CD) | definição criada como **v1** · execução #23 `success` com `definition_version 1`, `environment "local"`, `destination` o caminho absoluto do destino e `commit_sha f40243ff12c2a6…` **igual ao `git rev-parse HEAD`** lido na pasta · editar a definição → **v2**, salvar de novo sem mudar → **v3**, e `pipeline_revisions` devolve os três retratos (`v3`, `v2`, `v1`) em que só o `v2` carrega `exclusao: ["src/index.html"]` — ou seja, o retrato guarda o que mudou, e `variaveis` sai como `[]` porque o retrato não tem valor nenhum · `pipeline_validate` → `definição “Piloto sem servidor” v3 · artifacts · destino C:\… · nesta máquina` · **Repetir** o #23 criou a #24 com `definition_version 3` enquanto a #23 **continua `v1`** (a procedência antiga não é reescrita por edição posterior) · #25 com um arquivo do destino travado por outro processo: `failed` na etapa 9 com `falha ao guardar README.md antes de sobrescrever: O arquivo já está sendo usado por outro processo. (os error 32)`, etapas 10–15 em `waiting`, `pipeline_retry_policy` → `allowed: false` com o motivo, e `pipeline_retry` **recusa a mesma frase sem abrir execução nenhuma** (as execuções param em #27 — não existe #28 de retry) · reversão da #25 → execução própria com `1`, `2`, `11`, `14`, `15` como `done` e `3`–`10`+`12`–`13` como `skipped`, `1 arquivo(s) reposto(s)`, e o `README.md` do destino **conferido no disco** de volta ao conteúdo anterior · execução de 1,5 GB com o aplicativo **fechado à força no meio**: ao reabrir, a #30 está `cancelled` com `interrompida — o aplicativo foi fechado antes de terminar`, a etapa 9 está `failed` com `interrompida — o aplicativo foi fechado`, e a auditoria ganhou a linha `Execuções interrompidas identificadas · 1 execução(ões) e 1 etapa(s) marcadas como interr…` — a varredura rodou no `setup`, não num teste · tela: `v5` no cabeçalho do modelo e no seletor da aba **Deploy**, **Conferir** imprimindo `definição “Piloto sem servidor” v5 · artifacts · destino C:\… · nesta máquina`, **Versões salvas** listando `v5 v4 v3 v2 v1`, histórico com `· v4 · f40243ff` por execução, painel âmbar do **Repetir** mostrando o motivo da recusa lido na janela |
+| Frontend embutido no executável | conferido **dentro da janela**: o pacote das 09:37 servia `index-5zynmBe_.js` enquanto `dist/` já tinha `index-Cko7uGOK.js` (frontend velho dentro de um binário novo). O binário desta sessão (18.255.872 B, 19:49) serve `/assets/index-Cp6MoOD2.js`, o mesmo hash de `dist/index.html` |
+| Instalador | `npm run tauri build` → `DevOps Desktop_0.1.0_x64-setup.exe` (4.873.491 B) e `.msi` (7.016.448 B) |
 | Executando | `devops-desktop.exe` aberto por `Start-Process`, `MainWindowTitle = "DevOps Desktop — Central de SSH, Git e Deploy"`, `Responding = True`, 10 telas navegáveis por clique |
 | Git | `main` em sincronia com `origin/main`; público em <https://github.com/DouglasGDev/devops-desktop> |
 
@@ -117,13 +118,28 @@ ambiente acima — o instalador normal não a abre.
   *Cancelar* / *Continuar* / *Pular este passo* coerentes com o que o Git realmente está fazendo. Antes a tela adivinhava
   "rebase" por cabeça detached — o que levava a um *Cancelar o merge* que falharia num cherry-pick ou numa reversão.
 - **Senha por prompt, nunca salva** (`src-tauri/src/auth.rs`, `PasswordPrompt.tsx`): `SSH_ASKPASS` por operação.
+- **Contrato central de pipeline** (`src-tauri/src/pipeline.rs`, etapa 2 do plano CI/CD): não é um segundo motor — cada
+  operação termina em `deploy::start`, `deploy::cancel` e `deploy::run`. O que ele acrescenta é o que faltava para o
+  pipeline ser uma coisa só com história: a **definição versionada** (`deploy_profiles.version` sobe a cada salvamento e
+  deixa o retrato do que era em `pipeline_revisions`, com os **nomes** das variáveis e nunca os valores), a
+  **procedência de cada execução** (`definition_version`, `destination`, `environment` e `commit_sha` lido do git da
+  pasta no instante em que a execução abre), o **validador único** `deploy::checar_definicao` — as mesmas checagens da
+  etapa 1 do motor, chamadas também por `pipeline_validate`, para a tela nunca dizer "ok" a algo que o motor recusaria —,
+  a **política de nova tentativa** (`pipeline_retry_policy`/`pipeline_retry`: só repete quando nenhuma etapa a partir da 9
+  trabalhou, porque a partir daí o resultado no destino é desconhecido; `success` pode ser republicado; execução sem
+  etapa registrada é bloqueada, e o "não" nunca vem mudo — vem com o que conferir), e a **varredura de execuções órfãs**
+  na abertura (`recover_open_runs`: `running` que sobreviveu ao fechamento do aplicativo vira `cancelled` com o motivo,
+  e nada é reexecutado sozinho). Na tela: **Projetos → Modelos de deploy** mostra `v{n}`, o botão de conferência e as
+  versões salvas; **Deploy** mostra a procedência na execução e o botão **Repetir**, que pergunta a política antes de
+  abrir as variáveis.
 
-Total da superfície: **124 comandos Tauri registrados**, 21 arquivos Rust em `src-tauri/src`, 10 views,
-32.703 linhas de TS/TSX/Rust.
+Total da superfície: **129 comandos Tauri registrados**, 22 arquivos Rust em `src-tauri/src`, 10 views,
+33.677 linhas de TS/TSX/Rust.
 
-Persistência (SQLite local, migrações em `src-tauri/src/db.rs`) — as nove tabelas que existem hoje:
+Persistência (SQLite local, migrações em `src-tauri/src/db.rs`) — as dez tabelas que existem hoje:
 `settings`, `servers`, `projects`, `audit_log`, `routines`, `terminal_history`, `deploy_profiles`, `deploy_runs`,
-`deploy_run_steps`. Não há tabela de série histórica de métrica: o painel lê do servidor na hora pedida.
+`deploy_run_steps`, `pipeline_revisions`. Não há tabela de série histórica de métrica: o painel lê do servidor na hora
+pedida.
 
 ## 5. Decisões que não devem ser revertidas
 
@@ -171,12 +187,23 @@ Estas vieram do SPEC e de correções explícitas do Douglas; reverter qualquer 
 11. **O binário embute o `dist/` do momento em que o Rust leu a pasta**, não do momento em que ele terminou. Um
     `tauri build` com edição de `src/` no meio gera um instalador com frontend velho e tamanho idêntico ao novo, o que
     não dá para perceber pelo arquivo em si. A conferência é dentro da janela: o hash de `/assets/index-*.js` carregado
-    tem de ser o mesmo de `dist/assets/` (hoje `index-Cko7uGOK.js`; o pacote das 09:37 servia `index-5zynmBe_.js`).
+    tem de ser o mesmo de `dist/assets/` (hoje `index-Cp6MoOD2.js`; o pacote das 09:37 servia `index-5zynmBe_.js`).
+    **E não adianta procurar texto de interface dentro do `.exe`:** os assets vão comprimidos (brotli) no binário, então
+    um `grep` de string de tela não acha nada **mesmo quando o frontend está atualizado** — foi exatamente assim que eu
+    declarei, errado, que o binário trazia o frontend velho. A única prova é o hash lido na janela.
+12. **Um contrato, um validador, um motor** (etapa 2 do plano CI/CD). `deploy_profiles` é a definição; `pipeline.rs` não
+    redefine nada — ele lê, conferem e delega. `deploy::checar_definicao` é o único validador e é chamado pela etapa 1 do
+    motor **e** por `pipeline_validate`, de propósito: se a tela dissesse "ok" a algo que o motor recusa, a confiança nas
+    outras checagens cai junto. Rodar continua sendo `deploy::start` (inclusive `pipeline_retry`), e o retrato de versão
+    grava os **nomes** das variáveis, nunca os valores. A política de repetição só libera antes da etapa 9 porque a
+    partir dela o resultado no destino é desconhecido; o "não" sempre vem com o que conferir. A varredura de abertura
+    **nunca reexecuta** nada: só marca o que ficou pendurado.
 
 ## 6. Pendências assumidas (com o primeiro passo de cada)
 
 | # | Pendência | Primeiro passo concreto |
 | --- | --- | --- |
+| 0 | **Dados do piloto da etapa 2, ainda cadastrados de propósito** | O projeto **Piloto Etapa 2** (`%TEMP%\piloto-etapa2`) com a definição *Piloto sem servidor* v5 e as execuções #23–#30 continuam no cadastro para ele abrir a janela e ver as telas conferidas. Quando ele decidir, o primeiro passo é **Projetos → Piloto Etapa 2 → Remover do cadastro** (a confirmação avisa quantos modelos saem junto; nenhum arquivo local é apagado) e depois apagar a pasta `%TEMP%\piloto-etapa2`. O arquivo de teste de 1,5 GB já foi removido do projeto e do destino |
 | 1 | **Client ID na máquina do Douglas** | Colar o **Client ID** da OAuth App (o campo está em **GitHub → Configuração**) e gerar um secret novo no GitHub — o valor hexadecimal que estava salvo no banco era o **secret**, não o ID. Sem isso a aba GitHub não conecta: é limite de conta, não do código |
 | 2 | **Passada de visual (prioridade quando ele chamar)** | Só depois das funções; começar pelo print da tela que incomoda. Não refazer estilo por conta própria junto de feature |
 | 3 | **Pacotes Linux** | Os alvos `deb`/`rpm`/`AppImage` nunca foram gerados aqui. Rodar `npm run tauri build` numa imagem Linux e ajustar `bundle.targets` + paths (o código já usa `dirs`/caminhos relativos, mas isso precisa ser provado, não suposto) |

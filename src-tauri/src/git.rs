@@ -1867,6 +1867,20 @@ pub fn is_repo(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// O commit que a pasta aponta agora. É o que uma execução de pipeline registra
+/// como procedência; `None` quando a pasta não é um repositório ou não tem commit.
+/// Prazo curto de propósito: quem chama isto segura a alça do banco enquanto lê, e
+/// uma pasta lenta (rede, disco dormindo) não pode travar o aplicativo inteiro.
+pub fn head_sha(dir: &Path) -> Option<String> {
+    let text = executar(dir, &["rev-parse", "HEAD"], Duration::from_secs(3), None).ok()?;
+    let sha = text.trim().to_string();
+    if sha.is_empty() {
+        None
+    } else {
+        Some(sha)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3133,6 +3147,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&pais);
         let _ = std::fs::remove_dir_all(&origem);
         let _ = std::fs::remove_dir_all(&remoto);
+    }
+
+    #[test]
+    fn head_sha_e_o_commit_atual_e_none_onde_nao_ha_repo() {
+        let dir = temp_repo("head-sha");
+        assert_eq!(head_sha(&dir), None, "repositório recém-iniciado não tem HEAD");
+        write(&dir, "a.txt", &base_file());
+        stage(&dir, &["a.txt".into()]).unwrap();
+        run(&dir, &["commit", "-q", "-m", "primeiro"]).unwrap();
+        let sha = head_sha(&dir).expect("depois do commit o HEAD existe");
+        assert_eq!(sha.len(), 40, "sha curto demais para ser um commit: {sha}");
+        assert!(sha.chars().all(|c| c.is_ascii_hexdigit()), "{sha}");
+
+        let solto = temp_dir("head-sha-sem-repo");
+        assert_eq!(head_sha(&solto), None, "pasta que não é repositório não tem commit");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&solto);
     }
 }
 

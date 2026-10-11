@@ -50,7 +50,10 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
   const [stopping, setStopping] = useState(false);
   const [runs, setRuns] = useState<DeployRun[]>([]);
   const [active, setActive] = useState<DeployActive[]>([]);
-  const [secretsFor, setSecretsFor] = useState<{ kind: "deploy" } | { kind: "rollback"; runId: number } | null>(null);
+  const [retryBlock, setRetryBlock] = useState<string | null>(null);
+  const [secretsFor, setSecretsFor] = useState<
+    { kind: "deploy" } | { kind: "rollback"; runId: number } | { kind: "retry"; runId: number } | null
+  >(null);
 
   // Os listeners são montados uma vez; eles filtram pela execução atual por
   // aqui, sem se inscrever de novo a cada clique.
@@ -60,6 +63,7 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
 
   const openRun = useCallback(async (runId: number) => {
     currentRun.current = runId;
+    setRetryBlock(null);
     setLogs([]);
     try {
       const detail = await api.deployRun(runId);
@@ -218,6 +222,33 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
     }
   };
 
+  const pedirRepeticao = async (runId: number) => {
+    try {
+      const politica = await api.pipelineRetryPolicy(runId);
+      if (politica.allowed) {
+        setRetryBlock(null);
+        setSecretsFor({ kind: "retry", runId });
+      } else {
+        setRetryBlock(politica.reason ?? `não é possível repetir a execução #${runId}`);
+      }
+    } catch (e) {
+      pushToast("error", `Não foi possível consultar a política de tentativa: ${String(e)}`);
+    }
+  };
+
+  const repetir = async (runId: number, secretValues: Record<string, string>) => {
+    try {
+      const id = await api.pipelineRetry(runId, secretValues);
+      setRetryBlock(null);
+      setLogs([]);
+      await openRun(id);
+      setRunning(true);
+      await loadHistory();
+    } catch (e) {
+      pushToast("error", `Não foi possível repetir a execução: ${String(e)}`);
+    }
+  };
+
   const interromper = async () => {
     if (!run) return;
     setStopping(true);
@@ -243,6 +274,16 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
 
   const blocked = (preflight?.blocked ?? 0) > 0;
   const podePublicar = profile !== null && preflight !== null && (!blocked || allowSecrets);
+
+  /** O modelo de quem a execução-alvo saiu — pode não ser o modelo escolhido na tela. */
+  const modeloDoAlvo = (): DeployProfile | null => {
+    if (!secretsFor) return profile;
+    if (secretsFor.kind === "deploy") return profile;
+    const origem =
+      runs.find((r) => r.id === secretsFor.runId) ?? (run?.id === secretsFor.runId ? run : null);
+    if (!origem) return profile;
+    return profiles.find((p) => p.id === origem.profileId) ?? profile;
+  };
 
   if (loading && profiles.length === 0) {
     return (
@@ -308,6 +349,7 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
               {profile.serverName ?? DESTINO_LOCAL}
             </Badge>
             <Badge>{STRATEGY_LABELS[profile.strategy]}</Badge>
+            <Badge tone="neutral">v{profile.version}</Badge>
             <span className="font-mono text-zinc-500 dark:text-zinc-400">{profile.remotePath}</span>
             {profile.releasesEnabled ? <Badge tone="accent">releases + symlink</Badge> : null}
             {profile.deleteExtras ? <Badge tone="error">apaga excedentes</Badge> : null}
@@ -399,9 +441,38 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
                 <Button variant="danger" size="sm" loading={stopping} onClick={() => void interromper()}>
                   Interromper
                 </Button>
-              ) : null}
+              ) : (
+                <Button
+                  size="sm"
+                  title="Reexecutar a mesma definição, quando o destino não foi alterado"
+                  onClick={() => void pedirRepeticao(run.id)}
+                >
+                  <RefreshIcon className="size-3.5" /> Repetir
+                </Button>
+              )}
             </div>
           </div>
+
+          <p className="mt-1 flex flex-wrap gap-x-2 text-[11px] text-zinc-500 dark:text-zinc-400">
+            <span>
+              {run.definitionVersion
+                ? `definição v${run.definitionVersion}`
+                : "definição anterior à primeira versão registrada"}
+            </span>
+            {run.environment ? <span>· {run.environment}</span> : null}
+            {run.destination ? <span className="font-mono">· {run.destination}</span> : null}
+            {run.commitSha ? (
+              <span className="font-mono">· commit {run.commitSha.slice(0, 8)}</span>
+            ) : null}
+          </p>
+
+          {retryBlock ? (
+            <p className="mt-2 flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-200">
+              <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+              <span>{retryBlock}</span>
+            </p>
+          ) : null}
+
           {run.detail ? (
             <p className="mt-2 rounded-lg bg-zinc-100 px-3 py-2 text-xs dark:bg-zinc-800/60">{run.detail}</p>
           ) : null}
@@ -452,6 +523,8 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
                   <span className="font-medium">#{r.id}</span> {r.projectName} → {r.serverName ?? DESTINO_LOCAL}
                   <span className="block truncate text-[11px] text-zinc-500 dark:text-zinc-400">
                     {formatDateTime(r.startedAt)} · {STRATEGY_LABELS[r.strategy] ?? r.strategy}
+                    {r.definitionVersion ? ` · v${r.definitionVersion}` : ""}
+                    {r.commitSha ? ` · ${r.commitSha.slice(0, 8)}` : ""}
                     {r.detail ? ` · ${r.detail}` : ""}
                   </span>
                 </button>
@@ -474,23 +547,24 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
 
       {secretsFor ? (
         <SecretsDialog
-          keys={profile?.secretKeys ?? []}
-          local={
-            (secretsFor.kind === "rollback"
-              ? runs.find((r) => r.id === secretsFor.runId)?.serverName
-              : profile?.serverName) == null
-          }
+          keys={modeloDoAlvo()?.secretKeys ?? []}
+          local={modeloDoAlvo()?.serverName == null}
           title={
             secretsFor.kind === "rollback"
               ? `Variáveis do rollback · execução #${secretsFor.runId}`
-              : `Variáveis do deploy · ${profile?.name ?? ""}`
+              : secretsFor.kind === "retry"
+                ? `Variáveis da nova tentativa · execução #${secretsFor.runId}`
+                : `Variáveis do deploy · ${profile?.name ?? ""}`
           }
-          actionLabel={secretsFor.kind === "rollback" ? "Reverter" : "Publicar"}
+          actionLabel={
+            secretsFor.kind === "rollback" ? "Reverter" : secretsFor.kind === "retry" ? "Repetir" : "Publicar"
+          }
           onClose={() => setSecretsFor(null)}
           onSubmit={(values) => {
             const alvo = secretsFor;
             setSecretsFor(null);
             if (alvo.kind === "rollback") void reverter(alvo.runId, values);
+            else if (alvo.kind === "retry") void repetir(alvo.runId, values);
             else void iniciar(values);
           }}
         />

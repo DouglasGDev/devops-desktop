@@ -413,6 +413,8 @@ export type DeployProfile = {
   isDefault: boolean;
   createdAt: string;
   updatedAt: string;
+  /** Número da definição salva mais recente; cada alteração sobe este número. */
+  version: number;
 };
 
 export type DeployProfileInput = {
@@ -469,7 +471,33 @@ export interface DeployRun {
   releaseDir: string | null;
   previousRelease: string | null;
   detail: string | null;
+  /** Procedência: de onde esta execução saiu. `null` nas execuções anteriores à v6. */
+  definitionVersion: number | null;
+  destination: string | null;
+  environment: string | null;
+  commitSha: string | null;
   steps: DeployRunStep[];
+}
+
+/** Uma versão salva de uma definição, com o retrato do que ela era. */
+export interface DefinitionRevision {
+  version: number;
+  savedAt: string;
+  spec: Record<string, unknown>;
+}
+
+/** Uma definição como o contrato a entrega: o modelo salvo e a última execução dele. */
+export interface DefinitionSummary {
+  definition: DeployProfile;
+  lastRunId: number | null;
+  lastRunStatus: DeployRun["status"] | null;
+  lastRunAt: string | null;
+}
+
+/** Se vale oferecer uma nova tentativa — e por que não vale. */
+export interface RetryPolicy {
+  allowed: boolean;
+  reason: string | null;
 }
 
 export interface StepEvent {

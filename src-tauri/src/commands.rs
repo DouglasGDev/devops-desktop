@@ -19,12 +19,12 @@ use crate::{
     files_transfer::{self, TransferInfo, TransferState},
     git, git_probe, github, infra,
     models::{
-        AuditEntry, ConnectionTestResult, DeployProfile, DeployProfileInput, DeployRun, EditorInstalado,
+        AuditEntry, ConnectionTestResult, DefinitionRevision, DeployProfile, DeployProfileInput, DeployRun, EditorInstalado,
         ImportSshHost, Project, RemoteEntry, Routine,
         RoutineInput, SearchProjectRow, SearchResults, SearchServerRow, Server, ServerInput,
         SshDiscoveryReport, TerminalHistoryEntry, TerminalSessionInfo, ToolVersions,
     },
-    security, ssh_config, ssh_test, sshexec,
+    pipeline, security, ssh_config, ssh_test, sshexec,
     terminal::{self, TerminalState},
     tools,
 };
@@ -741,6 +741,59 @@ async fn deploy_runs(
 async fn deploy_run(state: State<'_, AppState>, run_id: i64) -> Result<DeployRun, String> {
     let conn = lock_db(&state.db)?;
     db::get_run(&conn, run_id)
+}
+
+// Contrato central de pipeline (plano CI/CD, etapa 2). Pedir execução, interromper e
+// consultar estado já são `deploy_start` / `deploy_cancel` / `deploy_run` — o que
+// estas portas acrescentam é a definição versionada, a conferência dela sem executar
+// nada, o histórico das versões e a nova tentativa só quando ela é segura.
+
+#[tauri::command]
+async fn pipeline_definitions(
+    state: State<'_, AppState>,
+    project_id: Option<i64>,
+) -> Result<Vec<pipeline::DefinitionSummary>, String> {
+    pipeline::definitions(&state.db, project_id)
+}
+
+#[tauri::command]
+async fn pipeline_revisions(
+    state: State<'_, AppState>,
+    definition_id: i64,
+) -> Result<Vec<DefinitionRevision>, String> {
+    pipeline::revisions(&state.db, definition_id)
+}
+
+#[tauri::command]
+async fn pipeline_validate(state: State<'_, AppState>, definition_id: i64) -> Result<String, String> {
+    pipeline::validate(&state.db, definition_id)
+}
+
+#[tauri::command]
+async fn pipeline_retry_policy(
+    state: State<'_, AppState>,
+    run_id: i64,
+) -> Result<pipeline::RetryPolicy, String> {
+    pipeline::retry_policy(&state.db, run_id)
+}
+
+#[tauri::command]
+async fn pipeline_retry(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    passwords: State<'_, AuthBroker>,
+    deploys: State<'_, deploy::DeployState>,
+    run_id: i64,
+    secret_values: HashMap<String, String>,
+) -> Result<i64, String> {
+    pipeline::retry(
+        app,
+        &deploys,
+        state.db.clone(),
+        (*passwords).clone(),
+        run_id,
+        secret_values,
+    )
 }
 
 //
@@ -3068,6 +3121,11 @@ pub fn register_all(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri
         deploy_active,
         deploy_runs,
         deploy_run,
+        pipeline_definitions,
+        pipeline_revisions,
+        pipeline_validate,
+        pipeline_retry_policy,
+        pipeline_retry,
         github_status,
         github_set_client_id,
         github_connect_start,

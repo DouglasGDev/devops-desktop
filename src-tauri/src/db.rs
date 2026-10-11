@@ -4,8 +4,8 @@ use rusqlite::{Connection, OptionalExtension, Row};
 use tauri::Manager;
 
 use crate::models::{
-    AuditEntry, DeployProfile, DeployProfileInput, DeployRun, DeployRunStep, Project, Routine,
-    RoutineInput, RoutineParam, Server, ServerInput, TerminalHistoryEntry,
+    AuditEntry, DefinitionRevision, DeployProfile, DeployProfileInput, DeployRun, DeployRunStep,
+    Project, Routine, RoutineInput, RoutineParam, Server, ServerInput, TerminalHistoryEntry,
 };
 
 pub struct AppState {
@@ -221,6 +221,29 @@ const MIGRATIONS: &[&str] = &[
     CREATE UNIQUE INDEX IF NOT EXISTS idx_run_steps_run ON deploy_run_steps(run_id, position);
     PRAGMA foreign_keys=ON;
     "#,
+    // v6 — contrato central de pipeline (plano CI/CD, etapa 2). A definição já
+    // existia como modelo de deploy; o que falta é ela ter **versão**, cada alteração
+    // deixar um retrato do que era, e cada execução registrar de onde saiu: versão da
+    // definição, destino, ambiente e commit de origem. Sem tabela nova de definição —
+    // `deploy_profiles` já é a definição, e duplicá-la criaria o segundo motor que o
+    // plano proíbe.
+    r#"
+    ALTER TABLE deploy_profiles ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+    -- IF NOT EXISTS: quem recria o esquema antigo por cima (é o que o teste de
+    -- migração faz) continua com a tabela da v6 pronta, e a migração precisa passar
+    -- de novo sem trombizar com ela.
+    CREATE TABLE IF NOT EXISTS pipeline_revisions (
+        profile_id INTEGER NOT NULL REFERENCES deploy_profiles(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL,
+        spec TEXT NOT NULL,
+        saved_at TEXT NOT NULL,
+        PRIMARY KEY (profile_id, version)
+    );
+    ALTER TABLE deploy_runs ADD COLUMN definition_version INTEGER;
+    ALTER TABLE deploy_runs ADD COLUMN destination TEXT;
+    ALTER TABLE deploy_runs ADD COLUMN environment TEXT;
+    ALTER TABLE deploy_runs ADD COLUMN commit_sha TEXT;
+    "#,
 ];
 
 pub fn init(app: &tauri::AppHandle) -> Result<Connection, String> {
@@ -258,6 +281,9 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), String> {
             conn.pragma_update(None, "user_version", target)
                 .map_err(|e| format!("falha ao registrar versão do esquema: {e}"))?;
         }
+    }
+    if version < MIGRATIONS.len() as i64 {
+        retrato_inicial_das_definicoes(conn)?;
     }
     Ok(())
 }
@@ -703,7 +729,7 @@ const PROFILE_COLUMNS: &str = "p.id, p.project_id, p.name, p.server_id, s.name A
      s.environment AS server_environment, p.strategy, p.git_branch, p.remote_path, p.include_paths, \
      p.exclude_paths, p.prepare_commands, p.build_commands, p.restart_commands, p.health_checks, \
      p.rollback_commands, p.secret_keys, p.backup_enabled, p.releases_enabled, p.delete_extras, \
-     p.step_timeout_secs, p.is_default, p.created_at, p.updated_at, p.test_commands";
+     p.step_timeout_secs, p.is_default, p.created_at, p.updated_at, p.test_commands, p.version";
 
 fn json_list(raw: &str) -> Vec<String> {
     serde_json::from_str(raw).unwrap_or_default()
@@ -745,6 +771,7 @@ fn row_to_profile(row: &Row) -> rusqlite::Result<DeployProfile> {
         is_default: row.get::<_, i64>("is_default")? != 0,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
+        version: row.get("version")?,
     })
 }
 
@@ -808,6 +835,92 @@ pub fn get_deploy_profile(conn: &Connection, id: i64) -> Result<DeployProfile, S
     .map_err(|e| format!("modelo de deploy #{id} não encontrado: {e}"))
 }
 
+/// O retrato JSON do que a definição era naquela versão. São os campos que o motor
+/// lê — comandos, caminhos e limites. Os **valores** das variáveis nunca aparecem
+/// aqui: a definição guarda só os nomes, e o valor continua sendo digitado a cada
+/// execução.
+fn spec_da_definicao(p: &DeployProfile) -> String {
+    let mapa = serde_json::json!({
+        "nome": p.name,
+        "servidorId": p.server_id,
+        "estrategia": p.strategy,
+        "ramo": p.git_branch,
+        "destino": p.remote_path,
+        "inclusao": p.include_paths,
+        "exclusao": p.exclude_paths,
+        "preparacao": p.prepare_commands,
+        "build": p.build_commands,
+        "testes": p.test_commands,
+        "atualizacao": p.restart_commands,
+        "saude": p.health_checks,
+        "rollback": p.rollback_commands,
+        "variaveis": p.secret_keys,
+        "backup": p.backup_enabled,
+        "releases": p.releases_enabled,
+        "apagarExcedentes": p.delete_extras,
+        "prazoPorEtapaSegundos": p.step_timeout_secs,
+    });
+    serde_json::to_string(&mapa).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Grava a versão atual da definição como um retrato. `ON CONFLICT DO UPDATE` porque
+/// a migração v6 semeia a versão 1 com o que já estava salvo, e o primeiro salvamento
+/// depois disso reescreve a mesma linha com o mesmo número.
+fn gravar_revisao(conn: &Connection, p: &DeployProfile) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO pipeline_revisions (profile_id, version, spec, saved_at) VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(profile_id, version) DO UPDATE SET spec = excluded.spec, saved_at = excluded.saved_at",
+        rusqlite::params![p.id, p.version, spec_da_definicao(p), p.updated_at],
+    )
+    .map_err(|e| format!("falha ao registrar a versão da definição: {e}"))?;
+    Ok(())
+}
+
+/// As versões salvas de uma definição, da mais nova para a mais antiga.
+pub fn list_revisions(conn: &Connection, profile_id: i64) -> Result<Vec<DefinitionRevision>, String> {
+    let mut stmt = conn
+        .prepare("SELECT version, spec, saved_at FROM pipeline_revisions WHERE profile_id = ?1 ORDER BY version DESC")
+        .map_err(|e| format!("falha ao preparar o histórico da definição: {e}"))?;
+    let rows = stmt
+        .query_map([profile_id], |row| {
+            let spec: String = row.get("spec")?;
+            Ok(DefinitionRevision {
+                version: row.get("version")?,
+                saved_at: row.get("saved_at")?,
+                spec: serde_json::from_str(&spec).unwrap_or(serde_json::json!({})),
+            })
+        })
+        .map_err(|e| format!("falha ao ler o histórico da definição: {e}"))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| format!("falha ao ler o histórico da definição: {e}"))?);
+    }
+    Ok(out)
+}
+
+/// Retrato inicial das definições que já existiam, na virada para a v6: sem isso a
+/// primeira execução depois da migração apontaria para uma versão que nunca foi
+/// registrada. Roda uma vez por definição, e nunca cobre um retrato já gravado.
+fn retrato_inicial_das_definicoes(conn: &Connection) -> Result<(), String> {
+    let ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT p.id FROM deploy_profiles p \
+                 WHERE NOT EXISTS (SELECT 1 FROM pipeline_revisions r WHERE r.profile_id = p.id)",
+            )
+            .map_err(|e| format!("falha ao procurar definições sem retrato: {e}"))?;
+        let rows = stmt
+            .query_map([], |r| r.get(0))
+            .map_err(|e| format!("falha ao procurar definições sem retrato: {e}"))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    for id in ids {
+        let perfil = get_deploy_profile(conn, id)?;
+        gravar_revisao(conn, &perfil)?;
+    }
+    Ok(())
+}
+
 pub fn upsert_deploy_profile(
     conn: &Connection,
     input: &DeployProfileInput,
@@ -840,7 +953,7 @@ pub fn upsert_deploy_profile(
                      restart_commands = ?11, health_checks = ?12, rollback_commands = ?13, \
                      secret_keys = ?14, backup_enabled = ?15, releases_enabled = ?16, \
                      delete_extras = ?17, step_timeout_secs = ?18, is_default = ?19, updated_at = ?20, \
-                     test_commands = ?21 \
+                     test_commands = ?21, version = version + 1 \
                      WHERE id = ?22",
                     rusqlite::params![
                         input.project_id,
@@ -871,7 +984,9 @@ pub fn upsert_deploy_profile(
             if affected == 0 {
                 return Err(format!("modelo de deploy #{id} não encontrado"));
             }
-            get_deploy_profile(conn, id)
+            let salvo = get_deploy_profile(conn, id)?;
+            gravar_revisao(conn, &salvo)?;
+            Ok(salvo)
         }
         None => {
             conn.execute(
@@ -911,7 +1026,9 @@ pub fn upsert_deploy_profile(
                     format!("falha ao criar modelo de deploy: {e}")
                 }
             })?;
-            get_deploy_profile(conn, conn.last_insert_rowid())
+            let criado = get_deploy_profile(conn, conn.last_insert_rowid())?;
+            gravar_revisao(conn, &criado)?;
+            Ok(criado)
         }
     }
 }
@@ -984,11 +1101,28 @@ pub fn clear_terminal_history(conn: &Connection) -> Result<usize, String> {
         .map_err(|e| format!("falha ao limpar o histórico: {e}"))
 }
 
+/// De onde uma execução saiu. É copiado da definição no instante em que a execução
+/// abre, porque a definição pode mudar depois e o histórico não pode mudar junto.
+pub struct Procedencia {
+    pub definition_version: i64,
+    pub destination: String,
+    pub environment: String,
+    pub commit_sha: Option<String>,
+}
+
 /// Abre uma execução do pipeline e devolve o identificador.
-pub fn insert_run(conn: &Connection, profile_id: i64) -> Result<i64, String> {
+pub fn insert_run(conn: &Connection, profile_id: i64, proc: &Procedencia) -> Result<i64, String> {
     conn.execute(
-        "INSERT INTO deploy_runs (profile_id, status, started_at) VALUES (?1, 'running', ?2)",
-        rusqlite::params![profile_id, now_rfc3339()],
+        "INSERT INTO deploy_runs (profile_id, status, started_at, definition_version, destination, \
+         environment, commit_sha) VALUES (?1, 'running', ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            profile_id,
+            now_rfc3339(),
+            proc.definition_version,
+            proc.destination,
+            proc.environment,
+            proc.commit_sha
+        ],
     )
     .map_err(|e| format!("falha ao registrar o início do deploy: {e}"))?;
     Ok(conn.last_insert_rowid())
@@ -1079,12 +1213,17 @@ fn row_to_run(row: &Row) -> rusqlite::Result<DeployRun> {
         release_dir: row.get("release_dir")?,
         previous_release: row.get("previous_release")?,
         detail: row.get("detail")?,
+        definition_version: row.get("definition_version")?,
+        destination: row.get("destination")?,
+        environment: row.get("environment")?,
+        commit_sha: row.get("commit_sha")?,
         steps: Vec::new(),
     })
 }
 
 const RUN_SELECT: &str = "r.id, r.profile_id, pr.name AS project_name, s.name AS server_name, p.strategy, \
-     r.status, r.started_at, r.finished_at, r.release_dir, r.previous_release, r.detail";
+     r.status, r.started_at, r.finished_at, r.release_dir, r.previous_release, r.detail, \
+     r.definition_version, r.destination, r.environment, r.commit_sha";
 
 const RUN_FROM: &str = "FROM deploy_runs r \
      JOIN deploy_profiles p ON p.id = r.profile_id \
@@ -1161,6 +1300,16 @@ mod tests {
         let conn = Connection::open_in_memory().expect("abrir banco em memória");
         migrate(&conn).expect("migrações");
         conn
+    }
+
+    /// Procedência de teste: o que a execução registra de onde saiu.
+    fn proc_de_teste(destino: &str) -> Procedencia {
+        Procedencia {
+            definition_version: 1,
+            destination: destino.to_string(),
+            environment: "local".into(),
+            commit_sha: None,
+        }
     }
 
     fn sample_input() -> ServerInput {
@@ -1312,7 +1461,7 @@ mod tests {
         assert_eq!(edited.id, saved.id);
 
         // apagar o modelo remove as execuções junto (não há chave estrangeira ativa)
-        let outra_execucao = insert_run(&conn, other.id).unwrap();
+        let outra_execucao = insert_run(&conn, other.id, &proc_de_teste(&other.remote_path)).unwrap();
         delete_deploy_profile(&conn, other.id).unwrap();
         assert!(get_deploy_profile(&conn, other.id).is_err());
         assert!(get_run(&conn, outra_execucao).is_err());
@@ -1349,7 +1498,7 @@ mod tests {
 
         // uma execução de um modelo sem servidor também aparece no histórico,
         // sem nome de servidor
-        let run_id = insert_run(&conn, salvo.id).unwrap();
+        let run_id = insert_run(&conn, salvo.id, &proc_de_teste(&salvo.remote_path)).unwrap();
         let execucao = get_run(&conn, run_id).unwrap();
         assert_eq!(execucao.server_name, None);
         assert_eq!(execucao.strategy, "artifacts");
@@ -1361,7 +1510,7 @@ mod tests {
         let server = insert_server(&conn, &sample_input(), "manual").unwrap();
         let projeto = insert_project(&conn, "site", "C:/projetos/site", true, None, None).unwrap();
         let modelo = upsert_deploy_profile(&conn, &profile_input(projeto.id, server.id)).unwrap();
-        let run_id = insert_run(&conn, modelo.id).unwrap();
+        let run_id = insert_run(&conn, modelo.id, &proc_de_teste(&modelo.remote_path)).unwrap();
 
         // um modelo que publica nesta máquina não depende do servidor
         let mut local = profile_input_no_servidor(projeto.id, None);
@@ -1382,9 +1531,12 @@ mod tests {
         assert!(list_deploy_profiles(&conn, None).unwrap().is_empty());
     }
 
-    /// O esquema de antes da v5: `server_id` obrigatório, sem nenhum modelo sem
-    /// servidor possível. É o ponto de partida que a migração precisa sobreviver.
+    /// O esquema de antes da v5 e da v6: `server_id` obrigatório, sem coluna de
+    /// versão na definição e sem procedência no histórico. É o ponto de partida que
+    /// a migração precisa sobreviver — inclusive porque o teste recria essas tabelas
+    /// por cima de um banco que já passou pela v6.
     const ESQUEMA_ANTIGO: &str = "PRAGMA foreign_keys=OFF;
+        DELETE FROM pipeline_revisions;
         DROP TABLE deploy_profiles;
         CREATE TABLE deploy_profiles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1412,18 +1564,58 @@ mod tests {
             test_commands TEXT NOT NULL DEFAULT '[]',
             UNIQUE (project_id, name)
         );
+        -- o histórico também era mais estreito: sem versão da definição e sem
+        -- destino, ambiente ou commit de origem.
+        DELETE FROM deploy_run_steps;
+        DROP TABLE deploy_runs;
+        CREATE TABLE deploy_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id INTEGER NOT NULL REFERENCES deploy_profiles(id) ON DELETE CASCADE,
+            status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','success','failed','cancelled')),
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            release_dir TEXT,
+            previous_release TEXT,
+            detail TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_runs_started ON deploy_runs(started_at DESC);
         PRAGMA foreign_keys=ON;";
 
     #[test]
-    fn migracao_v5_preserva_modelos_e_historico_e_afrouxa_o_servidor() {
+    fn migracao_preserva_modelos_e_historico_e_afrouxa_o_servidor() {
         let conn = mem_db();
         conn.execute_batch(ESQUEMA_ANTIGO).unwrap();
         conn.pragma_update(None, "user_version", 4).unwrap();
 
         let server = insert_server(&conn, &sample_input(), "manual").unwrap();
         let projeto = insert_project(&conn, "site", "C:/projetos/site", true, None, None).unwrap();
-        let modelo = upsert_deploy_profile(&conn, &profile_input(projeto.id, server.id)).unwrap();
-        let run_id = insert_run(&conn, modelo.id).unwrap();
+
+        // O modelo e a execução entram por SQL cru, escritos como o código antigo os
+        // gravaria: pelas funções de hoje o insert já pediria `version` e as colunas
+        // de procedência, que não existiam nessa base.
+        conn.execute(
+            "INSERT INTO deploy_profiles (project_id, name, server_id, strategy, git_branch, remote_path, \
+             include_paths, exclude_paths, prepare_commands, build_commands, restart_commands, health_checks, \
+             rollback_commands, secret_keys, backup_enabled, releases_enabled, delete_extras, step_timeout_secs, \
+             is_default, created_at, updated_at, test_commands) \
+             VALUES (?1, 'produção', ?2, 'artifacts', 'main', '/var/www/site', '[\"dist\"]', '[\"**/*.map\"]', \
+             '[]', '[\"npm ci\",\"npm run build\"]', '[\"sudo systemctl reload caddy\"]', \
+             '[\"curl -fsS http://127.0.0.1/healthz\"]', '[]', '[\"SENTRY_TOKEN\"]', 1, 1, 0, 900, 1, \
+             ?3, ?3, '[\"npm run test\"]')",
+            rusqlite::params![projeto.id, server.id, now_rfc3339()],
+        )
+        .unwrap();
+        let modelo_id: i64 = conn
+            .query_row("SELECT id FROM deploy_profiles WHERE name = 'produção'", [], |r| r.get(0))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO deploy_runs (profile_id, status, started_at, detail) VALUES (?1, 'success', ?2, 'publicado')",
+            rusqlite::params![modelo_id, now_rfc3339()],
+        )
+        .unwrap();
+        let run_id: i64 = conn
+            .query_row("SELECT id FROM deploy_runs WHERE profile_id = ?1", [modelo_id], |r| r.get(0))
+            .unwrap();
         upsert_step(
             &conn,
             &StepUpdate {
@@ -1441,22 +1633,34 @@ mod tests {
         migrate(&conn).unwrap();
 
         // nada se perdeu na reconstrução da tabela
-        let lido = get_deploy_profile(&conn, modelo.id).unwrap();
+        let lido = get_deploy_profile(&conn, modelo_id).unwrap();
         assert_eq!(lido.name, "produção");
         assert_eq!(lido.remote_path, "/var/www/site");
         assert_eq!(lido.server_name.as_deref(), Some("web-prod"));
         assert_eq!(lido.test_commands, vec!["npm run test".to_string()]);
         assert!(lido.is_default && lido.releases_enabled);
 
+        // a definição antiga recebe a versão 1 e o retrato dela, sem isso a primeira
+        // execução depois da migração apontaria para uma versão nunca registrada
+        assert_eq!(lido.version, 1);
+        let retratos = list_revisions(&conn, modelo_id).unwrap();
+        assert_eq!(retratos.len(), 1);
+        assert_eq!(retratos[0].version, 1);
+        assert_eq!(retratos[0].spec["nome"], "produção");
+
         // o histórico é o ponto crítico: um DROP em cascata apagaria tudo
         let execucao = get_run(&conn, run_id).unwrap();
-        assert_eq!(execucao.profile_id, modelo.id);
+        assert_eq!(execucao.profile_id, modelo_id);
         assert_eq!(execucao.steps.len(), 1);
         assert_eq!(execucao.server_name.as_deref(), Some("web-prod"));
+        // e a execução antiga não finge procedência: ela simplesmente não tem
+        assert_eq!(execucao.definition_version, None);
+        assert_eq!(execucao.destination, None);
+        assert_eq!(execucao.commit_sha, None);
 
         // e a checagem de chaves continua ligada depois da migração
         let fk: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
-        assert_eq!(fk, 1, "a v5 deixou as chaves desligadas");
+        assert_eq!(fk, 1, "a migração deixou as chaves desligadas");
 
         // a mesma base agora aceita um modelo sem servidor
         let mut local = profile_input_no_servidor(projeto.id, None);
@@ -1466,9 +1670,38 @@ mod tests {
         let salvo = upsert_deploy_profile(&conn, &local).unwrap();
         assert_eq!(salvo.server_id, None);
 
+        // mexer numa definição sobe a versão e deixa o retrato do que ela era antes
+        let mut editado = local.clone();
+        editado.id = Some(salvo.id);
+        editado.remote_path = "D:/publicados/site".into();
+        let segunda = upsert_deploy_profile(&conn, &editado).unwrap();
+        assert_eq!(segunda.version, 2);
+        let retratos = list_revisions(&conn, salvo.id).unwrap();
+        assert_eq!(retratos.len(), 2);
+        assert_eq!(retratos[0].spec["destino"], "D:/publicados/site");
+        assert_eq!(retratos[1].spec["destino"], "C:/publicados/site");
+
+        // uma execução aberta agora registra de onde saiu
+        let nova = insert_run(
+            &conn,
+            salvo.id,
+            &Procedencia {
+                definition_version: 2,
+                destination: "D:/publicados/site".into(),
+                environment: "local".into(),
+                commit_sha: Some("3f9a1c2".into()),
+            },
+        )
+        .unwrap();
+        let execucao = get_run(&conn, nova).unwrap();
+        assert_eq!(execucao.definition_version, Some(2));
+        assert_eq!(execucao.destination.as_deref(), Some("D:/publicados/site"));
+        assert_eq!(execucao.environment.as_deref(), Some("local"));
+        assert_eq!(execucao.commit_sha.as_deref(), Some("3f9a1c2"));
+
         // apagar o servidor continua levando só os modelos dele
         assert_eq!(delete_server_row(&conn, server.id).unwrap(), 1);
-        assert!(get_deploy_profile(&conn, modelo.id).is_err());
+        assert!(get_deploy_profile(&conn, modelo_id).is_err());
         assert!(get_run(&conn, run_id).is_err());
         assert!(get_deploy_profile(&conn, salvo.id).is_ok());
     }
