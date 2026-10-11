@@ -33,6 +33,7 @@ use crate::{
     db::{self, DbHandle},
     files, git,
     models::{strategy_needs_server, validate_strategy, DeployProfile, DeployRun, PipelineNode, Project, Server},
+    runtime::{self},
     security, ssh_test, sshexec,
 };
 
@@ -776,6 +777,11 @@ struct Ctx {
     release: Option<String>,
     previous: Option<String>,
     tools: HashMap<String, Option<String>>,
+    /// O que o executor de runtime do modelo deixa no ar: a imagem que estava
+    /// rodando antes desta corrida, lida do `ANTERIOR:` que o roteiro imprimiu. É o
+    /// único destino possível de uma reversão de container, e numa corrida de
+    /// reversão chega do histórico como o valor a voltar.
+    imagem_anterior: Option<String>,
     branch: String,
     remote_url: String,
     sent: usize,
@@ -789,6 +795,9 @@ struct Ctx {
     node_row: Option<NodeRow>,
     /// Prazo do nó em execução; `None` herda o prazo por etapa do modelo.
     node_timeout: Option<Duration>,
+    /// Uma corrida de reversão não pôs código novo no destino: as etapas que mudam
+    /// o runtime ficam quietas e só a leitura de saúde confere o resultado.
+    reversao: bool,
 }
 
 impl Ctx {
@@ -825,6 +834,7 @@ impl Ctx {
             release: self.release.clone(),
             previous: self.previous.clone(),
             tools: self.tools.clone(),
+            imagem_anterior: self.imagem_anterior.clone(),
             branch: self.branch.clone(),
             remote_url: self.remote_url.clone(),
             sent: self.sent,
@@ -834,7 +844,20 @@ impl Ctx {
             confirmation: self.confirmation.clone(),
             node_row: Some(row),
             node_timeout,
+            reversao: self.reversao,
         }
+    }
+
+    /// O executor de runtime desta corrida: as colunas do modelo traduzidas uma vez
+    /// só (`DeployProfile::alvo`), com o diretório onde o código está no destino
+    /// agora. A etiqueta da imagem é o número da corrida: duas execuções da mesma
+    /// definição não se atropelam no depósito de imagens, e a reversão tem um nome
+    /// para voltar.
+    fn executor(&self) -> runtime::Alvo {
+        let alvo = pasta_do_executor(&self.base(), self.profile.releases_enabled, self.local_mode());
+        self.profile
+            .alvo(&alvo)
+            .com_tag(&format!("r{}", self.run_id))
     }
 
     /// O ambiente que as condições dos nós comparam: o do servidor cadastrado,
@@ -846,7 +869,8 @@ impl Ctx {
             .unwrap_or_else(|| "local".to_string())
     }
 
-    /// O prazo do nó em execução; `None` usa o prazo por etapa do modelo.
+    /// O que uma corrida linear preenche desde o clique: as quinze etapas do motor,
+    /// cada uma na sua posição fixa no histórico.
     fn mark_waiting_do_motor(&self) -> usize {
         for position in 1..=15 {
             self.mark(position, "waiting", None, None, None);
@@ -1383,11 +1407,110 @@ fn rodar_comandos(ctx: &mut Ctx, no: &PipelineNode, posicao: i64) -> Result<usiz
     Ok(linhas.len())
 }
 
+/// A linha de um nó que não traz mensagem própria: o que ele era, não o que o
+/// motor acha dele.
+fn resumo_do_no(no: &PipelineNode) -> String {
+    match no.kind.as_str() {
+        "aprovacao" => "aprovado na janela".to_string(),
+        _ => format!(
+            "{} comando(s) {}",
+            no.commands.iter().filter(|c| !c.trim().is_empty()).count(),
+            if no.executor == "ssh" { "no servidor" } else { "nesta máquina" }
+        ),
+    }
+}
+
+/// A primeira linha que o git escreveu, lida da resposta dele. Um nó que terminou
+/// "Already up to date." diz isso no histórico; um nó que diz "atualizado" sem ter
+/// lido nada mente.
+fn frase_do_git(saida: &str) -> String {
+    saida
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("o git não respondeu nada")
+        .to_string()
+}
+
+/// A operação pedida por um nó `git`, separada do contexto para poder ser conferida
+/// num repositório real nos testes. O git é o desta máquina — o mesmo da aba Git —
+/// e o que volta é a resposta dele, lida depois da operação.
+fn git_do_no(dir: &Path, operacao: &str, referencia: &str) -> Result<String, String> {
+    match operacao {
+        // `--ff-only`: um nó de publicação não inventa merge no histórico do projeto.
+        // Se não dá para avançar reto, é o git que diz e o nó para.
+        "pull" => {
+            let saida = git::pull(dir, "ff-only")?;
+            Ok(frase_do_git(&saida))
+        }
+        "checkout" => {
+            git::checkout(dir, referencia, false, None)?;
+            // A cabeça lida depois, não a que foi pedida: alternar para um tag deixa
+            // o repositório destacado, e dizer o contrário seria falso.
+            let estado = git::status(dir)?;
+            let onde = match (estado.branch, estado.detached_at) {
+                (Some(ramo), _) => Some(ramo),
+                (None, Some(c)) => Some(format!("cabeça destacada em {}", &c[..c.len().min(7)])),
+                (None, None) => None,
+            };
+            Ok(match onde {
+                Some(texto) => format!("em {texto}"),
+                None => "alternado, mas a pasta não informou onde está".to_string(),
+            })
+        }
+        "tag" => {
+            git::create_tag(dir, referencia, None, None)?;
+            let lidas = git::tags(dir)?;
+            if !lidas.iter().any(|t| t.name == referencia) {
+                return Err(format!("o git não registrou a tag {referencia}"));
+            }
+            // Publicar a marca só tem sentido onde há para onde publicar; sem remoto
+            // a tag fica nesta máquina, e a linha diz isso em vez de emendar.
+            let remotos = git::remotes(dir)?;
+            match remotos.iter().find(|r| r.name == "origin").or_else(|| remotos.first()) {
+                None => Ok(format!("tag {referencia} criada nesta máquina — sem remoto cadastrado")),
+                Some(remoto) => {
+                    let envio = git::push_tag(dir, &remoto.name, referencia)?;
+                    Ok(format!(
+                        "tag {referencia} publicada em {} · {}",
+                        remoto.name,
+                        frase_do_git(&envio)
+                    ))
+                }
+            }
+        }
+        outro => Err(format!(
+            "o nó git roda {}, não “{outro}”",
+            crate::models::NODE_GIT_OPS.join(", ")
+        )),
+    }
+}
+
+/// O nó `git` roda nesta máquina, na pasta do projeto (contida por `dir_do_no`): é
+/// o repositório de onde a publicação sai, não o destino. Nenhum comando é montado
+/// por texto — a operação vem da definição e o git obedece aos próprios argumentos.
+fn rodar_no_git(ctx: &mut Ctx, no: &PipelineNode, posicao: i64) -> Result<String, Fail> {
+    let operacao = no.git_op.as_deref().unwrap_or("").trim();
+    if operacao.is_empty() {
+        return Err(Fail::new(format!("o nó “{}” ficou sem operação de git", no.title)));
+    }
+    let referencia = no.git_ref.as_deref().unwrap_or("").trim();
+    let dir = dir_do_no(ctx, no)?;
+    ctx.mark(posicao, "running", Some("em execução"), None, None);
+    ctx.log(posicao, "out", &format!("+ git {operacao} {}", referencia));
+    let feito = git_do_no(&dir, operacao, referencia)
+        .map_err(|e| Fail::failed(format!("git {operacao}"), None, e))?;
+    ctx.log(posicao, "out", &feito);
+    Ok(feito)
+}
+
 /// Como um nó terminou. `Pulado` é diferente de falha: a condição do nó não se
 /// cumpriu, então nada foi executado e nada está errado.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Fim {
-    Concluido,
+    /// O texto que a linha do histórico mostra. `None` é o resumo padrão do tipo do
+    /// nó; um nó `git` traz a resposta do próprio git, que não cabe num resumo.
+    Concluido(Option<String>),
     Pulado,
 }
 
@@ -1408,23 +1531,20 @@ fn executar_no(ctx: &mut Ctx, index: usize, no: &PipelineNode) -> Result<Fim, Fa
     // tem `node_row`, e pela posição do grafo cairia na tabela das quinze etapas — um nó
     // de comando chamado `preparo` ganharia o nome de uma etapa do motor.
     match resultado {
-        Ok(Fim::Concluido) => {
+        Ok(fim @ Fim::Concluido(_)) => {
             // Uma etapa do motor já escreveu a própria linha final dentro de `step`,
             // com nome, status e a mensagem do resultado — reescrever aqui apagaria a
-            // mensagem dela e transformaria um "pulada" em "concluída". Quem não tem
-            // etapa por trás, comando e aprovação, termina por aqui.
+            // mensagem dela e transformaria um "pulada" em "concluída". Os nós sem
+            // etapa por trás terminam por aqui, com a mensagem que o corpo devolveu
+            // (o git responde pela própria linha) ou com o resumo dos comandos.
             if no.kind != "motor" {
-                let motivo = match no.kind.as_str() {
-                    "aprovacao" => "aprovado na janela".to_string(),
-                    _ => format!(
-                        "{} comando(s) {}",
-                        no.commands.iter().filter(|c| !c.trim().is_empty()).count(),
-                        if no.executor == "ssh" { "no servidor" } else { "nesta máquina" }
-                    ),
+                let texto = match &fim {
+                    Fim::Concluido(Some(mensagem)) => mensagem.clone(),
+                    _ => resumo_do_no(no),
                 };
-                ctx.registra(&Linha::from(&row), "done", Some(&motivo), None, None);
+                ctx.registra(&Linha::from(&row), "done", Some(&texto), None, None);
             }
-            Ok(Fim::Concluido)
+            Ok(fim)
         }
         // A linha já foi marcada como pulada, com o motivo.
         Ok(Fim::Pulado) => Ok(Fim::Pulado),
@@ -1500,11 +1620,11 @@ fn executar_conteudo(ctx: &mut Ctx, no: &PipelineNode, row: &NodeRow) -> Result<
         }
     }
     if no.kind == "aprovacao" {
-        return Ok(Fim::Concluido);
+        return Ok(Fim::Concluido(None));
     }
     let mut tentativa = 0;
     loop {
-        let resultado = match no.kind.as_str() {
+        let resultado: Result<Option<String>, Fail> = match no.kind.as_str() {
             "motor" => {
                 let Some(number) = no.engine_step else {
                     return Err(Fail::new(format!(
@@ -1520,13 +1640,19 @@ fn executar_conteudo(ctx: &mut Ctx, no: &PipelineNode, row: &NodeRow) -> Result<
                 };
                 // `step` é a mesma função que o pipeline linear usa: marca a linha
                 // do nó, escreve a mensagem da etapa e devolve o erro real.
-                step(ctx, number, etapa)
+                step(ctx, number, etapa).map(|_| None)
             }
-            "comando" => rodar_comandos(ctx, no, row.position).map(|_| ()),
-            _ => Ok(()),
+            "comando" => rodar_comandos(ctx, no, row.position).map(|_| None),
+            "git" => rodar_no_git(ctx, no, row.position).map(Some),
+            // Um tipo que o motor não sabe executar não pode terminar como concluído:
+            // é o nó que faz nada e sorri.
+            outro => Err(Fail::new(format!(
+                "o nó “{}” é do tipo “{outro}”, que o motor não sabe executar",
+                no.title
+            ))),
         };
         match resultado {
-            Ok(()) => return Ok(Fim::Concluido),
+            Ok(mensagem) => return Ok(Fim::Concluido(mensagem)),
             Err(fail) if fail.cancelled => return Err(fail),
             Err(fail) if tentativa < no.retry_limit => {
                 tentativa += 1;
@@ -1846,7 +1972,7 @@ fn registrar_saida(
     resultado: Result<Fim, Fail>,
 ) {
     match resultado {
-        Ok(Fim::Concluido) => situacao.insert(i, Sit::Feito),
+        Ok(Fim::Concluido(_)) => situacao.insert(i, Sit::Feito),
         Ok(Fim::Pulado) => situacao.insert(i, Sit::Pulado),
         Err(fail) => {
             if falha.is_none() {
@@ -1897,6 +2023,18 @@ pub fn checar_definicao(
     servidor: Option<&Server>,
 ) -> Result<(), String> {
     validate_strategy(&profile.strategy)?;
+    // O executor de runtime é conferido aqui, pela mesma função que a tela chama ao
+    // salvar: o que a tela aceita é exatamente o que o motor executa. E ele roda no
+    // destino — um modelo sem servidor publica comandos nesta máquina, não containers
+    // em um docker que pode nem existir por aqui.
+    let alvo = profile.alvo(profile.remote_path.trim());
+    if servidor.is_none() && !alvo.runtime.is_empty() {
+        return Err(format!(
+            "{} é um executor de runtime e roda no servidor; este modelo publica nesta máquina",
+            runtime::nome(&alvo.runtime)
+        ));
+    }
+    alvo.conferir()?;
     match servidor {
         None => {
             if strategy_needs_server(&profile.strategy) {
@@ -1962,7 +2100,11 @@ pub fn checar_definicao(
                 "script" if profile.prepare_commands.iter().all(|c| c.trim().is_empty()) => {
                     return Err("o deploy por script precisa de pelo menos um comando".into());
                 }
-                "docker" if profile.build_commands.is_empty() && profile.restart_commands.is_empty() => {
+                "docker"
+                    if alvo.runtime.is_empty()
+                        && profile.build_commands.is_empty()
+                        && profile.restart_commands.is_empty() =>
+                {
                     return Err(
                         "o deploy com Docker precisa de comandos de build ou de atualização".into(),
                     );
@@ -2266,13 +2408,86 @@ fn build_step(ctx: &mut Ctx) -> Result<Info, Fail> {
     Ok(Info::done(format!("{n} comando(s) de build local(is)")))
 }
 
+/// O executor do modelo, conferido antes de qualquer roteiro dele rodar. É a mesma
+/// checagem que a tela faz ao salvar e que a etapa 1 faz na definição — num grafo
+/// desenhado sem a etapa 1, é aqui que um modelo incompleto para a corrida em vez de
+/// mandar para o servidor um script com a imagem vazia.
+/// Onde o código do executor está no destino agora. Com releases ativadas é o symlink
+/// `current`, que a etapa 11 acabou de trocar — construir a imagem a partir da pasta
+/// antiga publicaria código velho. Sem releases, e nesta máquina, é o próprio
+/// destino.
+fn pasta_do_executor(base: &str, releases_enabled: bool, local: bool) -> String {
+    if releases_enabled && !local {
+        remote_join(base, "current")
+    } else {
+        base.to_string()
+    }
+}
+
+fn executor_pronto(ctx: &Ctx) -> Result<runtime::Alvo, Fail> {
+    let alvo = ctx.executor();
+    alvo.conferir().map_err(Fail::new)?;
+    Ok(alvo)
+}
+
+/// Manda um roteiro do executor ao destino e devolve o veredito lido do estado,
+/// junto com a saída bruta para quem precisa de um marcador além do estado (a
+/// imagem anterior, por exemplo). O código de saída do comando não decide nada:
+/// `docker run` devolve zero para um container que morre dois segundos depois, e
+/// aqui o que vale é a linha que o `docker inspect` do próprio roteiro imprimiu.
+fn executar_rota(
+    ctx: &mut Ctx,
+    posicao: i64,
+    roteiro: &str,
+    rotulo: &str,
+) -> Result<(String, String), Fail> {
+    let script = ctx.script(roteiro);
+    let saida = ctx.remote(posicao, &script, rotulo)?;
+    let bruto = saida.stdout.clone();
+    let alvo = executor_pronto(ctx)?;
+    let estado =
+        runtime::estado_no_ar(&alvo, &bruto).map_err(|motivo| Fail::failed(rotulo, Some(1), motivo))?;
+    Ok((estado, bruto))
+}
+
+/// O que falta no servidor, dado o que ele respondeu à sonda. Pura porque a decisão
+/// é uma só: parar antes de tocar no destino, e nomear exatamente o que a corrida
+/// pediu.
+fn faltas_do_servidor<'a>(
+    exigidas: &[(&'a str, &'a str)],
+    tem: impl Fn(&str) -> bool,
+) -> Vec<&'a str> {
+    exigidas
+        .iter()
+        .filter(|(tool, _)| !tem(tool))
+        .map(|(_, rotulo)| *rotulo)
+        .collect()
+}
+
+/// A recusa que vai para o histórico. Sem executor declarado a falta é da estratégia,
+/// e a saída é instalar a ferramenta ou escolher outra; com executor, o nome dele é
+/// dito — quem lê não precisa adivinhar por que `pm2` apareceu na lista.
+fn recusa_de_ferramentas(faltam: &[&str], runtime: &str) -> String {
+    let motivo = if runtime.is_empty() {
+        " — instale a ferramenta ou escolha outra estratégia".to_string()
+    } else {
+        format!(" — o executor {} roda com elas", runtime::nome(runtime))
+    };
+    format!("o servidor não tem: {}{motivo}", faltam.join(", "))
+}
+
 fn prepare_step(ctx: &mut Ctx) -> Result<Info, Fail> {
     if ctx.local_mode() {
         return prepare_local(ctx);
     }
     let strategy = ctx.profile.strategy.as_str();
+    // O executor de runtime do modelo é lido antes da sonda: as ferramentas que ele
+    // usam entram na checagem de requisitos, e um servidor sem `pm2` é dito aqui,
+    // não descoberto no meio de uma etapa que já teria mexido no destino.
+    let executor = executor_pronto(ctx)?;
+    let do_executor = runtime::ferramentas(&executor.runtime);
     let precisa_git = strategy == "git";
-    let precisa_docker = strategy == "docker";
+    let precisa_docker = strategy == "docker" || do_executor.contains(&"docker");
     let precisa_compose = ctx
         .profile
         .build_commands
@@ -2284,32 +2499,46 @@ fn prepare_step(ctx: &mut Ctx) -> Result<Info, Fail> {
 
     // A sonda roda em `sh`: é o único shell garantido antes de sabermos o que o
     // servidor tem.
-    let probe = sshexec::probe_script(precisa_git, precisa_docker, precisa_compose, false, precisa_cksum);
+    let probe = sshexec::probe_script(
+        precisa_git,
+        precisa_docker,
+        precisa_compose,
+        false,
+        precisa_cksum,
+        do_executor,
+    );
     let sonda = ctx.remote_with(8, "sh", &probe, "verificação de requisitos")?;
     ctx.tools = sshexec::parse_probe(&sonda.stdout).into_iter().collect();
     ctx.shell = if ctx.has("bash") { "bash" } else { "sh" }.to_string();
 
-    let mut faltam: Vec<&str> = Vec::new();
-    if precisa_git && !ctx.has("git") {
-        faltam.push("git");
+    // O que a corrida exige, com o rótulo que a recusa mostra: as mesmas ferramentas
+    // que a sonda pediu são as que se conferem aqui, sem contagem por fora.
+    let mut exigidas: Vec<(&str, &str)> = Vec::new();
+    if precisa_git {
+        exigidas.push(("git", "git"));
     }
-    if precisa_docker && !ctx.has("docker") {
-        faltam.push("docker");
+    if precisa_docker {
+        exigidas.push(("docker", "docker"));
     }
-    if precisa_compose && !ctx.has("docker-compose") {
-        faltam.push("docker-compose");
+    if precisa_compose {
+        exigidas.push(("docker-compose", "docker-compose"));
     }
-    if ctx.profile.backup_enabled && !ctx.has("tar") {
-        faltam.push("tar (necessário para o backup)");
+    if ctx.profile.backup_enabled {
+        exigidas.push(("tar", "tar (necessário para o backup)"));
     }
-    if precisa_cksum && !ctx.has("cksum") {
-        faltam.push("cksum (comparação de conteúdo)");
+    if precisa_cksum {
+        exigidas.push(("cksum", "cksum (comparação de conteúdo)"));
     }
+    // As ferramentas do executor entram sem repetir o que a estratégia já pediu:
+    // um modelo `docker` com executor docker diz "docker" uma vez na recusa.
+    for ferramenta in do_executor {
+        if !exigidas.iter().any(|(t, _)| *t == *ferramenta) {
+            exigidas.push((ferramenta, ferramenta));
+        }
+    }
+    let faltam = faltas_do_servidor(&exigidas, |t| ctx.has(t));
     if !faltam.is_empty() {
-        return Err(Fail::new(format!(
-            "o servidor não tem: {} — instale a ferramenta ou escolha outra estratégia",
-            faltam.join(", ")
-        )));
+        return Err(Fail::new(recusa_de_ferramentas(&faltam, &executor.runtime)));
     }
     let resumo: Vec<String> = ctx
         .tools
@@ -2865,12 +3094,36 @@ fn update_step(ctx: &mut Ctx) -> Result<Info, Fail> {
     if matches!(ctx.profile.strategy.as_str(), "git" | "script" | "docker") {
         operacoes += ctx.run_commands(11, "build/atualização no servidor", &ctx.profile.build_commands.clone())?;
     }
+    // Com executor declarado, a imagem desta corrida é construída a partir do código
+    // que a etapa 10 acabou de enviar — por isso vem depois do envio e da troca de
+    // release, não antes. O id lido do depósito de imagens é a prova do que existe;
+    // "o comando terminou bem" não provaria nada.
+    let executor = executor_pronto(ctx)?;
+    let mut imagem_construida = None;
+    if let Some(roteiro) = executor.roteiro_build() {
+        let script = ctx.script(&roteiro);
+        let saida = ctx.remote(11, &script, "construir a imagem desta corrida")?;
+        operacoes += 1;
+        if executor.runtime == "docker" {
+            imagem_construida = Some(runtime::parse_imagem(&saida.stdout).ok_or_else(|| {
+                Fail::failed(
+                    "construir a imagem desta corrida",
+                    Some(1),
+                    "o build não devolveu o id da imagem — nada novo foi construído no destino",
+                )
+            })?);
+        }
+    }
     if operacoes == 0 {
         return Ok(Info::skip(
             "nenhum comando de atualização remoto e nenhuma troca de release configurada",
         ));
     }
-    Ok(Info::done(format!("{operacoes} operação(ões) de atualização concluída(s)")))
+    let mut msg = format!("{operacoes} operação(ões) de atualização concluída(s)");
+    if let Some(imagem) = imagem_construida {
+        msg.push_str(&format!(" · imagem {imagem}"));
+    }
+    Ok(Info::done(msg))
 }
 
 /// Etapa 11 sem servidor: não há symlink de release para trocar (o modelo local
@@ -2890,23 +3143,69 @@ fn update_local(ctx: &mut Ctx) -> Result<Info, Fail> {
 }
 
 fn restart_step(ctx: &mut Ctx) -> Result<Info, Fail> {
-    if ctx.profile.restart_commands.is_empty() {
-        return Ok(Info::skip(
-            "sem comandos de reinicialização — esta configuração não reinicia serviço",
-        ));
+    let executor = executor_pronto(ctx)?;
+    // Os comandos de reinicialização do modelo continuam sendo o primeiro passo,
+    // como sempre foram. O executor entra depois deles, e é ele que põe o runtime no
+    // ar quando o modelo declara um — sem executor declarado, nada aqui muda.
+    let comandos = if ctx.profile.restart_commands.is_empty() {
+        None
+    } else {
+        Some(ctx.run_commands(12, "reinicialização", &ctx.profile.restart_commands.clone())?)
+    };
+    if ctx.reversao {
+        // Uma reversão não traz código novo: quem trocou o estado foi a etapa de
+        // atualização, e a próxima relê. Subir aqui a imagem desta corrida desfaria a
+        // reversão que acabou de acontecer.
+        return match comandos {
+            Some(n) => Ok(Info::done(format!("{n} comando(s) de reinicialização aplicados"))),
+            None => Ok(Info::skip(
+                "reversão: nada é subido aqui — o runtime voltou na etapa de atualização e o estado é lido na próxima",
+            )),
+        };
     }
-    let n = ctx.run_commands(12, "reinicialização", &ctx.profile.restart_commands.clone())?;
-    Ok(Info::done(format!("{n} comando(s) de reinicialização aplicados")))
+    if let Some(roteiro) = executor.roteiro_subir() {
+        let (estado, bruto) = executar_rota(ctx, 12, &roteiro, "subir o runtime do destino")?;
+        // A imagem que estava no ar antes desta corrida é lida do que o próprio
+        // roteiro imprimiu, antes de o container antigo sair: é o único destino
+        // possível de uma reversão de container, e vai no registro da execução.
+        ctx.imagem_anterior = runtime::parse_anterior(&bruto).map(|(_, imagem)| imagem);
+        let inicio = match comandos {
+            Some(n) => format!("{n} comando(s) de reinicialização · "),
+            None => String::new(),
+        };
+        return Ok(Info::done(format!("{inicio}{estado}")));
+    }
+    match comandos {
+        Some(n) => Ok(Info::done(format!("{n} comando(s) de reinicialização aplicados"))),
+        None => Ok(Info::skip(
+            "sem comandos de reinicialização e sem executor de runtime — esta configuração não reinicia serviço",
+        )),
+    }
 }
 
 fn health_step(ctx: &mut Ctx) -> Result<Info, Fail> {
-    if ctx.profile.health_checks.is_empty() {
+    let executor = executor_pronto(ctx)?;
+    let feitos = if ctx.profile.health_checks.is_empty() {
+        0
+    } else {
+        ctx.run_commands(13, "saúde", &ctx.profile.health_checks.clone())?
+    };
+    // Com executor, a saúde é o estado relido da ferramenta — a mesma leitura que
+    // decidiu a subida, refeita agora, sem mudar nada no destino.
+    if let Some(roteiro) = executor.roteiro_saude() {
+        let (estado, _) = executar_rota(ctx, 13, &roteiro, "ler o estado do runtime")?;
+        return Ok(Info::done(if feitos == 0 {
+            format!("saúde lida do destino: {estado}")
+        } else {
+            format!("{feitos} teste(s) de saúde passaram · {estado}")
+        }));
+    }
+    if feitos == 0 {
         return Ok(Info::skip(
             "nenhum teste de saúde configurado — confirme o serviço manualmente",
         ));
     }
-    let n = ctx.run_commands(13, "saúde", &ctx.profile.health_checks.clone())?;
-    Ok(Info::done(format!("{n} teste(s) de saúde passaram")))
+    Ok(Info::done(format!("{feitos} teste(s) de saúde passaram")))
 }
 
 fn confirm_step(ctx: &mut Ctx) -> Result<Info, Fail> {
@@ -3052,15 +3351,44 @@ fn rollback_switch(ctx: &mut Ctx) -> Result<Info, Fail> {
         return rollback_local(ctx);
     }
     let base = ctx.base();
+    let mut feitos: Vec<String> = Vec::new();
+    // Reversão num destino com Docker: o que serve o conteúdo é o container, e o id
+    // que estava no ar antes desta corrida só existe no histórico lido da máquina —
+    // nenhum comando de rollback do modelo sabe dele.
+    let executor = executor_pronto(ctx)?;
+    if executor.runtime == "docker" {
+        let imagem = ctx.imagem_anterior.clone().ok_or_else(|| {
+            Fail::new(
+                "a execução que se quer reverter não registrou a imagem que estava no ar — sem esse id não há para onde voltar o container",
+            )
+        })?;
+        let roteiro = executor.roteiro_reverter(&imagem);
+        let (estado, bruto) =
+            executar_rota(ctx, 11, &roteiro, "voltar o container para a imagem anterior")?;
+        // O container que sai também é lido: esta corrida deslocou uma imagem, e uma
+        // reversão dela tem para onde voltar do mesmo jeito.
+        ctx.imagem_anterior = runtime::parse_anterior(&bruto).map(|(_, id)| id);
+        feitos.push(format!(
+            "container {} voltou para a imagem {imagem} · {estado}",
+            executor.container()
+        ));
+    }
     if !ctx.profile.rollback_commands.is_empty() {
         let n = ctx.run_commands(11, "rollback", &ctx.profile.rollback_commands.clone())?;
-        return Ok(Info::done(format!("{n} comando(s) de rollback executados")));
+        feitos.push(format!("{n} comando(s) de rollback executados"));
+        return Ok(Info::done(feitos.join(" · ")));
     }
-    let anterior = ctx.previous.clone().ok_or_else(|| {
-        Fail::new(
-            "não há publicação anterior registrada nem comandos de rollback configurados — reversão automática não é possível",
-        )
-    })?;
+    let anterior = match ctx.previous.clone() {
+        Some(anterior) => anterior,
+        None => {
+            if feitos.is_empty() {
+                return Err(Fail::new(
+                    "não há publicação anterior registrada nem comandos de rollback configurados — reversão automática não é possível",
+                ));
+            }
+            return Ok(Info::done(feitos.join(" · ")));
+        }
+    };
     let alvo = if anterior.starts_with('/') {
         anterior.clone()
     } else {
@@ -3079,7 +3407,8 @@ fn rollback_switch(ctx: &mut Ctx) -> Result<Info, Fail> {
     ));
     ctx.remote(11, &script, "reverter para a publicação anterior")?;
     ctx.release = Some(relativo);
-    Ok(Info::done(format!("diretório ativo voltou para {alvo}")))
+    feitos.push(format!("diretório ativo voltou para {alvo}"));
+    Ok(Info::done(feitos.join(" · ")))
 }
 
 /// Reversão do modo sem servidor: os arquivos voltam da pasta de guarda daquela
@@ -3294,7 +3623,9 @@ fn corrida(
         percurso,
         pedido.secret_values,
         pedido.allow_secrets,
-        None,
+        // Uma corrida nova não herda nada do histórico: não há destino de reversão
+        // antes dela.
+        Heranca::default(),
     )
 }
 
@@ -3317,7 +3648,7 @@ pub fn rollback(
     run_id: i64,
     secret_values: HashMap<String, String>,
 ) -> Result<i64, String> {
-    let (profile, servidor, project, root, extra, previous, new_run) = {
+    let (profile, servidor, project, root, extra, heranca, new_run) = {
         let conn = db.lock().map_err(|_| "o banco local está indisponível".to_string())?;
         let origem = db::get_run(&conn, run_id)?;
         if origem.status != "success" && origem.status != "failed" {
@@ -3334,6 +3665,10 @@ pub fn rollback(
         );
         let root = PathBuf::from(&project.local_path);
         let novo = db::insert_run(&conn, profile.id, &procedencia(&profile, &servidor, &root))?;
+        let heranca = Heranca {
+            previous: origem.previous_release.clone(),
+            imagem: origem.previous_image.clone(),
+        };
         let _ = audit::log(
             &conn,
             "warning",
@@ -3344,21 +3679,14 @@ pub fn rollback(
             None,
             Some(&format!(
                 "execução #{run_id} → #{novo} (destino {})",
-                origem
-                    .previous_release
+                heranca
+                    .previous
                     .clone()
+                    .or_else(|| heranca.imagem.as_ref().map(|i| format!("imagem {i}")))
                     .unwrap_or_else(|| "comandos do modelo".to_string())
             )),
         );
-        (
-            profile,
-            servidor,
-            project,
-            root,
-            extra,
-            origem.previous_release,
-            novo,
-        )
+        (profile, servidor, project, root, extra, heranca, novo)
     };
     run(
         app,
@@ -3374,8 +3702,17 @@ pub fn rollback(
         Percurso::Reversao,
         secret_values,
         true,
-        previous,
+        heranca,
     )
+}
+
+/// O que uma corrida herda do histórico que a pediu. Só a reversão herda alguma
+/// coisa: é o registro da execução desfeita que diz para onde voltar — o symlink da
+/// release anterior e, num destino com Docker, a imagem que estava no ar.
+#[derive(Debug, Default)]
+struct Heranca {
+    previous: Option<String>,
+    imagem: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3393,7 +3730,7 @@ fn run(
     percurso: Percurso,
     secret_values: HashMap<String, String>,
     allow_secrets: bool,
-    previous: Option<String>,
+    heranca: Heranca,
 ) -> Result<i64, String> {
     let cancel = Arc::new(AtomicBool::new(false));
     let operacao = match &percurso {
@@ -3421,7 +3758,8 @@ fn run(
         files: Vec::new(),
         plano: None,
         release: None,
-        previous,
+        previous: heranca.previous,
+        imagem_anterior: heranca.imagem,
         tools: HashMap::new(),
         branch: String::new(),
         remote_url: String::new(),
@@ -3440,6 +3778,7 @@ fn run(
         approvals: state.approvals.clone(),
         node_row: None,
         node_timeout: None,
+        reversao: matches!(&percurso, Percurso::Reversao),
     };
     let linhas = match &percurso {
         // todas as etapas aparecem como "aguardando" assim que o clique acontece
@@ -3455,6 +3794,7 @@ fn run(
                 &conn,
                 run_id,
                 "failed",
+                None,
                 None,
                 None,
                 Some("o grafo da definição não tem nenhum nó para esta execução"),
@@ -3473,6 +3813,7 @@ fn run(
                 &conn,
                 run_id,
                 "failed",
+                None,
                 None,
                 None,
                 Some(&format!("falha ao iniciar a thread do pipeline: {e}")),
@@ -3549,6 +3890,7 @@ fn finalize(ctx: &Ctx, status: &str, detail: &str, rollback: bool) {
             status,
             ativa.as_deref(),
             ctx.previous.as_deref(),
+            ctx.imagem_anterior.as_deref(),
             Some(&detail),
         );
         let _ = audit::log(
@@ -3944,6 +4286,8 @@ mod tests {
             environment: None,
             working_dir: None,
             commands: Vec::new(),
+            git_op: None,
+            git_ref: None,
             depends_on: dep.iter().map(|d| d.to_string()).collect(),
             parallel: false,
             timeout_secs: 0,
@@ -4075,5 +4419,147 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("criar pasta de teste");
         dir
+    }
+
+    #[test]
+    fn o_executor_peg_a_pasta_que_a_corrida_acabou_de_publicar() {
+        // Com releases, o `current` é o código desta corrida. A raiz seria a
+        // publicação anterior: construir a imagem a partir dela publicaria código
+        // velho sem dizer nada.
+        assert_eq!(pasta_do_executor("/srv/api", true, false), "/srv/api/current");
+        // Sem releases não há symlink nenhum, e nesta máquina o destino é o destino.
+        assert_eq!(pasta_do_executor("/srv/api", false, false), "/srv/api");
+        assert_eq!(pasta_do_executor("C:/publicados/site", true, true), "C:/publicados/site");
+    }
+
+    #[test]
+    fn a_falta_no_servidor_e_a_ferramenta_que_a_sonda_pediu() {
+        let exigidas = [("git", "git"), ("pm2", "pm2"), ("node", "node (o app do pm2)")];
+        let tem = |t: &str| t == "git" || t == "node";
+        assert_eq!(faltas_do_servidor(&exigidas, tem), vec!["pm2"]);
+        assert!(faltas_do_servidor(&exigidas, |_| true).is_empty());
+    }
+
+    #[test]
+    fn a_recusa_nomeia_o_executor_e_sem_executor_diz_a_estrategia() {
+        let com_executor = recusa_de_ferramentas(&["pm2", "node (o app do pm2)"], "pm2");
+        assert!(com_executor.contains("o servidor não tem: pm2, node"), "{com_executor}");
+        assert!(com_executor.contains("executor PM2"), "{com_executor}");
+        // nada declarado é exatamente a mensagem de antes: a falta é da estratégia
+        let sem_executor = recusa_de_ferramentas(&["git"], "");
+        assert!(sem_executor.contains("escolha outra estratégia"), "{sem_executor}");
+        assert!(!sem_executor.contains("executor"), "{sem_executor}");
+    }
+
+    /// Um repositório de verdade, criado pelo git desta máquina: o nó `git` não é
+    /// conferido contra um git simulado, porque o que a linha conta é a resposta dele.
+    fn repo_de_teste(nome: &str) -> PathBuf {
+        let dir = pasta_de_teste(nome);
+        git_em(&dir, &["-c", "init.defaultBranch=main", "init", "-q", "."]);
+        git_em(&dir, &["config", "user.name", "Teste Local"]);
+        git_em(&dir, &["config", "user.email", "teste@local"]);
+        git_em(&dir, &["config", "commit.gpgsign", "false"]);
+        git_em(&dir, &["config", "core.autocrlf", "false"]);
+        git_em(&dir, &["commit", "-q", "-m", "primeiro", "--allow-empty"]);
+        dir
+    }
+
+    fn git_em(dir: &Path, args: &[&str]) -> String {
+        let feito = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("o git desta máquina");
+        assert!(
+            feito.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&feito.stderr)
+        );
+        String::from_utf8_lossy(&feito.stdout).to_string()
+    }
+
+    /// Um "servidor" para os testes de publicação: repositório bare, como um remoto
+    /// real (um repositório comum recusaria o push no ramo checkoutado).
+    fn remoto_bare(de: &Path, nome: &str) -> PathBuf {
+        let destino = de.parent().unwrap().join(format!("{nome}.git"));
+        let _ = fs::remove_dir_all(&destino);
+        git_em(de, &["clone", "--bare", "-q", ".", &destino.to_string_lossy()]);
+        destino
+    }
+
+    /// O caminho no formato que o git aceita como URL local.
+    fn url_local(dir: &Path) -> String {
+        dir.to_string_lossy().replace('\\', "/")
+    }
+
+    #[test]
+    fn o_no_git_marca_a_tag_e_diz_onde_ela_ficou() {
+        let dir = repo_de_teste("no-git-tag");
+        let feito = git_do_no(&dir, "tag", "v1.0.0").unwrap();
+        assert!(feito.contains("tag v1.0.0 criada"), "{feito}");
+        assert!(feito.contains("sem remoto"), "{feito}");
+        // lida de volta no próprio repositório: a linha não promete o que o git não fez
+        let nomes: Vec<String> = git::tags(&dir).unwrap().into_iter().map(|t| t.name).collect();
+        assert!(nomes.contains(&"v1.0.0".to_string()), "{nomes:?}");
+    }
+
+    #[test]
+    fn o_no_git_publica_a_tag_onde_ha_um_remoto() {
+        let origem = repo_de_teste("no-git-tag-push");
+        let bare = remoto_bare(&origem, "no-git-tag-push");
+        let endereco = url_local(&bare);
+        git_em(&origem, &["remote", "add", "origin", &endereco]);
+        git_em(&origem, &["push", "-q", "origin", "main"]);
+
+        let feito = git_do_no(&origem, "tag", "v2.0.0").unwrap();
+        assert!(feito.contains("publicada em origin"), "{feito}");
+        // o remoto é lido de volta: a tag não está só na fala do nó
+        let lidas = git_em(&bare, &["tag", "-l"]);
+        assert!(lidas.contains("v2.0.0"), "{lidas}");
+    }
+
+    #[test]
+    fn o_no_git_altern_e_a_linha_vem_da_cabeca_lida_depois() {
+        let dir = repo_de_teste("no-git-checkout");
+        git_em(&dir, &["branch", "alt"]);
+        assert_eq!(git_do_no(&dir, "checkout", "alt").unwrap(), "em alt");
+        // um ramo que não existe falha com a palavra do git, não com a nossa
+        let erro = git_do_no(&dir, "checkout", "nao-existe").unwrap_err();
+        assert!(erro.contains("nao-existe"), "{erro}");
+    }
+
+    #[test]
+    fn o_no_git_puxa_sem_inventar_merge() {
+        let origem = repo_de_teste("no-git-pull");
+        let bare = remoto_bare(&origem, "no-git-pull");
+        let endereco = url_local(&bare);
+        git_em(&origem, &["remote", "add", "origin", &endereco]);
+        git_em(&origem, &["push", "-q", "-u", "origin", "main"]);
+        let clone = origem.parent().unwrap().join("no-git-pull-clone");
+        let _ = fs::remove_dir_all(&clone);
+        git_em(origem.parent().unwrap(), &["clone", "-q", &endereco, &clone.to_string_lossy()]);
+
+        git_em(&origem, &["commit", "-q", "-m", "segundo", "--allow-empty"]);
+        git_em(&origem, &["push", "-q", "origin", "main"]);
+
+        let feito = git_do_no(&clone, "pull", "").unwrap();
+        assert!(feito.starts_with("Updating "), "{feito}");
+        assert_eq!(
+            git_em(&clone, &["rev-parse", "HEAD"]).trim(),
+            git_em(&origem, &["rev-parse", "HEAD"]).trim(),
+            "o nó falou em avançar e a cabeça do clone não mudou"
+        );
+        // e o segundo pull não cria commit nenhum: é a linha do git que fica no histórico
+        let repetido = git_do_no(&clone, "pull", "").unwrap();
+        assert!(repetido.contains("Already up to date"), "{repetido}");
+        let _ = fs::remove_dir_all(&clone);
+    }
+
+    #[test]
+    fn uma_operacao_que_o_motor_nao_conhece_para_o_no() {
+        let dir = repo_de_teste("no-git-desconhecida");
+        let erro = git_do_no(&dir, "reset", "HEAD~1").unwrap_err();
+        assert!(erro.contains("pull, checkout, tag"), "{erro}");
+        assert!(erro.contains("reset"), "{erro}");
     }
 }

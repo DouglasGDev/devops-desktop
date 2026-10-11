@@ -279,6 +279,67 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE deploy_run_steps ADD COLUMN node_key TEXT;
     ALTER TABLE deploy_run_steps ADD COLUMN touched_destination INTEGER NOT NULL DEFAULT 0;
     "#,
+    // v8 — executores de runtime (plano CI/CD, etapa 4). As colunas do modelo entram
+    // por `ALTER`: são campos que já têm um único dono (`runtime::Alvo::conferir`,
+    // chamado pela tela antes de salvar e pelo motor antes de tocar no servidor), e
+    // `deploy_profiles` agora tem três filhas com cascata — reconstruir a tabela-mãe
+    // por um `CHECK` que o Rust já impõe seria risco sem ganho. `pipeline_nodes` é
+    // reconstruída porque não há ALTER que alargue um `CHECK` inline: sem isso o nó
+    // `git` não teria como existir no esquema, e um tipo que a tela desenha mas o
+    // banco recusa é exatamente o botão enfeitado que a especificação proíbe.
+    r#"
+    ALTER TABLE deploy_profiles ADD COLUMN runtime TEXT NOT NULL DEFAULT '';
+    ALTER TABLE deploy_profiles ADD COLUMN image_name TEXT;
+    ALTER TABLE deploy_profiles ADD COLUMN dockerfile TEXT;
+    ALTER TABLE deploy_profiles ADD COLUMN compose_file TEXT;
+    ALTER TABLE deploy_profiles ADD COLUMN service_name TEXT;
+    ALTER TABLE deploy_profiles ADD COLUMN publish_ports TEXT NOT NULL DEFAULT '[]';
+    PRAGMA foreign_keys=OFF;
+    CREATE TABLE pipeline_nodes_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        profile_id INTEGER NOT NULL REFERENCES deploy_profiles(id) ON DELETE CASCADE,
+        node_key TEXT NOT NULL,
+        title TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('motor','comando','aprovacao','git')),
+        engine_step INTEGER,
+        executor TEXT NOT NULL DEFAULT 'local' CHECK (executor IN ('local','ssh')),
+        environment TEXT,
+        working_dir TEXT,
+        commands TEXT NOT NULL DEFAULT '[]',
+        depends_on TEXT NOT NULL DEFAULT '[]',
+        parallel INTEGER NOT NULL DEFAULT 0,
+        timeout_secs INTEGER NOT NULL DEFAULT 0,
+        retry_limit INTEGER NOT NULL DEFAULT 0,
+        condition TEXT,
+        requires_approval INTEGER NOT NULL DEFAULT 0,
+        touches_destination INTEGER NOT NULL DEFAULT 0,
+        git_op TEXT CHECK (git_op IN ('pull','checkout','tag')),
+        git_ref TEXT,
+        x INTEGER NOT NULL DEFAULT 0,
+        y INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (profile_id, node_key)
+    );
+    INSERT INTO pipeline_nodes_new (id, profile_id, node_key, title, kind, engine_step, executor,
+        environment, working_dir, commands, depends_on, parallel, timeout_secs, retry_limit,
+        condition, requires_approval, touches_destination, x, y)
+    SELECT id, profile_id, node_key, title, kind, engine_step, executor,
+        environment, working_dir, commands, depends_on, parallel, timeout_secs, retry_limit,
+        condition, requires_approval, touches_destination, x, y FROM pipeline_nodes;
+    DROP TABLE pipeline_nodes;
+    ALTER TABLE pipeline_nodes_new RENAME TO pipeline_nodes;
+    -- O índice acompanha a tabela: DROP leva o índice embora com ela.
+    CREATE INDEX IF NOT EXISTS idx_pipeline_nodes_profile ON pipeline_nodes(profile_id, x, y);
+    PRAGMA foreign_keys=ON;
+    "#,
+    // v9 — a imagem que estava no ar antes de uma corrida com executor Docker. A
+    // reversão de um container não tem symlink para trocar: o que precisa voltar ao
+    // lugar é a imagem, e ela só pode vir de onde foi lida — o `ANTERIOR:` que o
+    // próprio roteiro imprimiu durante a corrida. Guardada numa coluna própria em vez
+    // de `previous_release` porque as duas coisas voltam juntas numa publicação com
+    // releases: um caminho e um digest, cada um com o seu mecanismo de retorno.
+    r#"
+    ALTER TABLE deploy_runs ADD COLUMN previous_image TEXT;
+    "#,
 ];
 
 pub fn init(app: &tauri::AppHandle) -> Result<Connection, String> {
@@ -764,7 +825,8 @@ const PROFILE_COLUMNS: &str = "p.id, p.project_id, p.name, p.server_id, s.name A
      s.environment AS server_environment, p.strategy, p.git_branch, p.remote_path, p.include_paths, \
      p.exclude_paths, p.prepare_commands, p.build_commands, p.restart_commands, p.health_checks, \
      p.rollback_commands, p.secret_keys, p.backup_enabled, p.releases_enabled, p.delete_extras, \
-     p.step_timeout_secs, p.is_default, p.created_at, p.updated_at, p.test_commands, p.version";
+     p.step_timeout_secs, p.is_default, p.created_at, p.updated_at, p.test_commands, p.version, \
+     p.runtime, p.image_name, p.dockerfile, p.compose_file, p.service_name, p.publish_ports";
 
 fn json_list(raw: &str) -> Vec<String> {
     serde_json::from_str(raw).unwrap_or_default()
@@ -807,7 +869,61 @@ fn row_to_profile(row: &Row) -> rusqlite::Result<DeployProfile> {
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         version: row.get("version")?,
+        runtime: row.get("runtime")?,
+        image_name: row.get("image_name")?,
+        dockerfile: row.get("dockerfile")?,
+        compose_file: row.get("compose_file")?,
+        service_name: row.get("service_name")?,
+        publish_ports: json_list(row.get::<_, String>("publish_ports")?.as_str()),
     })
+}
+
+/// O que o executor escolhido realmente lê. Guardar um Dockerfile numa definição
+/// PM2 faria o retrato da versão afirmar que a execução tem algo que ela não tem.
+struct ExecutorGuardado {
+    runtime: String,
+    imagem: Option<String>,
+    dockerfile: Option<String>,
+    compose_file: Option<String>,
+    servico: Option<String>,
+    portas: Vec<String>,
+}
+
+fn guardar_executor(input: &DeployProfileInput) -> ExecutorGuardado {
+    let runtime = input
+        .runtime
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let (imagem, dockerfile, compose_file, servico) = match runtime.as_str() {
+        "docker" => (
+            clean_optional(&input.image_name),
+            clean_optional(&input.dockerfile),
+            None,
+            clean_optional(&input.service_name),
+        ),
+        "compose" => (
+            None,
+            None,
+            clean_optional(&input.compose_file),
+            clean_optional(&input.service_name),
+        ),
+        "pm2" => (None, None, None, clean_optional(&input.service_name)),
+        _ => (None, None, None, None),
+    };
+    let portas = match runtime.as_str() {
+        "docker" => input.publish_ports.clone().unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    ExecutorGuardado {
+        runtime,
+        imagem,
+        dockerfile,
+        compose_file,
+        servico,
+        portas,
+    }
 }
 
 fn exists(conn: &Connection, table: &str, id: i64, label: &str) -> Result<(), String> {
@@ -895,6 +1011,12 @@ fn spec_da_definicao(p: &DeployProfile, nodes: &[PipelineNode]) -> String {
         "releases": p.releases_enabled,
         "apagarExcedentes": p.delete_extras,
         "prazoPorEtapaSegundos": p.step_timeout_secs,
+        "executor": p.runtime,
+        "imagem": p.image_name,
+        "dockerfile": p.dockerfile,
+        "arquivoCompose": p.compose_file,
+        "servico": p.service_name,
+        "portas": p.publish_ports,
         "nos": nodes,
     });
     serde_json::to_string(&mapa).unwrap_or_else(|_| "{}".to_string())
@@ -980,6 +1102,15 @@ pub fn upsert_deploy_profile(
     let tests = to_json_list(&input.test_commands)?;
     let keys = to_json_list(&input.secret_keys)?;
     let branch = clean_optional(&input.git_branch);
+    let exec = guardar_executor(input);
+    let portas = to_json_list(&exec.portas)?;
+    let (runtime, imagem, dockerfile, compose_file, servico) = (
+        exec.runtime,
+        exec.imagem,
+        exec.dockerfile,
+        exec.compose_file,
+        exec.servico,
+    );
 
     match input.id {
         Some(id) => {
@@ -991,8 +1122,9 @@ pub fn upsert_deploy_profile(
                      restart_commands = ?11, health_checks = ?12, rollback_commands = ?13, \
                      secret_keys = ?14, backup_enabled = ?15, releases_enabled = ?16, \
                      delete_extras = ?17, step_timeout_secs = ?18, is_default = ?19, updated_at = ?20, \
-                     test_commands = ?21, version = version + 1 \
-                     WHERE id = ?22",
+                     test_commands = ?21, runtime = ?22, image_name = ?23, dockerfile = ?24, \
+                     compose_file = ?25, service_name = ?26, publish_ports = ?27, version = version + 1 \
+                     WHERE id = ?28",
                     rusqlite::params![
                         input.project_id,
                         input.name.trim(),
@@ -1015,6 +1147,12 @@ pub fn upsert_deploy_profile(
                         input.is_default as i64,
                         now,
                         tests,
+                        runtime,
+                        imagem,
+                        dockerfile,
+                        compose_file,
+                        servico,
+                        portas,
                         id
                     ],
                 )
@@ -1031,8 +1169,9 @@ pub fn upsert_deploy_profile(
                 "INSERT INTO deploy_profiles (project_id, name, server_id, strategy, git_branch, \
                  remote_path, include_paths, exclude_paths, prepare_commands, build_commands, \
                  restart_commands, health_checks, rollback_commands, secret_keys, backup_enabled, \
-                 releases_enabled, delete_extras, step_timeout_secs, is_default, created_at, updated_at, test_commands) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?20, ?21)",
+                 releases_enabled, delete_extras, step_timeout_secs, is_default, created_at, updated_at, test_commands, \
+                 runtime, image_name, dockerfile, compose_file, service_name, publish_ports) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
                     rusqlite::params![
                         input.project_id,
                         input.name.trim(),
@@ -1054,7 +1193,13 @@ pub fn upsert_deploy_profile(
                         input.step_timeout_secs,
                         input.is_default as i64,
                         now,
-                        tests
+                        tests,
+                        runtime,
+                        imagem,
+                        dockerfile,
+                        compose_file,
+                        servico,
+                        portas
                     ],
             )
             .map_err(|e| {
@@ -1098,8 +1243,8 @@ pub fn set_default_deploy_profile(conn: &Connection, id: i64) -> Result<DeployPr
 // ---------- nós do grafo (plano CI/CD, etapa 3) ----------
 
 const NODE_COLUMNS: &str = "id, profile_id, node_key, title, kind, engine_step, executor, \
-     environment, working_dir, commands, depends_on, parallel, timeout_secs, retry_limit, \
-     condition, requires_approval, touches_destination, x, y";
+     environment, working_dir, commands, git_op, git_ref, depends_on, parallel, timeout_secs, \
+     retry_limit, condition, requires_approval, touches_destination, x, y";
 
 fn row_to_node(row: &Row) -> rusqlite::Result<PipelineNode> {
     let commands: String = row.get("commands")?;
@@ -1115,6 +1260,8 @@ fn row_to_node(row: &Row) -> rusqlite::Result<PipelineNode> {
         environment: row.get("environment")?,
         working_dir: row.get("working_dir")?,
         commands: json_list(&commands),
+        git_op: row.get("git_op")?,
+        git_ref: row.get("git_ref")?,
         depends_on: json_list(&depends),
         parallel: row.get("parallel")?,
         timeout_secs: row.get("timeout_secs")?,
@@ -1167,11 +1314,17 @@ pub fn replace_pipeline_nodes(
             "comando" => node.executor(),
             _ => "local".to_string(),
         };
+        // Só o nó `git` declara operação e referência: o que sobrou de um tipo que
+        // mudou na tela não pode continuar gravado como se fizesse parte da definição.
+        let (git_op, git_ref) = match node.kind().as_str() {
+            "git" => (Some(node.git_op()), clean_optional(&node.git_ref)),
+            _ => (None, None),
+        };
         conn.execute(
             "INSERT INTO pipeline_nodes (profile_id, node_key, title, kind, engine_step, executor, \
-             environment, working_dir, commands, depends_on, parallel, timeout_secs, retry_limit, \
-             condition, requires_approval, touches_destination, x, y) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+             environment, working_dir, commands, git_op, git_ref, depends_on, parallel, timeout_secs, \
+             retry_limit, condition, requires_approval, touches_destination, x, y) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
             rusqlite::params![
                 profile_id,
                 node.node_key.trim(),
@@ -1182,6 +1335,8 @@ pub fn replace_pipeline_nodes(
                 clean_optional(&node.environment),
                 clean_optional(&node.working_dir),
                 to_json_list(&node.commands())?,
+                git_op,
+                git_ref,
                 to_json_list(&node.depends_on())?,
                 node.parallel.unwrap_or(false) as i64,
                 node.timeout_secs.unwrap_or(0),
@@ -1341,11 +1496,12 @@ pub fn finish_run(
     status: &str,
     release_dir: Option<&str>,
     previous_release: Option<&str>,
+    previous_image: Option<&str>,
     detail: Option<&str>,
 ) -> Result<(), String> {
     conn.execute(
-        "UPDATE deploy_runs SET status = ?1, finished_at = ?2, release_dir = ?3, previous_release = ?4, detail = ?5 WHERE id = ?6",
-        rusqlite::params![status, now_rfc3339(), release_dir, previous_release, detail, run_id],
+        "UPDATE deploy_runs SET status = ?1, finished_at = ?2, release_dir = ?3, previous_release = ?4, previous_image = ?5, detail = ?6 WHERE id = ?7",
+        rusqlite::params![status, now_rfc3339(), release_dir, previous_release, previous_image, detail, run_id],
     )
     .map_err(|e| format!("falha ao encerrar o registro do deploy: {e}"))?;
     Ok(())
@@ -1378,6 +1534,7 @@ fn row_to_run(row: &Row) -> rusqlite::Result<DeployRun> {
         finished_at: row.get("finished_at")?,
         release_dir: row.get("release_dir")?,
         previous_release: row.get("previous_release")?,
+        previous_image: row.get("previous_image")?,
         detail: row.get("detail")?,
         definition_version: row.get("definition_version")?,
         destination: row.get("destination")?,
@@ -1388,7 +1545,7 @@ fn row_to_run(row: &Row) -> rusqlite::Result<DeployRun> {
 }
 
 const RUN_SELECT: &str = "r.id, r.profile_id, pr.name AS project_name, s.name AS server_name, p.strategy, \
-     r.status, r.started_at, r.finished_at, r.release_dir, r.previous_release, r.detail, \
+     r.status, r.started_at, r.finished_at, r.release_dir, r.previous_release, r.previous_image, r.detail, \
      r.definition_version, r.destination, r.environment, r.commit_sha";
 
 const RUN_FROM: &str = "FROM deploy_runs r \
@@ -1578,6 +1735,14 @@ mod tests {
             delete_extras: false,
             step_timeout_secs: 900,
             is_default: true,
+            // O molde é sem executor de runtime: as quinze etapas continuam exatamente
+            // como eram, e quem quer Docker/Compose/PM2 declara isso no teste.
+            runtime: None,
+            image_name: None,
+            dockerfile: None,
+            compose_file: None,
+            service_name: None,
+            publish_ports: None,
         }
     }
 
@@ -1888,6 +2053,314 @@ mod tests {
         assert!(get_deploy_profile(&conn, salvo.id).is_ok());
     }
 
+    /// A base como a v7 a deixou, e não há migração simulada sem ela: aqui o `CHECK`
+    /// do nó ainda recusa `git` e o modelo não tem nenhuma coluna de executor. Se a
+    /// v8 fosse escrita em cima do esquema de hoje ela só acrescentaria colunas, e o
+    /// que importa conferir é justamente o desenho antigo sobreviver à troca de tabela.
+    const ESQUEMA_V7: &str = "PRAGMA foreign_keys=OFF;
+        DELETE FROM pipeline_revisions;
+        DROP TABLE pipeline_nodes;
+        DROP TABLE deploy_profiles;
+        CREATE TABLE deploy_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            server_id INTEGER REFERENCES servers(id) ON DELETE CASCADE,
+            strategy TEXT NOT NULL CHECK (strategy IN ('sftp','git','artifacts','script','docker')),
+            git_branch TEXT,
+            remote_path TEXT NOT NULL,
+            include_paths TEXT NOT NULL DEFAULT '[]',
+            exclude_paths TEXT NOT NULL DEFAULT '[]',
+            prepare_commands TEXT NOT NULL DEFAULT '[]',
+            build_commands TEXT NOT NULL DEFAULT '[]',
+            restart_commands TEXT NOT NULL DEFAULT '[]',
+            health_checks TEXT NOT NULL DEFAULT '[]',
+            rollback_commands TEXT NOT NULL DEFAULT '[]',
+            secret_keys TEXT NOT NULL DEFAULT '[]',
+            backup_enabled INTEGER NOT NULL DEFAULT 1,
+            releases_enabled INTEGER NOT NULL DEFAULT 0,
+            delete_extras INTEGER NOT NULL DEFAULT 0,
+            step_timeout_secs INTEGER NOT NULL DEFAULT 600,
+            is_default INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            test_commands TEXT NOT NULL DEFAULT '[]',
+            version INTEGER NOT NULL DEFAULT 1,
+            UNIQUE (project_id, name)
+        );
+        CREATE TABLE pipeline_nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id INTEGER NOT NULL REFERENCES deploy_profiles(id) ON DELETE CASCADE,
+            node_key TEXT NOT NULL,
+            title TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('motor','comando','aprovacao')),
+            engine_step INTEGER,
+            executor TEXT NOT NULL DEFAULT 'local' CHECK (executor IN ('local','ssh')),
+            environment TEXT,
+            working_dir TEXT,
+            commands TEXT NOT NULL DEFAULT '[]',
+            depends_on TEXT NOT NULL DEFAULT '[]',
+            parallel INTEGER NOT NULL DEFAULT 0,
+            timeout_secs INTEGER NOT NULL DEFAULT 0,
+            retry_limit INTEGER NOT NULL DEFAULT 0,
+            condition TEXT,
+            requires_approval INTEGER NOT NULL DEFAULT 0,
+            touches_destination INTEGER NOT NULL DEFAULT 0,
+            x INTEGER NOT NULL DEFAULT 0,
+            y INTEGER NOT NULL DEFAULT 0,
+            UNIQUE (profile_id, node_key)
+        );
+        CREATE INDEX idx_pipeline_nodes_profile ON pipeline_nodes(profile_id, x, y);
+        -- O histórico da v7 já tinha a procedência, mas nenhuma coluna de imagem: é
+        -- ela que a v9 acrescenta, e recriar a tabela aqui é o que impede a base
+        -- antiga de um teste já trazer a resposta da migração.
+        DELETE FROM deploy_run_steps;
+        DROP TABLE deploy_runs;
+        CREATE TABLE deploy_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id INTEGER NOT NULL REFERENCES deploy_profiles(id) ON DELETE CASCADE,
+            status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','success','failed','cancelled')),
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            release_dir TEXT,
+            previous_release TEXT,
+            detail TEXT,
+            definition_version INTEGER,
+            destination TEXT,
+            environment TEXT,
+            commit_sha TEXT
+        );
+        CREATE INDEX idx_runs_started ON deploy_runs(started_at DESC);
+        PRAGMA foreign_keys=ON;";
+
+    #[test]
+    fn a_v8_alarga_o_check_do_no_sem_perder_o_desenho_salvo() {
+        let conn = mem_db();
+        conn.execute_batch(ESQUEMA_V7).unwrap();
+        conn.pragma_update(None, "user_version", 7).unwrap();
+
+        let projeto = insert_project(&conn, "site", "C:/projetos/site", true, None, None).unwrap();
+        let agora = now_rfc3339();
+        conn.execute(
+            "INSERT INTO deploy_profiles (project_id, name, server_id, strategy, remote_path, \
+             created_at, updated_at) VALUES (?1, 'api', NULL, 'script', '/srv/api', ?2, ?2)",
+            rusqlite::params![projeto.id, agora],
+        )
+        .unwrap();
+        let modelo_id: i64 = conn
+            .query_row("SELECT id FROM deploy_profiles WHERE name = 'api'", [], |r| r.get(0))
+            .unwrap();
+        // um grafo desenhado na v7: dois nós, com aresta e executor
+        conn.execute(
+            "INSERT INTO pipeline_nodes (profile_id, node_key, title, kind, executor, commands, \
+             depends_on, touches_destination, x, y) \
+             VALUES (?1, 'prepara', 'Preparo', 'comando', 'ssh', '[\"npm ci\"]', '[]', 1, 10, 20)",
+            [modelo_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO pipeline_nodes (profile_id, node_key, title, kind, engine_step, depends_on, x, y) \
+             VALUES (?1, 'envio', 'Envio', 'motor', 10, '[\"prepara\"]', 30, 20)",
+            [modelo_id],
+        )
+        .unwrap();
+
+        // na base antiga o tipo novo não entra — é exatamente por isso que a tabela
+        // precisa ser reconstruída, e não só completada com ALTER
+        let recusa_antiga = conn.execute(
+            "INSERT INTO pipeline_nodes (profile_id, node_key, title, kind) VALUES (?1, 'marca', 'Marca', 'git')",
+            [modelo_id],
+        );
+        assert!(recusa_antiga.unwrap_err().to_string().contains("CHECK"));
+
+        migrate(&conn).unwrap();
+
+        let lidos = list_pipeline_nodes(&conn, modelo_id).unwrap();
+        assert_eq!(lidos.len(), 2, "a reconstrução perdeu nós");
+        assert_eq!(lidos[0].node_key, "prepara");
+        assert_eq!(lidos[0].executor, "ssh");
+        assert_eq!(lidos[0].commands, vec!["npm ci".to_string()]);
+        assert!(lidos[0].touches_destination);
+        assert_eq!(lidos[1].depends_on, vec!["prepara".to_string()]);
+        assert_eq!(lidos[1].engine_step, Some(10));
+        // e um nó que não é git não tem operação nem referência
+        assert_eq!(lidos[0].git_op, None);
+        assert_eq!(lidos[0].git_ref, None);
+
+        // o modelo antigo ganha as colunas vazias, e vazio quer dizer nenhum executor
+        let velho = get_deploy_profile(&conn, modelo_id).unwrap();
+        assert_eq!(velho.runtime, "");
+        assert_eq!(velho.image_name, None);
+        assert!(velho.publish_ports.is_empty());
+        assert_eq!(velho.name, "api");
+        assert_eq!(velho.strategy, "script");
+
+        let fk: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+        assert_eq!(fk, 1, "a migração deixou as chaves desligadas");
+
+        // agora sim o tipo novo entra, pela porta de fora: a mesma gravação da tela
+        let mut marca = PipelineNodeInput {
+            node_key: "marca".into(),
+            title: "Marca o lançamento".into(),
+            kind: "git".into(),
+            engine_step: None,
+            executor: Some("local".into()),
+            environment: None,
+            working_dir: None,
+            commands: None,
+            git_op: Some(" TAG ".into()),
+            git_ref: Some(" v1.2.0 ".into()),
+            depends_on: None,
+            parallel: Some(false),
+            timeout_secs: Some(0),
+            retry_limit: Some(0),
+            condition: None,
+            requires_approval: Some(false),
+            x: Some(50),
+            y: Some(20),
+        };
+        let salvos = replace_pipeline_nodes(&conn, modelo_id, &[marca.clone()]).unwrap();
+        assert_eq!(salvos.len(), 1);
+        let no_git = &salvos[0];
+        assert_eq!(no_git.kind, "git");
+        assert_eq!(no_git.git_op.as_deref(), Some("tag"));
+        assert_eq!(no_git.git_ref.as_deref(), Some("v1.2.0"));
+        assert_eq!(no_git.executor, "local", "o nó git roda nesta máquina");
+        assert!(!no_git.touches_destination);
+        assert!(no_git.commands.is_empty(), "nó git não tem comandos soltos");
+
+        // e o executor do modelo é salvo lido de volta, com as portas. Docker, Compose
+        // e PM2 rodam no destino, e o destino de um executor é o servidor: o molde
+        // abaixo é cadastrado sobre um.
+        let web = insert_server(&conn, &sample_input(), "manual").unwrap();
+        let mut com_docker = profile_input(projeto.id, web.id);
+        com_docker.name = "com docker".into();
+        com_docker.strategy = "artifacts".into();
+        com_docker.remote_path = "/srv/api".into();
+        com_docker.releases_enabled = false;
+        com_docker.runtime = Some(" docker ".into());
+        com_docker.image_name = Some(" meuapp ".into());
+        com_docker.service_name = Some(" api ".into());
+        com_docker.publish_ports = Some(vec![" 8080:80 ".into(), String::new()]);
+        com_docker.compose_file = Some("docker-compose.yml".into());
+        let docker = upsert_deploy_profile(&conn, &com_docker).unwrap();
+        assert_eq!(docker.runtime, "docker");
+        assert_eq!(docker.image_name.as_deref(), Some("meuapp"));
+        assert_eq!(docker.service_name.as_deref(), Some("api"));
+        assert_eq!(docker.publish_ports, vec!["8080:80".to_string()]);
+        // o arquivo do compose não é do executor docker: não fica guardado
+        assert_eq!(docker.compose_file, None);
+
+        // o retrato da versão conta o executor, porque é parte do que foi executado
+        let retratos = list_revisions(&conn, docker.id).unwrap();
+        assert_eq!(retratos[0].spec["executor"], "docker");
+        assert_eq!(retratos[0].spec["portas"], serde_json::json!(["8080:80"]));
+
+        // PM2 não tem imagem: o que sobra de outro executor não fica guardado. E as
+        // portas nem chegam ao gravador — a checagem do PM2 recusa porta declarada.
+        let mut com_pm2 = com_docker.clone();
+        com_pm2.id = Some(docker.id);
+        com_pm2.runtime = Some("pm2".into());
+        com_pm2.service_name = Some("api".into());
+        com_pm2.publish_ports = None;
+        let pm2 = upsert_deploy_profile(&conn, &com_pm2).unwrap();
+        assert_eq!(pm2.runtime, "pm2");
+        assert_eq!(pm2.image_name, None);
+        assert!(pm2.publish_ports.is_empty());
+        assert_eq!(pm2.dockerfile, None);
+        assert_eq!(pm2.service_name.as_deref(), Some("api"));
+        let mut porta_no_pm2 = com_pm2.clone();
+        porta_no_pm2.publish_ports = Some(vec!["8080:80".into()]);
+        assert!(upsert_deploy_profile(&conn, &porta_no_pm2)
+            .unwrap_err()
+            .contains("próprio app"));
+        let mut sem_app = com_pm2.clone();
+        sem_app.service_name = None;
+        assert!(upsert_deploy_profile(&conn, &sem_app)
+            .unwrap_err()
+            .contains("pm2 list"));
+
+        // E um executor sem servidor não passa pela gravação: o modelo publica nesta
+        // máquina, e não há docker/pm2 aqui para subir nada.
+        let mut docker_local = com_docker.clone();
+        docker_local.id = None;
+        docker_local.name = "docker nesta máquina".into();
+        docker_local.server_id = None;
+        docker_local.remote_path = "C:/publicados/api".into();
+        assert!(upsert_deploy_profile(&conn, &docker_local)
+            .unwrap_err()
+            .contains("nesta máquina"));
+
+        // e o nó git sem referência é recusado pelo validador, não pelo banco
+        marca.git_ref = None;
+        let erro = marca.validate().unwrap_err();
+        assert!(erro.contains("referência"), "{erro}");
+    }
+
+    #[test]
+    fn a_v9_grava_a_imagem_que_a_reversao_de_docker_precisa_encontrar() {
+        let conn = mem_db();
+        conn.execute_batch(ESQUEMA_V7).unwrap();
+        // A base levada até a v8 de verdade, com o próprio script da v8: assim o
+        // histórico fica na forma que ele tinha antes desta etapa — com procedência,
+        // sem imagem anterior.
+        conn.execute_batch(MIGRATIONS[7]).unwrap();
+        conn.pragma_update(None, "user_version", 8).unwrap();
+
+        let projeto = insert_project(&conn, "site", "C:/projetos/site", true, None, None).unwrap();
+        let agora = now_rfc3339();
+        conn.execute(
+            "INSERT INTO deploy_profiles (project_id, name, server_id, strategy, remote_path, \
+             created_at, updated_at) VALUES (?1, 'api', NULL, 'script', '/srv/api', ?2, ?2)",
+            rusqlite::params![projeto.id, agora],
+        )
+        .unwrap();
+        let modelo_id: i64 = conn
+            .query_row("SELECT id FROM deploy_profiles WHERE name = 'api'", [], |r| r.get(0))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO deploy_runs (profile_id, status, started_at, release_dir, previous_release, detail) \
+             VALUES (?1, 'success', ?2, '/srv/api/2026', '2025', 'rodou')",
+            rusqlite::params![modelo_id, agora],
+        )
+        .unwrap();
+        let execucao = conn.last_insert_rowid();
+
+        // Sem a coluna não há onde registrar a imagem: é isto que a reversão de um
+        // container procuraria e não encontraria em uma base antiga.
+        assert!(conn
+            .execute("UPDATE deploy_runs SET previous_image = 'sha256:abc'", [])
+            .is_err());
+
+        migrate(&conn).unwrap();
+
+        // A execução sobrevive, e a imagem anterior dela é `None` — nada lido, nada
+        // inventado: um histórico antigo não passa a ter um destino de reversão.
+        let antes = get_run(&conn, execucao).unwrap();
+        assert_eq!(antes.status, "success");
+        assert_eq!(antes.previous_release.as_deref(), Some("2025"));
+        assert_eq!(antes.previous_image, None);
+
+        finish_run(
+            &conn,
+            execucao,
+            "success",
+            Some("/srv/api/2026"),
+            Some("2025"),
+            Some("sha256:abc123"),
+            Some("site · running"),
+        )
+        .unwrap();
+        let depois = get_run(&conn, execucao).unwrap();
+        assert_eq!(depois.previous_image.as_deref(), Some("sha256:abc123"));
+        assert_eq!(depois.detail.as_deref(), Some("site · running"));
+
+        // E um encerramento sem imagem escreve vazio de propósito: uma corrida que não
+        // trocou container nenhum não pode herdar a imagem da corrida de antes.
+        finish_run(&conn, execucao, "failed", None, None, None, Some("falhou")).unwrap();
+        assert_eq!(get_run(&conn, execucao).unwrap().previous_image, None);
+    }
+
     #[test]
     fn modelo_de_deploy_rejeita_entradas_perigosas() {
         let conn = mem_db();
@@ -2193,6 +2666,8 @@ mod tests {
             environment: None,
             working_dir: None,
             commands: Some(vec!["echo pronto".into()]),
+            git_op: None,
+            git_ref: None,
             depends_on: Some(deps.iter().map(|d| d.to_string()).collect()),
             parallel: Some(false),
             timeout_secs: Some(0),

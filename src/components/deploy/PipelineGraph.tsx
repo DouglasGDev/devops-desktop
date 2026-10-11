@@ -21,12 +21,14 @@ const KIND_FILL: Record<NodeKind, string> = {
   motor: "fill-sky-500/10 dark:fill-sky-500/15",
   comando: "fill-violet-500/10 dark:fill-violet-500/15",
   aprovacao: "fill-amber-500/10 dark:fill-amber-500/15",
+  git: "fill-lime-500/10 dark:fill-lime-500/15",
 };
 
 const KIND_STROKE: Record<NodeKind, string> = {
   motor: "stroke-sky-500/70",
   comando: "stroke-violet-500/70",
   aprovacao: "stroke-amber-500/70",
+  git: "stroke-lime-500/70",
 };
 
 const STATUS_STROKE: Record<StepStatus, string> = {
@@ -76,6 +78,8 @@ function comoEntrada(no: PipelineNode): PipelineNodeInput {
     environment: no.environment,
     workingDir: no.workingDir,
     commands: no.commands,
+    gitOp: no.gitOp,
+    gitRef: no.gitRef,
     dependsOn: no.dependsOn,
     parallel: no.parallel,
     timeoutSecs: no.timeoutSecs,
@@ -364,7 +368,9 @@ export function PipelineGraph({
                       ? `${no.engineStep ?? "—"}. ${(engineSteps.find((s) => s.position === no.engineStep)?.name ?? "sem etapa").slice(0, 22)}`
                       : no.kind === "aprovacao"
                         ? "espera decisão"
-                        : `${no.executor} · ${(no.commands ?? []).filter((c) => c.trim()).length} comando(s)`}
+                        : no.kind === "git"
+                          ? `git · ${no.gitOp ?? "sem operação"}`
+                          : `${no.executor} · ${(no.commands ?? []).filter((c) => c.trim()).length} comando(s)`}
                   </text>
                   {no.requiresApproval || no.kind === "aprovacao" ? (
                     <circle cx={NODE_W - 14} cy={14} r={4} className="fill-amber-500" />
@@ -425,12 +431,16 @@ export function PipelineGraph({
                     kind,
                     engineStep: kind === "motor" ? (selecionado.engineStep ?? 1) : null,
                     commands: kind === "comando" ? (selecionado.commands ?? [""]) : [],
+                    executor: kind === "git" ? "local" : selecionado.executor,
+                    gitOp: kind === "git" ? (selecionado.gitOp ?? "pull") : null,
+                    gitRef: null,
                   });
                 }}
               >
                 <option value="motor">etapa do motor</option>
                 <option value="comando">comando</option>
                 <option value="aprovacao">aprovação</option>
+                <option value="git">git</option>
               </Select>
             </Field>
             {selecionado.kind === "motor" ? (
@@ -456,6 +466,23 @@ export function PipelineGraph({
                   <option value="ssh" disabled={!hasServer}>
                     no servidor
                   </option>
+                </Select>
+              </Field>
+            ) : selecionado.kind === "git" ? (
+              <Field label="Operação do Git">
+                <Select
+                  value={selecionado.gitOp ?? "pull"}
+                  onChange={(e) => {
+                    const op = e.target.value;
+                    alterar(selecionado.nodeKey, {
+                      gitOp: op,
+                      gitRef: op === "pull" ? null : (selecionado.gitRef ?? ""),
+                    });
+                  }}
+                >
+                  <option value="pull">pull</option>
+                  <option value="checkout">checkout</option>
+                  <option value="tag">tag</option>
                 </Select>
               </Field>
             ) : (
@@ -490,6 +517,30 @@ export function PipelineGraph({
                     type="number"
                     value={selecionado.timeoutSecs ?? 0}
                     onChange={(e) => alterar(selecionado.nodeKey, { timeoutSecs: Number(e.target.value) })}
+                  />
+                </Field>
+              </>
+            ) : null}
+
+            {selecionado.kind === "git" ? (
+              <>
+                {selecionado.gitOp !== "pull" ? (
+                  <Field label={selecionado.gitOp === "tag" ? "Tag a criar" : "Ramo a alternar"}>
+                    <Input
+                      spellCheck={false}
+                      className="font-mono text-xs"
+                      value={selecionado.gitRef ?? ""}
+                      onChange={(e) => alterar(selecionado.nodeKey, { gitRef: e.target.value })}
+                      placeholder={selecionado.gitOp === "tag" ? "v1.0.0" : "main"}
+                    />
+                  </Field>
+                ) : null}
+                <Field label="Pasta no projeto">
+                  <Input
+                    spellCheck={false}
+                    className="font-mono text-xs"
+                    value={selecionado.workingDir ?? ""}
+                    onChange={(e) => alterar(selecionado.nodeKey, { workingDir: e.target.value })}
                   />
                 </Field>
               </>

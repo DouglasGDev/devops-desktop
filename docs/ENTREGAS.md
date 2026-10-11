@@ -2,16 +2,17 @@
 
 Documento de retomada. Ele não substitui o [README](../README.md) (uso do aplicativo) nem o
 [SPEC.md](SPEC.md) (o que foi pedido); ele registra **o que já está pronto, onde está o código, como se prova
-cada parte e o que ainda não existe**. Escrito em 2026-10-10 sobre o trabalho do modo sem servidor (`66da3a7`) mais a
-**etapa 2 do plano CI/CD** — o contrato central de pipeline (`4f005ee`) e a licença de contribuição (`df51de1`), que são
-o estado destas linhas.
+cada parte e o que ainda não existe**. A base destas linhas é o modo sem servidor (`66da3a7`), a **etapa 2 do plano
+CI/CD** — o contrato central de pipeline (`4f005ee`) e a licença de contribuição (`df51de1`) —, a **etapa 3**, o
+construtor visual do grafo (`23beec2`), e a **etapa 4**, os executores de runtime (Docker, Docker Compose, PM2) com o
+git como passo do pipeline, registrada aqui em 2026-10-11.
 
 ## 1. Retomar em três passos
 
 ```bash
 node ./node_modules/typescript/bin/tsc --noEmit     # tipos do frontend
 npm run build                                        # tsc + bundle
-(cd src-tauri && cargo test)                         # 229 testes de backend
+(cd src-tauri && cargo test)                         # 261 testes de backend
 (cd src-tauri && cargo clippy --all-targets -- -D warnings)
 node scripts/confira-repo.ts                         # o comparador remoto↔pasta, 9 formas reais de URL
 
@@ -38,19 +39,24 @@ Armadilhas já conhecidas nesta máquina:
 
 | Checagem | Resultado real |
 | --- | --- |
-| `tsc --noEmit` | saída vazia, código 0 |
-| `npm run build` | `✓ 83 modules transformed`; `dist/assets/index-DT3bM82P.js` 861.54 kB (gzip 234.38 kB) e `index-CVC3fftf.css` 60.42 kB; único aviso é o de chunk > 500 kB. Na rodada das 01:04 o tempo lido foi `✓ built in 6.03s`; a rodada final (01:22) deu **o mesmo hash**, porque a fonte do frontend não mudou entre as duas |
-| `cargo test` (todos os alvos) | `229 passed; 0 failed; 0 ignored` em `devops_desktop_lib` (16,91 s, perfil `release`, lido na rodada final depois do rebuild das 01:27); `main.rs` e doc-tests com 0 testes. Na rodada anterior desta sessão: `229 passed` (17,08 s) e, antes da etapa 3, `208 passed` (19,39 s) |
-| `cargo clippy --release --all-targets -- -D warnings` | `Finished \`release\` profile` sem aviso (com `-D warnings`, qualquer aviso derrubaria o comando). Na rodada final, depois do rebuild: código 0, 0,70 s |
-| `node scripts/confira-repo.ts` | `todas as 9 formas conferem`, código 0 |
-| Migração `user_version` 6 no banco real | cabeçalho lido em `AppData/Roaming/com.douglasgdev.devopsdesktop/devops-desktop.db`: `user_version 6`, `page_size 4096`. As colunas novas e a tabela `pipeline_revisions` existem de verdade porque as leituras abaixo as devolveram preenchidas, vindas do mesmo arquivo |
+| `tsc --noEmit` | saída vazia, código 0 (relido às 14:29, depois da última edição de tela) |
+| `npm run build` | `✓ 83 modules transformed`; `dist/assets/index-BC07Lf6F.js` 866.236 B e `index-C6ztCh7A.css` 61.003 B; `✓ built in 6.41s`; único aviso é o de chunk > 500 kB, que é de tamanho de bundle, não de código |
+| `cargo test` (todos os alvos) | **`261 passed; 0 failed; 0 ignored`** em `devops_desktop_lib` (17,90 s, lido na rodada das 14:40 desta sessão); `main.rs` e doc-tests com 0 testes. Histórico das rodadas anteriores: `229 passed` (etapa 3) e `208 passed` (antes da etapa 3) |
+| `cargo clippy --all-targets` | `Finished` sem nenhum aviso — nenhum `#[allow]` foi acrescentado para chegar aí; os avisos que apareceram nesta sessão foram corrigidos na causa (argumentos nomeados do `format!` que sobraram quando o filtro do docker passou a ser quotado) |
+| `node scripts/confira-repo.ts` | `todas as 9 formas conferem`, código 0 (relido hoje) |
+| Migração `user_version` **9** no banco real | o banco de `AppData/Roaming/com.douglasgdev.devopsdesktop/devops-desktop.db` abriu em `user_version 7` e **foi lido de novo em 9** pela janela real desta sessão. Colunas novas conferidas no arquivo: em `deploy_profiles` — `runtime image_name dockerfile compose_file service_name publish_ports`; em `deploy_runs` — `previous_image`; em `pipeline_nodes` — `git_op git_ref`. Os **oito nós da etapa 3 sobreviveram** ao rebuild da tabela `pipeline_nodes` da migração 8 (lido de volta: `validar, git, coleta, preparo, publicar, gate, copia, historico`) |
 | **Fluxo sem servidor na janela real** (CDP, §4.1) | modelo `serverId: null` salvo · pré-vistoria `2 arquivo(s), 72.1 KB` · publicar #1 `success` com as 15 etapas · guarda `.devops-backups/1` com o README antigo **e** o excedente movido · reverter #2 `2 arquivo(s) reposto(s)` (conferido no disco) · publicar #3 `1 copiado · 1 já igual` (CRC32) · destino dentro do projeto **recusado na etapa 1** sem tocar no disco · caminho duplicado recusado (`o projeto já tem um modelo de deploy chamado "…"`) · remover o modelo → `deploy_runs` 5 → 0 e `audit_log` 57 → 58 (o histórico fica na auditoria, como a confirmação diz) · UI do modo local conferida no exe: destino "Nesta máquina (sem SSH)", estratégias só **C**/**D**, rótulo "Guardar o que já está no destino antes de sobrescrever", sem o checkbox de releases, e os quatro diálogos (pré-vistoria → publicar → reverter → remover) lidos na tela |
 | As quatro portas do "o deploy gera o próprio artefato" (exe das 11:01) | **W1** artefatos sem seleção + build gerando `saindo-do-build.txt`: 61 copiados, arquivo conferido no destino · **W2** artefatos declarando `gerado-pela-preparacao.txt` que **ainda não existe**: etapa 4 anuncia, preparação gera, 1 copiado, `success` · **W3** caminho que nenhum comando gera: `failed` na etapa 8 com "depois da preparação não sobrou nenhum arquivo para enviar — confira os caminhos" · **W4** `script`: `success` sem copiar nada (destino ficou vazio, como projetado) |
 | **Contrato de pipeline na janela real** (CDP, etapa 2 do plano CI/CD) | definição criada como **v1** · execução #23 `success` com `definition_version 1`, `environment "local"`, `destination` o caminho absoluto do destino e `commit_sha f40243ff12c2a6…` **igual ao `git rev-parse HEAD`** lido na pasta · editar a definição → **v2**, salvar de novo sem mudar → **v3**, e `pipeline_revisions` devolve os três retratos (`v3`, `v2`, `v1`) em que só o `v2` carrega `exclusao: ["src/index.html"]` — ou seja, o retrato guarda o que mudou, e `variaveis` sai como `[]` porque o retrato não tem valor nenhum · `pipeline_validate` → `definição “Piloto sem servidor” v3 · artifacts · destino C:\… · nesta máquina` · **Repetir** o #23 criou a #24 com `definition_version 3` enquanto a #23 **continua `v1`** (a procedência antiga não é reescrita por edição posterior) · #25 com um arquivo do destino travado por outro processo: `failed` na etapa 9 com `falha ao guardar README.md antes de sobrescrever: O arquivo já está sendo usado por outro processo. (os error 32)`, etapas 10–15 em `waiting`, `pipeline_retry_policy` → `allowed: false` com o motivo, e `pipeline_retry` **recusa a mesma frase sem abrir execução nenhuma** (as execuções param em #27 — não existe #28 de retry) · reversão da #25 → execução própria com `1`, `2`, `11`, `14`, `15` como `done` e `3`–`10`+`12`–`13` como `skipped`, `1 arquivo(s) reposto(s)`, e o `README.md` do destino **conferido no disco** de volta ao conteúdo anterior · execução de 1,5 GB com o aplicativo **fechado à força no meio**: ao reabrir, a #30 está `cancelled` com `interrompida — o aplicativo foi fechado antes de terminar`, a etapa 9 está `failed` com `interrompida — o aplicativo foi fechado`, e a auditoria ganhou a linha `Execuções interrompidas identificadas · 1 execução(ões) e 1 etapa(s) marcadas como interr…` — a varredura rodou no `setup`, não num teste · tela: `v5` no cabeçalho do modelo e no seletor da aba **Deploy**, **Conferir** imprimindo `definição “Piloto sem servidor” v5 · artifacts · destino C:\… · nesta máquina`, **Versões salvas** listando `v5 v4 v3 v2 v1`, histórico com `· v4 · f40243ff` por execução, painel âmbar do **Repetir** mostrando o motivo da recusa lido na janela |
 | **Construtor visual na janela real** (CDP com entrada de mouse real, etapa 3 do plano CI/CD) | clique no nó `preparo` abre o painel dele (`--click-node`, devolve `Nó preparo`) · arraste de `publicar` por (48, 16) → `translate(658, 200)` vira `704, 216`, **salvo** e lido de volta do banco com a mesma posição · **Conferir** imprime `grafo de 8 nó(s) · 6 etapa(s) do motor, 1 de comando, 1 de aprovação` (frase do validador do backend, não da tela) · publicar o grafo inteiro (execução **#33**) → `success`, resumo `grafo · 8 de 8 nós`, oito linhas nomeadas pela **chave do nó** com `touchedDestination` derivado (`false` em validar/git/coleta/preparo/gate, `true` em publicar/copia/historico) e o **modal de aprovação** parado no nó `gate` por 15 s até o **Aprovar** da janela (`04:43:02 → 04:43:17`; a barra de estado da tela mostrava `07 copia aguardando`, `08 historico aguardando` enquanto isso) · trocar o comando do nó `preparo` para `exit 3` na tela e salvar (**v7**) e publicar (**#34**): `preparo failed`, `publicar done` (ramal irmão, dependência dele estava boa), e `gate`, `copia`, `historico` em `skipped` com `uma dependência sua falhou nesta corrida` — cascada de três níveis, nada copiado depois da falha · **Esvaziar** + **Salvar grafo** (**v9**) devolve `Definição voltou à fila de quinze etapas` e publicar (**#35**) escreve as **15 linhas** com `nodeKey` nulo e os nomes da tabela linear, `success` · restaurar o grafo de oito nós → **v10** |
 | **Linhas terminais no binário final** (CDP com entrada de mouse real, depois do rebuild das 01:27) | **Rodar sozinho** no nó `preparo` → modal *Variáveis do nó "preparo"* → **Executar nó** → execução **#38** `success`, e a linha lida de `deploy_run`: `preparo done`, `startedAt 05:31:58Z`, `finishedAt 05:32:02Z`, `message "1 comando(s) nesta máquina"` — com `sleep 4` no lugar do comando, a duração de 4 s é a prova de que o início é real e não a hora da linha anterior. **Rodar sozinho** no nó `gate` → **#39** `success`, linha `gate done` com `message "aprovado na janela"` (`05:33:31Z → 05:33:42Z`, os 11 s sendo o tempo até eu clicar **Aprovar**). Antes disto as duas linhas saíam com a mensagem da fase anterior — `preparo` ainda dizendo `em execução` e o `gate` dizendo `esperando aprovação` (defeito D, §5 item 18). Editar o comando na tela para `echo preparo` e **Salvar grafo** → definição **v12**, lida de volta por `pipeline_nodes` (`commands ["echo preparo"]`, `executor local`, oito nós nas mesmas posições) |
-| Frontend embutido no executável | conferido **dentro da janela**: o pacote das 09:37 servia `index-5zynmBe_.js` enquanto `dist/` já tinha `index-Cko7uGOK.js` (frontend velho dentro de um binário novo). O binário final desta sessão (18.644.480 B, 01:27) serve `/assets/index-DT3bM82P.js` lido de `document.querySelectorAll("script[src]")` na janela aberta, o mesmo hash de `dist/index.html` |
-| Instalador | `npm run tauri build` (01:27, saída 0) → `DevOps Desktop_0.1.0_x64-setup.exe` 4.959.838 B (4.73 MiB) e `DevOps Desktop_0.1.0_x64_en-US.msi` 7.151.616 B (6.82 MiB) |
+| **Git como passo do pipeline na janela real** (CDP, etapa 4 do plano CI/CD) | nó `marca-tag` de tipo **git** criado na aba **grafo** e salvo → **Conferir** devolve `grafo de 9 nó(s) · 6 etapa(s) do motor, 1 de comando, 1 de aprovação, 1 de git`; publicar → execução **#42** com a linha `03 + git tag v0.0.1-janela` no log e a mensagem da corrida **"tag v0.0.1-janela criada nesta máquina — sem remoto cadastrado"** (a resposta é do próprio git, lida em `git tag -l` na pasta do piloto: o commit `f40243f` estava etiquetado de verdade) · execução **#43** com nó de `checkout` → mensagem **"em main"** · escrever `../fora` no campo **Pasta no projeto** do nó git e **Conferir** → recusa `nó "marca-tag": a pasta de trabalho deve ser um caminho relativo dentro do projeto`, e o grafo não salva · remover o nó e salvar → `grafo de 8 nó(s) · … 0 de git` (lido de novo no binário das 14:35, com `pipeline_nodes` devolvendo as oito chaves e nenhum `git_op`) |
+| **Executores de runtime na tela** (CDP, janela das 14:05 — mesmo fonte, binário anterior à última linha de tela) | o seletor de executor **não aparece** quando o destino é "nesta máquina" (um executor de runtime é POSIX e roda no servidor — `models.rs` recusa: "…é um executor de runtime e roda no servidor") e **aparece** com um servidor cadastrado, com as opções **Nenhum / Docker / Docker Compose / PM2** · **Docker**: campos *Nome da imagem*, *Dockerfile*, *Nome do container*, *Portas publicadas*; com imagem vazia a tela recusa `o Docker precisa do nome da imagem (ex.: meuapp ou registry.local/meuapp)`; salvo, o perfil 21 ficou `runtime docker, image_name meuapp, service_name site-medicao, publish_ports ["8080:80"], version 1` · **Docker Compose**: exatamente *Arquivo do compose* e *Serviço*, e o salvamento deixou `image_name null, dockerfile null, publish_ports []` — o modelo não herda campo do executor que ele não é · **PM2**: *App no PM2*, recusa `o PM2 precisa do nome do app como ele aparece no pm2 list`, salvo `runtime pm2, service_name api, version 3` · o retrato de versão guarda `executor/imagem/servico/portas` e **Conferir a definição** imprimiu `definição "medição docker" v3 · sftp · destino /srv/medicao · servidor SSH · sem grafo · as quinze etapas do motor, em fila` · tudo que foi criado para medir foi desfeito: modelo 21 removido pela confirmação da tela, servidor temporário apagado (`list_servers` → 0), grafo de volta aos oito nós |
+| **Higiene da tela no binário final** (CDP) | o parágrafo "*Rode a pré-vistoria antes de publicar: ela mostra o que subiria e o que a checagem de segredos encontraria. O botão "Publicar" fica bloqueado até aí.*" **não está mais na tela** (`document.body.innerText` não contém a frase) — ele virou documentação no README §9.6. No lugar ficou o **estado**, no `title` de quem passa por cima do botão, lido no DOM: `span[title="Rode a pré-vistoria antes de publicar"]` envolvendo um botão com `disabled: true`. **Por que no pai e não no botão:** `Button` aplica `disabled:pointer-events-none` (`src/components/ui.tsx:44`), e um botão que não recebe ponteiro não mostra dica nenhuma — medido com `getComputedStyle`: botão `pointerEvents: "none"`, span `pointerEvents: "auto"`. O texto não é mais um só: `motivoPublicar` devolve o motivo do estado atual (sem modelo, pré-vistoria pendente, itens
+bloqueados sem autorização, execução em andamento, pronto). **Na janela só a variante "pré-vistoria pendente" foi lida de
+fato** — as outras quatro são o que o código devolve, e continuam pedindo o aceite visual dele (§6, item 5) |
+| Frontend embutido no executável | conferido **dentro da janela**: o pacote das 09:37 servia `index-5zynmBe_.js` enquanto `dist/` já tinha `index-Cko7uGOK.js` (frontend velho dentro de um binário novo). O binário das **14:55** serve `/assets/index-BC07Lf6F.js` lido de `document.querySelectorAll("script[src]")`, o mesmo hash de `dist/assets/` da rodada das 14:48 — incluindo a tela sem o parágrafo de ajuda |
+| Instalador | `npm run tauri build` (14:55, saída 0) → `DevOps Desktop_0.1.0_x64-setup.exe` 5.002.154 B (4,77 MiB) e `DevOps Desktop_0.1.0_x64_en-US.msi` 7.200.768 B (6,87 MiB) |
 | Executando | `devops-desktop.exe` aberto por `Start-Process`, `MainWindowTitle = "DevOps Desktop — Central de SSH, Git e Deploy"`, `Responding = True`, 10 telas navegáveis por clique |
 | Git | `git push origin main` → `efe551d..23beec2`, saída 0, e `git ls-remote origin refs/heads/main` devolve `23beec23a4e069e2c1adb32560d8b1568876f392`, o mesmo `git rev-parse HEAD` local — etapa 3 pública em <https://github.com/DouglasGDev/devops-desktop> |
 
@@ -58,8 +64,14 @@ O que isso **não** cobre: as asserções automáticas continuam sendo de backen
 janela de verdade, mas quem decide o que está certo a cada leitura sou eu, não uma suíte de testes de UI. O caminho por
 SSH (`server_id` preenchido) **não** foi reexecutado hoje porque não há servidor cadastrado nesta máquina; por isso as
 três correções desta sessão foram escritas só dentro de ramos protegidos por `local_mode()` (ou strategies que já eram
-locais), para não mexer no que não pude medir. O registro de auditoria guarda as execuções de teste (não há como apagar
-linhas de auditoria por desenho).
+locais), para não mexer no que não pude medir. **E o mesmo vale para os executores de runtime da etapa 4**: um executor
+de Docker/Compose/PM2 é um roteiro POSIX que roda **no servidor**, então nenhum `docker build`, `docker compose up` ou
+`pm2 reload` foi executado contra um host real — o que foi medido é o roteiro gerado (teste unitário sobre o texto do
+script), a recusa da tela quando falta campo, e a recusa do validador quando o modelo não tem servidor. A realidade
+desta máquina, lida hoje: `docker` 29.3.1 **existe** mas a daemon do Docker Desktop **não está de pé**
+(`failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine`), e `pm2` **não está instalado**.
+Ou seja: mesmo localmente não haveria como rodar um container para conferir. O registro de auditoria guarda as execuções
+de teste (não há como apagar linhas de auditoria por desenho).
 
 ### 4.1 Como a janela foi dirigida (reproduzível)
 
@@ -74,6 +86,16 @@ node scripts/ponte-cdp.mjs 'const inv=window.__TAURI_INTERNALS__.invoke; return 
 `scripts/ponte-cdp.mjs` roda uma expressão dentro da janela real: dá para clicar (`b.click()`) e chamar qualquer
 comando do backend com o mesmo payload que a interface manda. A porta de debug **só** existe com a variável de
 ambiente acima — o instalador normal não a abre.
+
+Três armadilhas de leitura que já me fizeram tirar conclusão errada da janela (todas custaram chamadas nesta sessão):
+
+- O texto que você passa é **corpo de função** (`async () => { … }`), não expressão: sem `return` o CDP devolve
+  `{"result":{"type":"undefined"}}`, que parece "a janela não respondeu" quando na verdade a sua expressão só não
+  devolveu nada.
+- As views escondidas **continuam montadas**: `document.querySelector("main")` e `body.innerText` misturam o Deploy com
+  a aba Git. Filtro que funciona: `e.offsetParent !== null` por elemento, e ir à aba primeiro clicando no botão dela.
+- Os rótulos no DOM estão **em minúsculo** (`capitalize` é CSS): procurar por `"Deploy"` não acha o botão `"deploy"`.
+  Compare em caixa-insensível.
 
 Para o grafo da aba Deploy, expressão não basta: `setPointerCapture` recusa um ponteiro que o navegador não criou,
 então selecionar e arrastar um nó exige entrada real. O piloto tem três modos para isso, e todos lêem a posição do nó
@@ -172,9 +194,27 @@ node scripts/ponte-cdp.mjs --drag-node publicar 48 16   # arrasta e devolve o tr
   do desenho) e o modal de aprovação com **Aprovar**/**Rejeitar** quando um nó pede autorização. Tudo isso foi lido na
   janela real com entrada de mouse (§2, execuções **#32–#39**, definição **v12**) — inclusive o arraste persistindo no
   banco e a fila de quinze etapas voltando quando o grafo é esvaziado.
+- **Executores de runtime e git como passo** (etapa 4 do plano CI/CD — `src-tauri/src/runtime.rs`, `src-tauri/src/deploy.rs`,
+  `src-tauri/src/models.rs`, `src/components/deploy/{ProfileForm,PipelineGraph}.tsx`): o modelo de deploy passa a dizer
+  **como** o app sobe no servidor, não só **o que** copiar. `runtime` vale `docker`, `compose` ou `pm2` (vazio é o
+  comportamento antigo, arquivo no destino), e as etapas 8 (build), 11 (subir), 12 (verificar) e 13 (reverter) leem o
+  executor do perfil em vez de presumir `systemctl`. **Continua sendo um motor só**: `runtime::Alvo` é derivado da mesma
+  `DeployProfile` que a etapa 1 confere (`Alvo::da_definicao` → `Alvo::conferir`, a mesma cadeia do `pipeline_validate`),
+  e o que muda é o lote POSIX enviado pela stdin da sessão. Nenhum código decide sucesso pelo código de saída: cada
+  roteiro imprime o próprio veredito (`IMAGEM:`, `ANTERIOR:`, `CONTAINER:`, `RAZAO:`) e `runtime::estado_no_ar` lê essa
+  saída — se o container não está `running` com a imagem esperada, a etapa falha com o motivo, e a reversão devolve a
+  imagem anterior (`deploy_runs.previous_image`, coluna da migração 9, exibida no histórico como
+  "imagem anterior …"). O **nó git** (`kind "git"`, migração 8 com `git_op`/`git_ref`) é o quarto tipo do grafo e roda
+  **nesta máquina**, com as operações que o motor realmente tem (`pull`, `checkout`, `tag`); sem operação ele é recusado
+  como "um desenho no quadro que nenhuma etapa executa", e a resposta que sai na linha do histórico é a do próprio git
+  ("tag v0.0.1-janela criada nesta máquina — sem remoto cadastrado", "em main"), nunca um ok genérico. A pasta de
+  trabalho local do nó git é conferida pela **mesma** função do nó de comando local (`conferir_pasta_local`), porque é o
+  mesmo risco, e em tempo de corrida `dir_do_no` ainda canonicaliza e recusa o que dobra para fora da raiz do projeto.
+  Medido na janela real (§2): as três telas de executor, as recusas de campo, o nó git rodando nas execuções **#42** e
+  **#43**, e `git tag -l` no disco confirindo a etiqueta que a tela anunciou.
 
-Total da superfície: **136 comandos Tauri registrados**, 22 arquivos Rust em `src-tauri/src`, 10 views,
-36.951 linhas de TS/TSX/Rust.
+Total da superfície: **136 comandos Tauri registrados**, 23 arquivos Rust em `src-tauri/src`, 10 views,
+39.463 linhas de TS/TSX/Rust.
 
 Persistência (SQLite local, migrações em `src-tauri/src/db.rs`) — as dez tabelas que existem hoje:
 `settings`, `servers`, `projects`, `audit_log`, `routines`, `terminal_history`, `deploy_profiles`, `deploy_runs`,
@@ -281,18 +321,45 @@ Estas vieram do SPEC e de correções explícitas do Douglas; reverter qualquer 
     quem tem etapa por trás termina por ela, e só comando e aprovação escrevem o próprio motivo ("N comando(s) nesta
     máquina/no servidor", "aprovado na janela"). Coberto por
     `a_marca_terminal_do_no_e_quem_manda_na_mensagem_da_linha` e lido no binário final (§2).
+19. **Um executor de runtime não acredita no código de saída — ele lê o estado que o próprio roteiro imprime.**
+    `docker compose up -d` sai 0 com um container em `restarting`, e `pm2 reload` sai 0 de um app que morreu ao subir. Por
+    isso cada roteiro termina imprimando o veredito (`IMAGEM:`, `ANTERIOR:`, `CONTAINER:`, `RAZAO:`) e
+    `runtime::estado_no_ar` é o que decide a etapa: nada de "código zero então sucesso". É também a razão de a reversão
+    guardar `previous_image` — sem a imagem anterior registrada **na execução**, "reverter" teria que adivinhar qual tag
+    estava no ar.
+20. **No `docker compose`, o argumento vazio do serviço é "todos os serviços", e `''` é um nome de serviço que o docker
+    recusa.** `servico_argumento()` devolve string vazia quando o modelo não declarou serviço, e o roteiro monta
+    `up -d` / `ps -q` **sem** argumento; montar `up -d ''` era o comportamento anterior, visto no roteiro gerado e
+    corrigido na causa. É o mesmo princípio de "detectar realidade, não listas fixas": a ausência tem de chegar ao docker
+    como ausência.
+21. **Todo texto que entra num roteiro POSIX remoto passa por `shell_quote`, inclusive o que parece seguro.** O filtro
+    `docker ps --filter name='^{nome}$'` interpolava o nome do container direto; um nome com apóstrofo escapava das aspas
+    e virava **comando no servidor**. Hoje o argumento inteiro é quotado (`--filter 'name=^d'\''app$'`), coberto por
+    `o_nome_do_container_nao_escapa_das_aspas_do_filtro`. Concatenação com entrada solta não é aceitável em script que
+    viaja por SSH.
+22. **Executor de runtime é servidor, por decisão, não por acaso.** `runtime` preenchido num modelo sem `server_id` é
+    recusado ("é um executor de runtime e roda no servidor; este modelo publica nesta máquina"), porque os roteiros são
+    POSIX e porque o motor não roda metade de um roteiro. Consequência de tela: o seletor de executor **só aparece** quando
+    há servidor cadastrado, e some quando o destino é "nesta máquina" (lido na janela, §2).
+23. **O nó git é local e só oferece operação que o motor já executa.** `kind "git"` roda `pull`/`checkout`/`tag` **nesta
+    máquina**, na pasta do projeto; a tela não mostra executor para ele porque não existe opção remota, e o validador
+    recusa nó git sem operação ("sem operação" — seria um desenho que nenhuma etapa executa) e nó git dividindo ramal com
+    irmão (`só um nó de comando pode dividir ramal`), porque a pasta de trabalho do git é uma só. A pasta de um nó git é
+    conferida pela **mesma** função do nó de comando local (`conferir_pasta_local`) — um `../fora` escrito na tela é
+    recusado antes de salvar, e `dir_do_no` ainda canonicaliza na corrida. A resposta da linha é a do git, lida na janela:
+    "tag v0.0.1-janela criada nesta máquina — sem remoto cadastrado", em vez de um sucesso mudo.
 
 ## 6. Pendências assumidas (com o primeiro passo de cada)
 
 | # | Pendência | Primeiro passo concreto |
 | --- | --- | --- |
-| 0 | **Dados do piloto das etapas 2 e 3, ainda cadastrados de propósito** | O projeto **Piloto Etapa 2** (`%TEMP%\piloto-etapa2`) com a definição *Piloto sem servidor* **v12** e as execuções **#23–#39** continuam no cadastro para ele abrir a janela e ver as telas conferidas — a v12 é o grafo de oito nós (`validar → git → coleta → preparo/publicar → gate → copia → historico`, com `preparo` de volta a `echo preparo`), a #34 é a corrida em que `preparo` falha e trava o resto, e a #38/#39 são as duas execuções de nó sozinho lidas no binário final (`preparo` → "1 comando(s) nesta máquina", `gate` → "aprovado na janela"). Quando ele decidir, o primeiro passo é **Projetos → Piloto Etapa 2 → Remover do cadastro** (a confirmação avisa quantos modelos saem junto; nenhum arquivo local é apagado) e depois apagar a pasta `%TEMP%\piloto-etapa2`. O arquivo de teste de 1,5 GB já foi removido do projeto e do destino |
+| 0 | **Dados do piloto das etapas 2, 3 e 4, ainda cadastrados de propósito** | O projeto **Piloto Etapa 2** (`%TEMP%\piloto-etapa2`) com a definição *Piloto sem servidor* **v15** e as execuções **#23–#43** continuam no cadastro para ele abrir a janela e ver as telas conferidas — a v15 é o grafo de oito nós (`validar → git → coleta → preparo/publicar → gate → copia → historico`, com `preparo` de volta a `echo preparo`), a #34 é a corrida em que `preparo` falha e trava o resto, a #38/#39 são as duas execuções de nó sozinho lidas no binário final (`preparo` → "1 comando(s) nesta máquina", `gate` → "aprovado na janela"), e a **#42/#43 são as duas execuções do nó git** (uma `tag` que criou `v0.0.1-janela` de verdade no piloto e uma `checkout main` que respondeu "em main"). O que a etapa 4 criou para medir **foi desfeito e conferido**: o servidor temporário foi apagado (`list_servers` → 0), o modelo *medição docker* 21 foi removido pela confirmação da tela, a etiqueta `v0.0.1-janela` saiu do repositório do piloto (`git tag -l` → 0) e o grafo voltou aos oito nós. Quando ele decidir, o primeiro passo é **Projetos → Piloto Etapa 2 → Remover do cadastro** (a confirmação avisa quantos modelos saem junto; nenhum arquivo local é apagado) e depois apagar a pasta `%TEMP%\piloto-etapa2`. O arquivo de teste de 1,5 GB já foi removido do projeto e do destino |
 | 1 | **Client ID na máquina do Douglas** | Colar o **Client ID** da OAuth App (o campo está em **GitHub → Configuração**) e gerar um secret novo no GitHub — o valor hexadecimal que estava salvo no banco era o **secret**, não o ID. Sem isso a aba GitHub não conecta: é limite de conta, não do código |
 | 2 | **Passada de visual (prioridade quando ele chamar)** | Só depois das funções; começar pelo print da tela que incomoda. Não refazer estilo por conta própria junto de feature |
 | 3 | **Pacotes Linux** | Os alvos `deb`/`rpm`/`AppImage` nunca foram gerados aqui. Rodar `npm run tauri build` numa imagem Linux e ajustar `bundle.targets` + paths (o código já usa `dirs`/caminhos relativos, mas isso precisa ser provado, não suposto) |
 | 4 | **Teste de interface automatizado** | Não há runner com asserções. O que existe hoje é o piloto `scripts/ponte-cdp.mjs` (§4.1), que dirige a janela real mas exige leitura humana a cada passo. Se um runner entrar, o mínimo é o fluxo do SPEC §17; a cobertura automática continua `tsc` + suíte Rust + `scripts/confira-repo.ts` |
-| 5 | **Aceite visual das últimas entregas** | `Git → Árvore`, `GitHub → repositório → Local`, `Git → Guardados`, os botões *Reproduzir este commit* / *Reverter este commit* / *Voltar para este commit*, o **fluxo de deploy sem servidor** (modelo com destino "Nesta máquina", pré-vistoria, publicar, reverter), o **contrato de pipeline** — em **Projetos → Modelos de deploy** o badge `v{n}`, o botão **Conferir** e a lista de **Versões salvas**; em **Deploy** a linha de procedência da execução (`definição v{n} · ambiente · destino · commit`), o `· v{n} · {sha8}` no histórico e o **Repetir** com o painel âmbar quando a política recusa — e o **construtor visual** (aba **grafo**: nós arrastáveis, painel do nó, **Conferir**/**Salvar grafo**/**Esvaziar**, **Rodar sozinho** / **Com dependências**, estado vivo por nó durante a corrida e o modal de **Aprovação** com Aprovar/Rejeitar). Eu abri cada uma dessas telas e li o texto na janela real, mas **ele** ainda não viu nada disso nesta máquina |
-| 6 | **Revalidar o deploy por SSH num host real** | Além de `build_step`/`identify_step`, a etapa 2 mexeu no caminho com servidor: `validate_remoto` agora chama `deploy::checar_definicao(..., Some(&servidor))` e `insert_run` passou a receber a procedência. As checagens remotas foram movidas verbatim e `server_ref()` continua sendo a primeira delas, então por construção o remoto não muda — mas "por construção" sem medir num host é presunção. Primeiro passo: cadastrar um servidor e repetir C/D com `server_id` preenchido, conferindo que a etapa 1 recusa o que recusava antes |
+| 5 | **Aceite visual das últimas entregas** | `Git → Árvore`, `GitHub → repositório → Local`, `Git → Guardados`, os botões *Reproduzir este commit* / *Reverter este commit* / *Voltar para este commit*, o **fluxo de deploy sem servidor** (modelo com destino "Nesta máquina", pré-vistoria, publicar, reverter), o **contrato de pipeline** — em **Projetos → Modelos de deploy** o badge `v{n}`, o botão **Conferir** e a lista de **Versões salvas**; em **Deploy** a linha de procedência da execução (`definição v{n} · ambiente · destino · commit`), o `· v{n} · {sha8}` no histórico e o **Repetir** com o painel âmbar quando a política recusa — o **construtor visual** (aba **grafo**: nós arrastáveis, painel do nó, **Conferir**/**Salvar grafo**/**Esvaziar**, **Rodar sozinho** / **Com dependências**, estado vivo por nó durante a corrida e o modal de **Aprovação** com Aprovar/Rejeitar), e a **etapa 4**: o campo **Executor de runtime** do modelo com as três telas (Docker com *Nome da imagem* / *Dockerfile* / *Nome do container* / *Portas publicadas*, Compose com *Arquivo do compose* / *Serviço*, PM2 com *App no PM2*), o nó **git** do grafo (*operação*, referência e **Pasta no projeto**), a linha **"imagem anterior …"** no histórico de uma reversão de runtime, e o botão **Publicar** parado com o motivo no rótulo de quem passa por cima. Eu abri cada uma dessas telas e li o texto na janela real, mas **ele** ainda não viu nada disso nesta máquina — e o tooltip do botão desabilitado é justamente o tipo de coisa que só o olho confere |
+| 6 | **Revalidar o deploy por SSH num host real — e pela primeira vez com um executor de runtime** | Além de `build_step`/`identify_step`, a etapa 2 mexeu no caminho com servidor: `validate_remoto` agora chama `deploy::checar_definicao(..., Some(&servidor))` e `insert_run` passou a receber a procedência. As checagens remotas foram movidas verbatim e `server_ref()` continua sendo a primeira delas, então por construção o remoto não muda — mas "por construção" sem medir num host é presunção. **A etapa 4 amplia essa pendência em vez de criar outra:** Docker, Compose e PM2 só rodo no servidor, e o que foi conferido aqui é o roteiro gerado e a recusa da tela, nunca um container subindo de verdade. Primeiro passo: cadastrar um servidor, repetir C/D com `server_id` preenchido conferindo que a etapa 1 recusa o que recusava antes, e então publicar **uma** aplicação real com `docker` (o caminho completo: build da imagem no servidor, container novo no ar, `previous_image` gravada, reversão voltando a imagem anterior) e, se houver, uma com `pm2`. Nesta máquina isso não tem como: o `docker` 29.3.1 existe mas a daemon do Docker Desktop está parada, e `pm2` não está instalado |
 
 ## 7. Lacunas honestas do "canivete suíço" (ainda NÃO existe)
 

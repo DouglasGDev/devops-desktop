@@ -293,12 +293,16 @@ pub fn harvest(child: &mut Child, timeout: Duration, cancel: &AtomicBool) -> (Op
 
 /// Script de checagem de requisitos. Retorna uma linha por ferramenta
 /// encontrada (`tool <caminho>`); o motor transforma isso no mapa de recursos.
+/// `extras` são as ferramentas que quem chama precisa além das fixas — um executor
+/// de runtime declara `pm2`/`node`, e a sonda é montada a partir do que ele roda,
+/// não de uma lista fechada. Nome repetido sonda uma vez só.
 pub fn probe_script(
     need_git: bool,
     need_docker: bool,
     need_compose: bool,
     need_rsync: bool,
     need_cksum: bool,
+    extras: &[&str],
 ) -> String {
     let mut tools = vec!["bash", "tar", "find"];
     if need_git {
@@ -315,6 +319,12 @@ pub fn probe_script(
     }
     if need_cksum {
         tools.push("cksum");
+    }
+    for extra in extras {
+        let nome = extra.trim();
+        if !nome.is_empty() && !tools.contains(&nome) {
+            tools.push(nome);
+        }
     }
     let mut script = String::from("set -u\n");
     for tool in tools {
@@ -421,15 +431,24 @@ mod tests {
 
     #[test]
     fn sonda_pedem_as_ferramentas_da_estrategia() {
-        let script = probe_script(true, false, false, true, true);
+        let script = probe_script(true, false, false, true, true, &[]);
         assert!(script.contains("command -v git"), "{script}");
         assert!(script.contains("command -v rsync"));
         assert!(script.contains("command -v bash"));
         assert!(script.contains("command -v cksum"));
         assert!(!script.contains("command -v docker"));
-        let minima = probe_script(false, false, false, false, false);
+        let minima = probe_script(false, false, false, false, false, &[]);
         assert!(!minima.contains("command -v git"), "{minima}");
         assert!(!minima.contains("command -v cksum"), "{minima}");
+        // as extras do executor entram uma vez cada, mesmo repetidas ou vazias
+        let com_pm2 = probe_script(false, false, false, false, false, &["pm2", "node", "pm2", " "]);
+        assert!(com_pm2.contains("command -v pm2"), "{com_pm2}");
+        assert!(com_pm2.contains("command -v node"), "{com_pm2}");
+        assert_eq!(com_pm2.matches("command -v pm2").count(), 1, "{com_pm2}");
+        // e o que a lista fixa já pede não é sondado duas vezes
+        let docker = probe_script(false, true, false, false, false, &["docker", "node"]);
+        assert_eq!(docker.matches("command -v docker").count(), 1, "{docker}");
+        assert!(docker.matches("command -v").count() == 5, "{docker}");
     }
 
     #[test]

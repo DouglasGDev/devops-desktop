@@ -352,6 +352,15 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
 
   const blocked = (preflight?.blocked ?? 0) > 0;
   const podePublicar = profile !== null && preflight !== null && (!blocked || allowSecrets);
+  const motivoPublicar = !profile
+    ? "Escolha um modelo de deploy"
+    : !preflight
+      ? "Rode a pré-vistoria antes de publicar"
+      : blocked && !allowSecrets
+        ? "Autorize os itens bloqueados para publicar"
+        : running
+          ? "Já existe uma execução em andamento"
+          : "Publicar com este modelo";
 
   /** O modelo de quem a execução-alvo saiu — pode não ser o modelo escolhido na tela. */
   const modeloDoAlvo = (): DeployProfile | null => {
@@ -415,9 +424,13 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
             <Button onClick={() => void check()} loading={checking} disabled={!profile || running}>
               Pré-vistoria
             </Button>
-            <Button variant="primary" disabled={!podePublicar || running} onClick={pedirExecucao}>
-              <RocketIcon className="size-4" /> Publicar
-            </Button>
+            // O motivo no pai, não no botão: um botão desabilitado tem
+            // `pointer-events: none` e a dica de quem passa por cima nunca aparece.
+            <span title={motivoPublicar} className="inline-flex">
+              <Button variant="primary" disabled={!podePublicar || running} onClick={pedirExecucao}>
+                <RocketIcon className="size-4" /> Publicar
+              </Button>
+            </span>
           </div>
         </div>
 
@@ -483,12 +496,7 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
               </div>
             ) : null}
           </div>
-        ) : (
-          <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-400">
-            Rode a pré-vistoria antes de publicar: ela mostra o que subiria e o que a checagem de segredos encontraria.
-            O botão “Publicar” fica bloqueado até aí.
-          </p>
-        )}
+        ) : null}
 
         {active.length > 0 ? (
           <p className="mt-2 text-[11px] text-amber-700 dark:text-amber-300">
@@ -543,6 +551,9 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
                   <span className="font-mono"> · ativo {run.releaseDir}</span>
                 ) : null}
                 {run.previousRelease ? <span className="font-mono"> · anterior {run.previousRelease}</span> : null}
+                {run.previousImage ? (
+                  <span className="font-mono"> · imagem anterior {run.previousImage}</span>
+                ) : null}
               </p>
             </div>
             <div className="flex items-center gap-2">

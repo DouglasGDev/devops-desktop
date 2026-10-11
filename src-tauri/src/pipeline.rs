@@ -30,7 +30,7 @@ use crate::{
     deploy,
     models::{
         DefinitionRevision, DeployProfile, DeployRun, DeployRunStep, PipelineNode,
-        PipelineNodeInput, MAX_NODES, NODE_EXECUTORS,
+        PipelineNodeInput, MAX_NODES, NODE_EXECUTORS, NODE_GIT_OPS,
     },
 };
 
@@ -52,6 +52,10 @@ pub struct NoParaChecar {
     pub kind: String,
     pub etapa: Option<i64>,
     pub executor: String,
+    /// A operação de um nó `git`. Vazio nos outros tipos, e é por isso que a
+    /// conferência do grafo exige que ele venha preenchido quando o tipo é `git`:
+    /// sem operação o nó seria um desenho no quadro que ninguém executa.
+    pub operacao: String,
     pub dependencias: Vec<String>,
     pub paralelo: bool,
 }
@@ -64,6 +68,7 @@ impl From<&PipelineNode> for NoParaChecar {
             kind: no.kind.clone(),
             etapa: no.engine_step,
             executor: no.executor.clone(),
+            operacao: no.git_op.clone().unwrap_or_default(),
             dependencias: no.depends_on.clone(),
             paralelo: no.parallel,
         }
@@ -78,6 +83,7 @@ impl From<&PipelineNodeInput> for NoParaChecar {
             kind: no.kind(),
             etapa: no.engine_step,
             executor: no.executor(),
+            operacao: no.git_op(),
             dependencias: no.depends_on(),
             paralelo: no.parallel.unwrap_or(false),
         }
@@ -182,6 +188,7 @@ pub fn checar_forma(nos: &[NoParaChecar]) -> Result<String, String> {
     let mut etapas = 0usize;
     let mut comandos = 0usize;
     let mut aprovacoes = 0usize;
+    let mut git = 0usize;
     for no in nos {
         match no.kind.as_str() {
             "motor" => {
@@ -221,16 +228,26 @@ pub fn checar_forma(nos: &[NoParaChecar]) -> Result<String, String> {
                 }
             }
             "aprovacao" => aprovacoes += 1,
+            "git" => {
+                git += 1;
+                if !NODE_GIT_OPS.contains(&no.operacao.as_str()) {
+                    return Err(format!(
+                        "{} é um nó git sem operação que o motor rode: use {}",
+                        no.rotulo,
+                        NODE_GIT_OPS.join(", ")
+                    ));
+                }
+            }
             outro => {
                 return Err(format!(
-                    "{} é do tipo “{outro}”, e o motor só conhece motor, comando e aprovacao",
+                    "{} é do tipo “{outro}”, e o motor só conhece motor, comando, aprovacao e git",
                     no.rotulo
                 ))
             }
         }
     }
     Ok(format!(
-        "grafo de {} nó(s) · {etapas} etapa(s) do motor, {comandos} de comando, {aprovacoes} de aprovação",
+        "grafo de {} nó(s) · {etapas} etapa(s) do motor, {comandos} de comando, {aprovacoes} de aprovação, {git} de git",
         nos.len()
     ))
 }
@@ -589,6 +606,7 @@ mod tests {
             finished_at: None,
             release_dir: None,
             previous_release: None,
+            previous_image: None,
             detail: None,
             definition_version: Some(2),
             destination: Some("/var/www/site".into()),
@@ -727,8 +745,16 @@ mod tests {
             kind: kind.into(),
             etapa,
             executor: "local".into(),
+            operacao: String::new(),
             dependencias: dependencias.iter().map(|d| d.to_string()).collect(),
             paralelo: false,
+        }
+    }
+
+    fn no_git(chave: &str, operacao: &str, dependencias: &[&str]) -> NoParaChecar {
+        NoParaChecar {
+            operacao: operacao.into(),
+            ..no(chave, "git", None, dependencias)
         }
     }
 
@@ -878,6 +904,26 @@ mod tests {
     fn tipo_de_no_que_o_motor_nao_conhece_e_recusado() {
         let nos = vec![no("magica", "agenda", None, &[])];
         let err = checar_forma(&nos).unwrap_err();
-        assert!(err.contains("motor, comando e aprovacao"), "{err}");
+        assert!(err.contains("motor, comando, aprovacao e git"), "{err}");
+    }
+
+    #[test]
+    fn o_no_git_existe_no_grafo_porque_o_motor_roda_ele() {
+        let mut nos = grafo_valido();
+        nos.push(no_git("marca", "tag", &["confere"]));
+        let resumo = checar_forma(&nos).unwrap();
+        assert!(resumo.contains("1 de git"), "{resumo}");
+        assert!(checar_forma(&[no_git("puxa", "pull", &[])]).is_ok());
+        assert!(checar_forma(&[no_git("muda", "checkout", &[])]).is_ok());
+        // sem operação o nó seria um desenho no quadro que nenhuma etapa executa
+        let sem_operacao = checar_forma(&[no_git("marca", "", &[])]).unwrap_err();
+        assert!(sem_operacao.contains("sem operação"), "{sem_operacao}");
+        let inventada = checar_forma(&[no_git("marca", "deploy", &[])]).unwrap_err();
+        assert!(inventada.contains("pull, checkout, tag"), "{inventada}");
+        // a pasta de trabalho do git é uma só: nó git não divide ramal com irmão
+        let mut paralelo = no_git("puxa", "pull", &[]);
+        paralelo.paralelo = true;
+        let err = checar_forma(&[paralelo]).unwrap_err();
+        assert!(err.contains("só um nó de comando pode dividir ramal"), "{err}");
     }
 }

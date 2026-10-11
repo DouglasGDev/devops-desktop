@@ -72,6 +72,12 @@ type Draft = {
   deleteExtras: boolean;
   stepTimeoutSecs: number;
   isDefault: boolean;
+  runtime: string;
+  imageName: string;
+  dockerfile: string;
+  composeFile: string;
+  serviceName: string;
+  publishPorts: string;
 };
 
 function draftFrom(profile: DeployProfile | null, servers: { id: number }[]): Draft {
@@ -96,6 +102,12 @@ function draftFrom(profile: DeployProfile | null, servers: { id: number }[]): Dr
       deleteExtras: profile.deleteExtras,
       stepTimeoutSecs: profile.stepTimeoutSecs,
       isDefault: profile.isDefault,
+      runtime: profile.runtime,
+      imageName: profile.imageName ?? "",
+      dockerfile: profile.dockerfile ?? "",
+      composeFile: profile.composeFile ?? "",
+      serviceName: profile.serviceName ?? "",
+      publishPorts: fromLines(profile.publishPorts),
     };
   }
   return {
@@ -119,6 +131,12 @@ function draftFrom(profile: DeployProfile | null, servers: { id: number }[]): Dr
     deleteExtras: false,
     stepTimeoutSecs: 600,
     isDefault: false,
+    runtime: "",
+    imageName: "",
+    dockerfile: "",
+    composeFile: "",
+    serviceName: "",
+    publishPorts: "",
   };
 }
 
@@ -159,6 +177,13 @@ export function ProfileForm({
         strategy: semHost && !STRATEGIES_LOCAIS.includes(current.strategy) ? "artifacts" : current.strategy,
         // release por symlink é um mecanismo do servidor
         releasesEnabled: semHost ? false : current.releasesEnabled,
+        // executor de runtime roda no servidor; sem servidor ele não existe
+        runtime: semHost ? "" : current.runtime,
+        imageName: semHost ? "" : current.imageName,
+        dockerfile: semHost ? "" : current.dockerfile,
+        composeFile: semHost ? "" : current.composeFile,
+        serviceName: semHost ? "" : current.serviceName,
+        publishPorts: semHost ? "" : current.publishPorts,
       };
     });
   };
@@ -170,6 +195,18 @@ export function ProfileForm({
       strategy,
       gitBranch:
         strategy === "git" && current.gitBranch.trim() === "" ? project.gitBranch ?? "main" : current.gitBranch,
+    }));
+
+  /** Cada executor lê colunas próprias; trocar apaga as que o novo não usaria. */
+  const escolherRuntime = (runtime: string) =>
+    setDraft((current) => ({
+      ...current,
+      runtime,
+      imageName: "",
+      dockerfile: "",
+      composeFile: "",
+      serviceName: "",
+      publishPorts: "",
     }));
 
   const enviar = async () => {
@@ -213,6 +250,28 @@ export function ProfileForm({
       setError("o tempo limite por etapa fica entre 10 e 7200 segundos");
       return;
     }
+    // O executor de runtime só existe com servidor; a tela espelha a mesma
+    // checagem que `runtime::Alvo::conferir` faz antes de salvar.
+    if (!localMode && draft.runtime !== "") {
+      if (draft.runtime === "docker") {
+        if (draft.imageName.trim() === "") {
+          setError("o Docker precisa do nome da imagem (ex.: meuapp ou registry.local/meuapp)");
+          return;
+        }
+        if (draft.dockerfile.trim().startsWith("/")) {
+          setError("o Dockerfile é um caminho dentro do projeto, não um caminho absoluto");
+          return;
+        }
+      }
+      if (draft.runtime === "compose" && draft.composeFile.trim().startsWith("/")) {
+        setError("o arquivo do compose é um caminho dentro do projeto, não um caminho absoluto");
+        return;
+      }
+      if (draft.runtime === "pm2" && draft.serviceName.trim() === "") {
+        setError("o PM2 precisa do nome do app como ele aparece no pm2 list");
+        return;
+      }
+    }
     const input: DeployProfileInput = {
       id: profile?.id ?? null,
       projectId: project.id,
@@ -235,6 +294,12 @@ export function ProfileForm({
       deleteExtras: draft.deleteExtras,
       stepTimeoutSecs: draft.stepTimeoutSecs,
       isDefault: draft.isDefault,
+      runtime: localMode ? "" : draft.runtime,
+      imageName: localMode || draft.imageName.trim() === "" ? null : draft.imageName.trim(),
+      dockerfile: localMode || draft.dockerfile.trim() === "" ? null : draft.dockerfile.trim(),
+      composeFile: localMode || draft.composeFile.trim() === "" ? null : draft.composeFile.trim(),
+      serviceName: localMode || draft.serviceName.trim() === "" ? null : draft.serviceName.trim(),
+      publishPorts: localMode ? [] : toLines(draft.publishPorts),
     };
     setSaving(true);
     setError(null);
@@ -343,6 +408,96 @@ export function ProfileForm({
               max={7200}
               value={draft.stepTimeoutSecs}
               onChange={(e) => set("stepTimeoutSecs", Number(e.target.value) || 0)}
+            />
+          </Field>
+        ) : null}
+
+        {!localMode ? (
+          <Field label="Executor de runtime">
+            <Select value={draft.runtime} onChange={(e) => escolherRuntime(e.target.value)}>
+              <option value="">Nenhum</option>
+              <option value="docker">Docker</option>
+              <option value="compose">Docker Compose</option>
+              <option value="pm2">PM2</option>
+            </Select>
+          </Field>
+        ) : null}
+
+        {!localMode && draft.runtime === "docker" ? (
+          <>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="Nome da imagem">
+                <Input
+                  spellCheck={false}
+                  className="font-mono text-xs"
+                  value={draft.imageName}
+                  onChange={(e) => set("imageName", e.target.value)}
+                  placeholder="meuapp"
+                />
+              </Field>
+              <Field label="Dockerfile">
+                <Input
+                  spellCheck={false}
+                  className="font-mono text-xs"
+                  value={draft.dockerfile}
+                  onChange={(e) => set("dockerfile", e.target.value)}
+                  placeholder="Dockerfile"
+                />
+              </Field>
+            </div>
+            <Field label="Nome do container">
+              <Input
+                spellCheck={false}
+                className="font-mono text-xs"
+                value={draft.serviceName}
+                onChange={(e) => set("serviceName", e.target.value)}
+                placeholder={draft.imageName.trim().split("/").pop() || "app"}
+              />
+            </Field>
+            <Field label="Portas publicadas">
+              <Textarea
+                rows={2}
+                spellCheck={false}
+                className="font-mono text-xs"
+                value={draft.publishPorts}
+                onChange={(e) => set("publishPorts", e.target.value)}
+                placeholder={"8080:80\n127.0.0.1:9000:9000/tcp"}
+              />
+            </Field>
+          </>
+        ) : null}
+
+        {!localMode && draft.runtime === "compose" ? (
+          <>
+            <Field label="Arquivo do compose">
+              <Input
+                spellCheck={false}
+                className="font-mono text-xs"
+                value={draft.composeFile}
+                onChange={(e) => set("composeFile", e.target.value)}
+                placeholder="docker-compose.yml"
+              />
+            </Field>
+            <Field label="Serviço">
+              <Input
+                spellCheck={false}
+                className="font-mono text-xs"
+                value={draft.serviceName}
+                onChange={(e) => set("serviceName", e.target.value)}
+                placeholder="web"
+              />
+            </Field>
+          </>
+        ) : null}
+
+        {!localMode && draft.runtime === "pm2" ? (
+          <Field label="App no PM2">
+            <Input
+              spellCheck={false}
+              className="font-mono text-xs"
+              value={draft.serviceName}
+              onChange={(e) => set("serviceName", e.target.value)}
+              placeholder="api"
             />
           </Field>
         ) : null}

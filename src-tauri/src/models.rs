@@ -499,6 +499,41 @@ pub struct DeployProfile {
     /// Número da definição salva mais recente. Cada alteração sobe este número e
     /// deixa um retrato do que era a definição em `pipeline_revisions`.
     pub version: i64,
+    /// O executor de runtime da publicação: vazio é "nenhum", e as etapas do motor
+    /// continuam exatamente como eram. `docker`, `compose` e `pm2` fazem a etapa de
+    /// atualização e a de saúde lerem o estado na ferramenta em vez de confiarem no
+    /// código de saída do comando.
+    pub runtime: String,
+    /// Nome da imagem que o build produz (`docker run -t`).
+    pub image_name: Option<String>,
+    /// Caminho do Dockerfile **dentro** do código publicado.
+    pub dockerfile: Option<String>,
+    pub compose_file: Option<String>,
+    /// Nome do service do compose, do container criado pelo `docker run` ou do app
+    /// no `pm2 list` — é sempre a mesma coisa: como a coisa aparece na ferramenta.
+    pub service_name: Option<String>,
+    /// Publicações de porta no formato do `docker run -p`.
+    pub publish_ports: Vec<String>,
+}
+
+impl DeployProfile {
+    /// O alvo que o motor executa nesta definição. `diretorio` é onde o código está
+    /// no destino daquela corrida (a pasta publicada no servidor, a raiz do projeto
+    /// nesta máquina) — vem de quem chama porque é a única peça que não é da definição.
+    pub fn alvo(&self, diretorio: &str) -> crate::runtime::Alvo {
+        crate::runtime::Alvo::da_definicao(
+            &crate::runtime::Definicao {
+                runtime: &self.runtime,
+                imagem: self.image_name.as_deref(),
+                dockerfile: self.dockerfile.as_deref(),
+                compose_file: self.compose_file.as_deref(),
+                servico: self.service_name.as_deref(),
+                portas: &self.publish_ports,
+            },
+            diretorio,
+            self.step_timeout_secs,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -526,9 +561,34 @@ pub struct DeployProfileInput {
     pub delete_extras: bool,
     pub step_timeout_secs: i64,
     pub is_default: bool,
+    /// As colunas do executor de runtime. Faltando qualquer uma, `None` é o mesmo
+    /// que coluna vazia: nenhum executor, nenhuma mudança de comportamento.
+    pub runtime: Option<String>,
+    pub image_name: Option<String>,
+    pub dockerfile: Option<String>,
+    pub compose_file: Option<String>,
+    pub service_name: Option<String>,
+    pub publish_ports: Option<Vec<String>>,
 }
 
 impl DeployProfileInput {
+    /// O alvo declarado pelo que a tela enviou — a mesma tradução do modelo salvo,
+    /// para a validação conferir exatamente o que o motor vai executar.
+    pub fn alvo(&self, diretorio: &str) -> crate::runtime::Alvo {
+        crate::runtime::Alvo::da_definicao(
+            &crate::runtime::Definicao {
+                runtime: self.runtime.as_deref().unwrap_or(""),
+                imagem: self.image_name.as_deref(),
+                dockerfile: self.dockerfile.as_deref(),
+                compose_file: self.compose_file.as_deref(),
+                servico: self.service_name.as_deref(),
+                portas: self.publish_ports.as_deref().unwrap_or(&[]),
+            },
+            diretorio,
+            self.step_timeout_secs,
+        )
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         let name = self.name.trim();
         if name.is_empty() || name.len() > 200 {
@@ -578,6 +638,23 @@ impl DeployProfileInput {
         validate_list(&self.health_checks, "testes de saúde", 20)?;
         validate_list(&self.rollback_commands, "comandos de rollback", 40)?;
         validate_list(&self.test_commands, "comandos de teste", 40)?;
+        validate_list(
+            self.publish_ports.as_deref().unwrap_or(&[]),
+            "portas publicadas",
+            20,
+        )?;
+        for (rotulo, valor) in [
+            ("nome da imagem", self.image_name.as_deref()),
+            ("Dockerfile", self.dockerfile.as_deref()),
+            ("arquivo do compose", self.compose_file.as_deref()),
+            ("nome do serviço", self.service_name.as_deref()),
+        ] {
+            if let Some(valor) = valor {
+                if valor.trim().len() > 200 || valor.contains(['\0', '\n', '\r']) {
+                    return Err(format!("{rotulo}: até 200 caracteres, em uma linha só"));
+                }
+            }
+        }
 
         for key in &self.secret_keys {
             if !is_env_key_name(key) {
@@ -613,12 +690,25 @@ impl DeployProfileInput {
             }
             "docker" => {
                 let tem_comando = !self.build_commands.is_empty() || !self.restart_commands.is_empty();
-                if !tem_comando {
+                if !tem_comando && self.runtime.as_deref().unwrap_or("").trim().is_empty() {
+                    // Com um executor de runtime declarado, a imagem desta corrida é
+                    // construída e subida pelo próprio executor: não pedir comando.
                     return Err("o deploy com Docker precisa de comandos de build ou de atualização dos containers".into());
                 }
             }
             _ => {}
         }
+        // O executor de runtime é conferido pelo mesmo código que o motor usa: o que
+        // a tela aceitou é exatamente o que a etapa sabe executar. O diretório é o
+        // destino da publicação, porque é lá que o roteiro roda.
+        let alvo = self.alvo(self.remote_path.trim());
+        if self.server_id.is_none() && !alvo.runtime.is_empty() {
+            return Err(format!(
+                "{} é um executor de runtime e roda no servidor; este modelo publica nesta máquina",
+                crate::runtime::nome(&alvo.runtime)
+            ));
+        }
+        alvo.conferir()?;
         Ok(())
     }
 }
@@ -657,6 +747,10 @@ pub struct DeployRun {
     pub finished_at: Option<String>,
     pub release_dir: Option<String>,
     pub previous_release: Option<String>,
+    /// A imagem que estava no ar antes desta corrida, lida do servidor durante a
+    /// subida do container. É o único destino possível de uma reversão Docker: sem
+    /// ela não há para onde voltar, e a tela diz isso em vez de prometer.
+    pub previous_image: Option<String>,
     pub detail: Option<String>,
     /// A versão da definição que estava salva quando a execução abriu. Um modelo
     /// editado depois não reescreve a procedência de uma execução antiga.
@@ -684,11 +778,16 @@ pub struct DefinitionRevision {
 
 // ---------- grafo do pipeline (plano CI/CD, etapa 3) ----------
 
-/// Os três tipos de nó que o motor sabe executar. Não há tipo sem execução:
+/// Os quatro tipos de nó que o motor sabe executar. Não há tipo sem execução:
 /// `motor` chama uma das quinze etapas reais, `comando` roda comandos pelo
-/// executor escolhido e `aprovacao` espera a decisão de quem usa.
-pub const NODE_KINDS: [&str; 3] = ["motor", "comando", "aprovacao"];
+/// executor escolhido, `aprovacao` espera a decisão de quem usa e `git` faz uma
+/// operação real de Git nesta máquina, pelas mesmas funções da aba Git.
+pub const NODE_KINDS: [&str; 4] = ["motor", "comando", "aprovacao", "git"];
 pub const NODE_EXECUTORS: [&str; 2] = ["local", "ssh"];
+/// O que um nó `git` pode fazer. São operações que existem em `git.rs`, não uma
+/// lista de desejos: `pull` atualiza o código, `checkout` alterna para a referência
+/// declarada, `tag` marca o commit e, havendo remoto, publica a marca.
+pub const NODE_GIT_OPS: [&str; 3] = ["pull", "checkout", "tag"];
 /// Limite do grafo salvo: acima disso o construtor deixa de ser legível e o
 /// histórico de uma execução vira impossível de conferir.
 pub const MAX_NODES: usize = 40;
@@ -713,6 +812,11 @@ pub struct PipelineNode {
     /// no servidor (`ssh`).
     pub working_dir: Option<String>,
     pub commands: Vec<String>,
+    /// A operação de um nó `git`: `pull`, `checkout` ou `tag`.
+    pub git_op: Option<String>,
+    /// A referência do nó `git`: o ramo a alternar (`checkout`) ou a tag a criar
+    /// (`tag`). Vazio em `pull`, que trabalha no ramo atual.
+    pub git_ref: Option<String>,
     /// As chaves dos nós que precisam terminar antes deste.
     pub depends_on: Vec<String>,
     /// Permite rodar junto com os irmãos que estiverem prontos ao mesmo tempo.
@@ -744,6 +848,8 @@ pub struct PipelineNodeInput {
     pub environment: Option<String>,
     pub working_dir: Option<String>,
     pub commands: Option<Vec<String>>,
+    pub git_op: Option<String>,
+    pub git_ref: Option<String>,
     pub depends_on: Option<Vec<String>>,
     pub parallel: Option<bool>,
     pub timeout_secs: Option<i64>,
@@ -752,6 +858,22 @@ pub struct PipelineNodeInput {
     pub requires_approval: Option<bool>,
     pub x: Option<i64>,
     pub y: Option<i64>,
+}
+
+/// A pasta de trabalho de um nó que roda nesta máquina: sempre um caminho
+/// relativo dentro do projeto. Vale para o nó de comando local e para o nó git,
+/// que é local por definição — a checagem é uma só porque a regra é uma só.
+/// Vazio é "nenhuma pasta", que é a raiz do projeto.
+fn conferir_pasta_local(dir: &str, rotulo: &str) -> Result<(), String> {
+    if dir.is_empty() {
+        return Ok(());
+    }
+    if dir.starts_with('/') || dir.contains('\\') || dir.contains("..") {
+        return Err(format!(
+            "{rotulo}: a pasta de trabalho deve ser um caminho relativo dentro do projeto"
+        ));
+    }
+    Ok(())
 }
 
 impl PipelineNodeInput {
@@ -769,6 +891,16 @@ impl PipelineNodeInput {
 
     pub fn commands(&self) -> Vec<String> {
         self.commands.clone().unwrap_or_default()
+    }
+
+    /// A operação declarada por um nó `git`, já normalizada. Os nós que não são
+    /// `git` guardam isto vazio, e é assim que `checar_grafo` distingue um do outro.
+    pub fn git_op(&self) -> String {
+        self.git_op
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_lowercase()
     }
 
     pub fn depends_on(&self) -> Vec<String> {
@@ -811,7 +943,7 @@ impl PipelineNodeInput {
         let kind = self.kind();
         if !NODE_KINDS.contains(&kind.as_str()) {
             return Err(format!(
-                "{rotulo}: tipo de nó inválido “{kind}”; use motor, comando ou aprovacao"
+                "{rotulo}: tipo de nó inválido “{kind}”; use motor, comando, aprovacao ou git"
             ));
         }
         match kind.as_str() {
@@ -833,17 +965,73 @@ impl PipelineNodeInput {
                     return Err(format!("{rotulo}: um nó de comando precisa de pelo menos um comando"));
                 }
                 validate_list(&commands, &rotulo, 20)?;
-                if let Some(dir) = self.working_dir.as_deref().map(str::trim) {
-                    if !dir.is_empty() && executor == "local" {
-                        if dir.starts_with('/') || dir.contains('\\') || dir.contains("..") {
+                let dir = self.working_dir.as_deref().unwrap_or("").trim();
+                if executor == "local" {
+                    conferir_pasta_local(dir, &rotulo)?;
+                } else if !dir.is_empty() && !is_safe_remote_path(dir) {
+                    return Err(format!(
+                        "{rotulo}: a pasta de trabalho no servidor precisa ser um caminho absoluto, como /srv/site"
+                    ));
+                }
+            }
+            "git" => {
+                let op = self.git_op();
+                if op.is_empty() {
+                    return Err(format!(
+                        "{rotulo}: o nó git precisa de uma operação: {}",
+                        NODE_GIT_OPS.join(", ")
+                    ));
+                }
+                if !NODE_GIT_OPS.contains(&op.as_str()) {
+                    return Err(format!(
+                        "{rotulo}: o nó git roda {}, não “{op}”",
+                        NODE_GIT_OPS.join(", ")
+                    ));
+                }
+                if !self.commands().is_empty() {
+                    return Err(format!(
+                        "{rotulo}: o nó git executa a operação escolhida, não comandos soltos"
+                    ));
+                }
+                // O nó git roda nesta máquina, na pasta do projeto: a mesma contenção
+                // de caminho do nó de comando local, porque é o mesmo risco.
+                conferir_pasta_local(
+                    self.working_dir.as_deref().unwrap_or("").trim(),
+                    &rotulo,
+                )?;
+                match op.as_str() {
+                    // O pull trabalha no ramo que a pasta já está: sem branch e sem
+                    // remoto para escolher, e o git responde pelo nó.
+                    "pull" => {
+                        if self
+                            .git_ref
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .is_some()
+                        {
                             return Err(format!(
-                                "{rotulo}: a pasta de trabalho local deve ser um caminho relativo dentro do projeto"
+                                "{rotulo}: o pull pega o ramo atual da pasta; a referência não é dele"
                             ));
                         }
-                    } else if !dir.is_empty() && executor == "ssh" && !is_safe_remote_path(dir) {
-                        return Err(format!(
-                            "{rotulo}: a pasta de trabalho no servidor precisa ser um caminho absoluto, como /srv/site"
-                        ));
+                    }
+                    // Alternar e marcar são a referência em si: sem ela o nó não tem
+                    // o que fazer, e um nó que não faz nada não entra no grafo.
+                    _ => {
+                        let Some(referencia) = self.git_ref.as_deref().map(str::trim) else {
+                            return Err(format!(
+                                "{rotulo}: o nó git de “{op}” precisa da referência (o ramo, ou a tag)"
+                            ));
+                        };
+                        if referencia.is_empty()
+                            || referencia.len() > 200
+                            || referencia.starts_with('-')
+                            || referencia.contains("..")
+                            || referencia.contains(char::is_whitespace)
+                            || referencia.contains('\0')
+                        {
+                            return Err(format!("{rotulo}: referência de git inválida “{referencia}”"));
+                        }
                     }
                 }
             }
@@ -909,7 +1097,135 @@ mod tests {
             delete_extras: false,
             step_timeout_secs: 600,
             is_default: false,
+            runtime: None,
+            image_name: None,
+            dockerfile: None,
+            compose_file: None,
+            service_name: None,
+            publish_ports: None,
         }
+    }
+
+    fn no_git(chave: &str, op: &str, referencia: Option<&str>) -> PipelineNodeInput {
+        PipelineNodeInput {
+            node_key: chave.into(),
+            title: chave.into(),
+            kind: "git".into(),
+            engine_step: None,
+            executor: None,
+            environment: None,
+            working_dir: None,
+            commands: None,
+            git_op: Some(op.into()),
+            git_ref: referencia.map(str::to_string),
+            depends_on: None,
+            parallel: None,
+            timeout_secs: None,
+            retry_limit: None,
+            condition: None,
+            requires_approval: None,
+            x: None,
+            y: None,
+        }
+    }
+
+    #[test]
+    fn o_no_git_so_aceita_as_operacoes_que_existem() {
+        assert!(no_git("puxa", "pull", None).validate().is_ok());
+        assert!(no_git("marca", "tag", Some("v1.2.0")).validate().is_ok());
+        assert!(no_git("muda", "checkout", Some("main")).validate().is_ok());
+        // um tipo que o motor não roda não entra no grafo
+        let inventado = no_git("deplod", "deploy", Some("producao")).validate().unwrap_err();
+        assert!(inventado.contains("não “deploy”"), "{inventado}");
+        // alternar e marcar sem referência não têm o que fazer
+        assert!(no_git("marca", "tag", None).validate().unwrap_err().contains("referência"));
+        let sem_operacao = no_git("perdido", "", Some("main")).validate().unwrap_err();
+        assert!(sem_operacao.contains("precisa de uma operação"), "{sem_operacao}");
+        // o pull trabalha no ramo da pasta: referência sobrando é recusada
+        let puxa_com_ramo = no_git("puxa", "pull", Some("main")).validate().unwrap_err();
+        assert!(puxa_com_ramo.contains("ramo atual"), "{puxa_com_ramo}");
+        // e um nó git não leva comandos: quem executa é a operação
+        let mut com_comando = no_git("puxa", "pull", None);
+        com_comando.commands = Some(vec!["git pull".into()]);
+        assert!(com_comando.validate().unwrap_err().contains("comandos soltos"));
+        // referência com o que o git não aceita nunca viria para cá
+        for ruim in ["-t", "a..b", "dois ramos", "muito".repeat(50).as_str()] {
+            let erro = no_git("marca", "tag", Some(ruim)).validate().unwrap_err();
+            assert!(erro.contains("inválida"), "{ruim} passou: {erro}");
+        }
+        // a pasta do nó git é dentro do projeto: caminho absoluto ou com `..` não
+        // entra na definição — é a mesma regra do nó de comando local.
+        for fora in ["/etc", "..\\segredo", "C:\\Windows"] {
+            let mut no = no_git("puxa", "pull", None);
+            no.working_dir = Some(fora.into());
+            let erro = no.validate().unwrap_err();
+            assert!(erro.contains("relativo dentro do projeto"), "{fora} passou: {erro}");
+        }
+        let mut ramal = no_git("puxa", "pull", None);
+        ramal.working_dir = Some("apps/api".into());
+        ramal.validate().unwrap();
+        // o nó git mexe na pasta do projeto, não no destino da publicação
+        assert!(!no_git("marca", "tag", Some("v1")).touches_destination());
+    }
+
+    #[test]
+    fn o_executor_do_modelo_e_conferido_pela_mesma_checagem_do_motor() {
+        let mut d = entrada(Some(3), "artifacts", "/srv/api");
+        d.runtime = Some("docker".into());
+        // Docker sem imagem não tem o que construir
+        assert!(d.validate().unwrap_err().contains("nome da imagem"));
+        d.image_name = Some("meuapp".into());
+        d.validate().unwrap();
+        assert_eq!(d.alvo("/srv/api").imagem_tag(), "meuapp:atual");
+        let mut caminho = d.clone();
+        caminho.dockerfile = Some("/etc/Dockerfile".into());
+        assert!(caminho.validate().unwrap_err().contains("caminho absoluto"));
+        let mut porta = d.clone();
+        porta.publish_ports = Some(vec!["8080:oitenta".into()]);
+        assert!(porta.validate().unwrap_err().contains("porta"));
+
+        let mut c = entrada(Some(3), "artifacts", "/srv/api");
+        c.runtime = Some("compose".into());
+        c.validate().unwrap(); // o arquivo tem default, o diretório é o destino
+        let mut com_porta = c.clone();
+        com_porta.publish_ports = Some(vec!["8080:80".into()]);
+        assert!(com_porta.validate().unwrap_err().contains("arquivo do compose"));
+
+        let mut p = entrada(Some(3), "artifacts", "/srv/api");
+        p.runtime = Some("pm2".into());
+        assert!(p.validate().unwrap_err().contains("pm2 list"));
+        p.service_name = Some("api".into());
+        p.validate().unwrap();
+
+        // inventado não entra, e vazio continua sendo exatamente o que era antes
+        let mut kubernetes = d.clone();
+        kubernetes.runtime = Some("kubernetes".into());
+        assert!(kubernetes.validate().unwrap_err().contains("desconhecido"));
+        assert!(d.alvo("/srv/api").roteiro_build().is_some());
+        let nenhum = entrada(Some(3), "artifacts", "/srv/api");
+        assert!(nenhum.alvo("/srv/api").roteiro_build().is_none());
+        assert!(nenhum.validate().is_ok());
+
+        // Estratégia docker sem comando próprio continua pedindo comando — até o ponto
+        // em que há um executor: aí quem constrói e sobe a imagem é o executor, e a
+        // tela não pode recusar o que o motor executa.
+        let mut sem_comando = entrada(Some(3), "docker", "/srv/api");
+        sem_comando.build_commands = vec![];
+        assert!(sem_comando.validate().unwrap_err().contains("comandos de build"));
+        sem_comando.runtime = Some("docker".into());
+        sem_comando.image_name = Some("meuapp".into());
+        sem_comando.validate().unwrap();
+
+        // Executor de runtime num modelo sem servidor: os roteiros são POSIX e rodam
+        // no destino, e nesta máquina não há docker ni pm2 garantidos.
+        let mut local = entrada(None, "artifacts", "C:/publicados/api");
+        local.runtime = Some("pm2".into());
+        local.service_name = Some("api".into());
+        let erro = local.validate().unwrap_err();
+        assert!(erro.contains("roda no servidor"), "{erro}");
+        local.runtime = None;
+        local.service_name = None;
+        local.validate().unwrap();
     }
 
     #[test]

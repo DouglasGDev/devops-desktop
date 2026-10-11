@@ -211,6 +211,10 @@ Nada é presumido. Antes de um deploy, a etapa de verificação executa comandos
 `git`, `docker`, `node`, `php`, `rsync` etc. conforme a estratégia. Se faltar algo, o pipeline falha nessa etapa com a
 mensagem "ferramenta ausente" e o log da checagem — sem tentar adivinhar caminho nem instalar nada.
 
+O **executor de runtime** entra nessa mesma lista pelo que ele é: um modelo em Docker ou Docker Compose exige `docker` no
+servidor, e um modelo em PM2 exige `pm2` e `node`. A recusa diz o nome do executor e o que falta ("… o executor PM2 roda
+com elas"), e nada é instalado por conta própria.
+
 ### 8.5 Conta GitHub (opcional)
 
 A seção **GitHub** só funciona com um *Client ID* de OAuth App. Ele **não** é um segredo: é o identificador público da
@@ -357,6 +361,13 @@ O pipeline executa, em ordem: verificação de requisitos → preparo local → 
 no servidor → verificação final. Cada etapa mostra comando, duração, código de saída e mensagem. Cancelar interrompe de
 forma cooperativa e registra a execução como cancelada. **Se uma etapa obrigatória falha, o resultado final é falha.**
 
+**A pré-vistoria manda no botão.** *Publicar* fica bloqueado até a pré-vistoria rodar: é ela que mostra quantos arquivos
+subiriam, quantos bytes, o que a checagem de segredos encontraria e o que ela bloquearia. A pré-vistoria só lê o disco
+local — nada é enviado —, então o que ela diz é o que a publicação faria com aquele modelo. Quando ela encontra item
+bloqueado, a publicação só volta a existir depois de marcar a autorização explícita de publicar mesmo assim; sem essa
+marca o botão continua parado, e quem passa por cima dele lê o motivo do estado atual — falta de modelo, pré-vistoria
+pendente, itens bloqueados sem autorização ou execução já em andamento.
+
 **Publicar sem servidor** (destino "Nesta máquina"): as quinze etapas são as mesmas, com dois nomes trocados — a conexão
 vira **Abrir a pasta de destino** e o envio vira **Copiar os arquivos para o destino**. A comparação é por CRC32 do
 arquivo, então só o que realmente mudou é copiado; o resto da etapa informa quantos ficaram inalterados e quantos
@@ -410,6 +421,34 @@ próprio nó — um nó de comando diz quantos comandos rodaram e onde, a aprova
 etapa do motor conserva a mensagem que ela mesma escreveu, inclusive quando é "pulada". Definir um grafo não apaga nada:
 um modelo sem nós salvos percorre as quinze etapas em fila, exatamente como antes, e a conferência devolve
 `sem grafo · as quinze etapas do motor, em fila`.
+
+**Como o app sobe no servidor (executor de runtime).** Quando o destino é um servidor SSH, o modelo ganha um campo
+**Executor de runtime** — **Nenhum**, **Docker**, **Docker Compose** ou **PM2** — e cada escolha mostra só os campos que
+usa:
+
+| Executor | Campos | O que roda no servidor |
+| --- | --- | --- |
+| Nenhum | — | o comportamento de sempre: copiar para o diretório de releases e rodar os comandos que você declarou |
+| Docker | *Nome da imagem*, *Dockerfile*, *Nome do container*, *Portas publicadas* | `docker build` no arquivo enviado, depois `docker run` do container com o nome e as portas do modelo |
+| Docker Compose | *Arquivo do compose*, *Serviço* | `docker compose -f <arquivo> up -d` — com *Serviço* vazio o arquivo inteiro sobe, e preenchido sobe só aquele serviço |
+| PM2 | *App no PM2* | `pm2 startOrReload` do `ecosystem.config.*` publicado quando ele existe, senão `pm2 reload` do app com o nome que ele tem no `pm2 list` |
+
+Com "nesta máquina" o seletor não aparece: um executor de runtime é um roteiro POSIX que roda no destino, e publicar sem
+servidor não tem onde rodá-lo — o validador diz isso na cara ("…é um executor de runtime e roda no servidor"). A primeira
+etapa também sonda as ferramentas de que o executor precisa (`docker`, ou `pm2` e `node`) e recusa a execução nomeando o
+que falta, em vez de deixar o roteiro quebrar no meio.
+
+Nenhum executor decide sucesso pelo código de saída: `docker compose up -d` sai 0 de um container que morreu ao subir.
+Cada roteiro termina imprimando o próprio veredito — `IMAGEM:`, `ANTERIOR:`, `CONTAINER:`, `RAZAO:` — e é essa leitura que
+fecha a etapa. A imagem que estava no ar antes da troca é gravada na execução e aparece no histórico como **imagem
+anterior …**, porque "reverter" precisa saber a devolução e não adivinhar.
+
+**Git como passo do pipeline.** O construtor do grafo tem um quarto tipo de nó, **git**, com as operações que o motor
+realmente executa — `pull`, `checkout` e `tag` —, um campo de referência (ramo ou nome da etiqueta) e **Pasta no projeto**,
+um caminho relativo dentro da pasta cadastrada. Ele roda **nesta máquina**, não no servidor, e a linha do histórico traz a
+resposta do próprio Git: "tag v0.0.1-janela criada nesta máquina — sem remoto cadastrado", "em main". Um nó git sem
+operação é recusado ao salvar, porque seria um desenho no quadro que nenhuma etapa executa, e a pasta `../fora` é barrada
+na tela com a mesma checagem que vale para o nó de comando local.
 
 ### 9.7 GitHub
 
@@ -541,6 +580,8 @@ Resumo do que é garantido pelo código, não só pela interface:
         ├── security.rs      # regras e varredura de segredos (§8)
         ├── deploy.rs        # motor de deploy, pipeline de etapas e escalonador do grafo (§9/§10)
         ├── pipeline.rs      # contrato do pipeline: definição versionada, procedência, política de repetição, validador do grafo
+        ├── runtime.rs       # executores de runtime do servidor: roteiros de Docker, Docker Compose e PM2, e leitura do estado que eles imprimem (§9.6)
+        ├── tools.rs         # sondagem da máquina: ferramentas, agente ssh, identidade do git, editores — com prazo por sonda
         ├── infra.rs         # métricas reais do servidor (§12)
         ├── github.rs        # fluxo de dispositivo OAuth e chamadas a api.github.com
         ├── auth.rs          # broker de senha por operação (SSH_ASKPASS em memória)
@@ -561,7 +602,7 @@ cd src-tauri
 cargo test --lib
 ```
 
-Cobertura atual do backend (229 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
+Cobertura atual do backend (261 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
 timeout e cancelamento, sessões PTY, ciclo completo de Git em repositório temporário (status, stage por hunk, commit,
 log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), trabalho guardado e
 reprodução de commit no git real (`stash push` tira a alteração da pasta e `stash list` mostra exatamente a entrada que o
@@ -642,6 +683,18 @@ que a política de repetição consulta: grafo que só rodou teste é repetível
 sobe a versão da definição e grava o retrato com chaves, arestas e os x/y da tela. O escalonador é testado à parte: o
 escopo do diagnóstico é o nó sozinho ou a corrente inteira dele (na ordem salva, que é a ordem da tela), dependência fora
 do escopo não trava um nó isolado, e dentro do escopo só **falha** trava — `pulado` por condição deixa o dependente rodar.
+Os executores de runtime são testados no roteiro que eles geram e no estado que eles lêem: o Docker monta
+`docker build -f <arquivo> -t <imagem>` e um `docker run` com nome, portas e `--restart unless-stopped`; o Compose roda
+`up -d` e `ps -q` **sem argumento** quando o modelo não declarou serviço (declarar `''` seria um nome de serviço que o
+docker recusa — a linha vazia é o "todos"); o PM2 faz `startOrReload` quando existe `ecosystem.config.*`, `reload` quando
+o app já está na lista, e devolve `RAZAO:` quando não está nem em uma nem em outra. O veredito nunca vem do código de
+saída: `estado_no_ar` lê `docker inspect`, `docker compose ps` e `pm2 jlist`, e um container em `restarting`, `exited` ou
+inexistente é dito como tal — com a imagem anterior volta da reversão (`previous_image`) chegando à tela. Um nome com
+apóstrofo não escapa das aspas do `--filter` (o argumento inteiro é quotado antes de viajar por SSH). O nó **git** é
+conferido pelo mesmo validador do resto do grafo: aceita `pull`, `checkout` e `tag`, recusa operação que o motor não tem,
+recusa nó git sem operação e nó git dividindo ramal com irmão (a pasta de trabalho do git é uma só), e a pasta dele passa
+pela mesma checagem do nó de comando local — relativo dentro do projeto, com `/etc`, `..\segredo` e `C:\Windows` recusados
+de antes de salvar.
 Nenhum teste de rede é feito: as rotas que falam com o GitHub são exercitadas só na máquina, com dados de
 resposta fixos dentro do próprio teste.
 

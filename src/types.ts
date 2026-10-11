@@ -415,6 +415,16 @@ export type DeployProfile = {
   updatedAt: string;
   /** Número da definição salva mais recente; cada alteração sobe este número. */
   version: number;
+  /** Executor de runtime da publicação: `""` é nenhum e `docker` | `compose` | `pm2` leem o estado na ferramenta. */
+  runtime: string;
+  imageName: string | null;
+  /** Caminho do Dockerfile relativo ao projeto; vazio usa o default do executor. */
+  dockerfile: string | null;
+  composeFile: string | null;
+  /** Nome do service/app como aparece na ferramenta (docker, compose, `pm2 list`). */
+  serviceName: string | null;
+  /** Publicações de porta no formato do `docker run -p` (ex.: `8080:80`). */
+  publishPorts: string[];
 };
 
 export type DeployProfileInput = {
@@ -440,6 +450,13 @@ export type DeployProfileInput = {
   deleteExtras: boolean;
   stepTimeoutSecs: number;
   isDefault: boolean;
+  /** Faltando qualquer campo de executor, o backend lê coluna vazia: nenhum executor, nenhum change. */
+  runtime?: string | null;
+  imageName?: string | null;
+  dockerfile?: string | null;
+  composeFile?: string | null;
+  serviceName?: string | null;
+  publishPorts?: string[] | null;
 };
 export type PullStrategy = "ff-only" | "merge" | "rebase";
 
@@ -474,6 +491,8 @@ export interface DeployRun {
   finishedAt: string | null;
   releaseDir: string | null;
   previousRelease: string | null;
+  /** A imagem que estava no ar antes desta corrida, lida do servidor; `null` = não há para onde voltar o container. */
+  previousImage: string | null;
   detail: string | null;
   /** Procedência: de onde esta execução saiu. `null` nas execuções anteriores à v6. */
   definitionVersion: number | null;
@@ -506,8 +525,8 @@ export interface RetryPolicy {
 
 // ---------- Grafo do pipeline (plano CI/CD, etapa 3) ----------
 
-/** Os três tipos que o motor sabe executar: uma etapa dele, um comando, uma espera. */
-export type NodeKind = "motor" | "comando" | "aprovacao";
+/** Os quatro tipos que o motor sabe executar: uma etapa dele, um comando, uma espera, uma operação de git desta máquina. */
+export type NodeKind = "motor" | "comando" | "aprovacao" | "git";
 
 export type NodeExecutor = "local" | "ssh";
 
@@ -530,6 +549,10 @@ export interface PipelineNode {
   environment: string | null;
   workingDir: string | null;
   commands: string[];
+  /** A operação de um nó `git`: `pull` | `checkout` | `tag`; `null` nos demais tipos. */
+  gitOp: string | null;
+  /** Referência do nó `git` (o ramo no checkout, a tag na marcação); proibido no pull. */
+  gitRef: string | null;
   dependsOn: string[];
   parallel: boolean;
   /** 0 = herdar o prazo do modelo. */
@@ -554,6 +577,8 @@ export type PipelineNodeInput = {
   environment?: string | null;
   workingDir?: string | null;
   commands?: string[] | null;
+  gitOp?: string | null;
+  gitRef?: string | null;
   dependsOn?: string[] | null;
   parallel?: boolean | null;
   timeoutSecs?: number | null;
