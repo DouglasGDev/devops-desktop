@@ -2,8 +2,9 @@
 
 Documento de retomada. Ele não substitui o [README](../README.md) (uso do aplicativo) nem o
 [SPEC.md](SPEC.md) (o que foi pedido); ele registra **o que já está pronto, onde está o código, como se prova
-cada parte e o que ainda não existe**. Escrito em 2026-10-10 sobre o commit `fa43c8c` mais o trabalho desta sessão
-(modo sem servidor), que está no mesmo estado destas linhas.
+cada parte e o que ainda não existe**. Escrito em 2026-10-10 sobre o trabalho do modo sem servidor (`66da3a7`) mais a
+**etapa 2 do plano CI/CD** — o contrato central de pipeline (`4f005ee`) e a licença de contribuição (`df51de1`), que são
+o estado destas linhas.
 
 ## 1. Retomar em três passos
 
@@ -208,8 +209,8 @@ Estas vieram do SPEC e de correções explícitas do Douglas; reverter qualquer 
 | 2 | **Passada de visual (prioridade quando ele chamar)** | Só depois das funções; começar pelo print da tela que incomoda. Não refazer estilo por conta própria junto de feature |
 | 3 | **Pacotes Linux** | Os alvos `deb`/`rpm`/`AppImage` nunca foram gerados aqui. Rodar `npm run tauri build` numa imagem Linux e ajustar `bundle.targets` + paths (o código já usa `dirs`/caminhos relativos, mas isso precisa ser provado, não suposto) |
 | 4 | **Teste de interface automatizado** | Não há runner com asserções. O que existe hoje é o piloto `scripts/ponte-cdp.mjs` (§4.1), que dirige a janela real mas exige leitura humana a cada passo. Se um runner entrar, o mínimo é o fluxo do SPEC §17; a cobertura automática continua `tsc` + suíte Rust + `scripts/confira-repo.ts` |
-| 5 | **Aceite visual das últimas entregas** | `Git → Árvore`, `GitHub → repositório → Local`, `Git → Guardados`, os botões *Reproduzir este commit* / *Reverter este commit* / *Voltar para este commit* e o **fluxo de deploy sem servidor** (novo modelo com destino "Nesta máquina", pré-vistoria, publicar, reverter) — eu rodei o fluxo sem servidor na janela e li cada tela, mas **ele** ainda não viu nada disso nesta máquina |
-| 6 | **Revalidar o deploy por SSH num host real** | As três correções desta sessão tocaram `build_step` e `identify_step`, que são compartilhados com o caminho por servidor. Elas foram escritas atrás de `local_mode()` (ou de condições que já eram locais), então por construção o remoto não muda — mas "por construção" sem medir num host é presunção. Primeiro passo: cadastrar um servidor e repetir C/D com `server_id` preenchido |
+| 5 | **Aceite visual das últimas entregas** | `Git → Árvore`, `GitHub → repositório → Local`, `Git → Guardados`, os botões *Reproduzir este commit* / *Reverter este commit* / *Voltar para este commit*, o **fluxo de deploy sem servidor** (modelo com destino "Nesta máquina", pré-vistoria, publicar, reverter) e o **contrato de pipeline** — em **Projetos → Modelos de deploy** o badge `v{n}`, o botão **Conferir** e a lista de **Versões salvas**; em **Deploy** a linha de procedência da execução (`definição v{n} · ambiente · destino · commit`), o `· v{n} · {sha8}` no histórico e o **Repetir** com o painel âmbar quando a política recusa. Eu abri cada uma dessas telas e li o texto na janela real, mas **ele** ainda não viu nada disso nesta máquina |
+| 6 | **Revalidar o deploy por SSH num host real** | Além de `build_step`/`identify_step`, a etapa 2 mexeu no caminho com servidor: `validate_remoto` agora chama `deploy::checar_definicao(..., Some(&servidor))` e `insert_run` passou a receber a procedência. As checagens remotas foram movidas verbatim e `server_ref()` continua sendo a primeira delas, então por construção o remoto não muda — mas "por construção" sem medir num host é presunção. Primeiro passo: cadastrar um servidor e repetir C/D com `server_id` preenchido, conferindo que a etapa 1 recusa o que recusava antes |
 
 ## 7. Lacunas honestas do "canivete suíço" (ainda NÃO existe)
 
