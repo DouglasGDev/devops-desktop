@@ -52,7 +52,7 @@ Armadilhas já conhecidas nesta máquina:
 | Frontend embutido no executável | conferido **dentro da janela**: o pacote das 09:37 servia `index-5zynmBe_.js` enquanto `dist/` já tinha `index-Cko7uGOK.js` (frontend velho dentro de um binário novo). O binário final desta sessão (18.644.480 B, 01:27) serve `/assets/index-DT3bM82P.js` lido de `document.querySelectorAll("script[src]")` na janela aberta, o mesmo hash de `dist/index.html` |
 | Instalador | `npm run tauri build` (01:27, saída 0) → `DevOps Desktop_0.1.0_x64-setup.exe` 4.959.838 B (4.73 MiB) e `DevOps Desktop_0.1.0_x64_en-US.msi` 7.151.616 B (6.82 MiB) |
 | Executando | `devops-desktop.exe` aberto por `Start-Process`, `MainWindowTitle = "DevOps Desktop — Central de SSH, Git e Deploy"`, `Responding = True`, 10 telas navegáveis por clique |
-| Git | `main` com **um commit local à frente** de `origin/main` (o da etapa 3); empurrar é ação compartilhada e fica para quando ele autorizar. O que está em `origin/main` até aqui é público em <https://github.com/DouglasGDev/devops-desktop> |
+| Git | `git push origin main` → `efe551d..23beec2`, saída 0, e `git ls-remote origin refs/heads/main` devolve `23beec23a4e069e2c1adb32560d8b1568876f392`, o mesmo `git rev-parse HEAD` local — etapa 3 pública em <https://github.com/DouglasGDev/devops-desktop> |
 
 O que isso **não** cobre: as asserções automáticas continuam sendo de backend — o piloto de interface (§4.1) dirige a
 janela de verdade, mas quem decide o que está certo a cada leitura sou eu, não uma suíte de testes de UI. O caminho por
