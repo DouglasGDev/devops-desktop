@@ -16,6 +16,7 @@ servidor ou no repositório. Quando uma etapa obrigatória falha, a interface mo
 ## 1. Sumário
 
 - [O que o aplicativo faz](#2-o-que-o-aplicativo-faz)
+- [Capturas de tela](#capturas-de-tela)
 - [Requisitos](#3-requisitos)
 - [Instalação (usuário)](#4-instalação-usuário)
 - [Compilação (desenvolvedor)](#5-compilação-desenvolvedor)
@@ -48,6 +49,28 @@ está em [docs/ENTREGAS.md](docs/ENTREGAS.md).
 | **Dashboard** | Estado dos servidores, deploys recentes e resultado, falhas do histórico, transferências em andamento, alertas de configuração e métricas reais de CPU, memória, disco, containers e serviços — lidas do servidor só quando você pedir. |
 | **GitHub** (opcional) | Conectar a conta pelo fluxo de dispositivo do OAuth e trabalhar o repositório de dentro do app: bandeja com o que é seu (revisão pedida, seus PRs, suas issues), pull request com diff real, conversa de comentários, revisão (aprovar / pedir alterações) e mesclar com método escolhido, abrir um PR a partir de um ramo desta máquina, mapear a pasta local de um repo publicado — o app mostra o caminho exato e abre a pasta no Explorador — e abrir ali mesmo a seção Git completa daquela pasta (aba **Local**), issues com descrição e comentários, execuções do Actions com reexecução, visão geral que liga o remoto às pastas locais (clonar, vincular como `origin`) e criação de repositório. Tudo com confirmação nas ações que escrevem; sem conta conectada, a aba mostra só a conta e o Client ID. |
 | **Auditoria** | Tudo fica em SQLite local, pesquisável e filtrável por servidor, projeto, tipo, nível e resultado. |
+
+---
+
+## Capturas de tela
+
+As três capturas abaixo são do aplicativo rodando, com dados reais do uso local — sem servidor cadastrado no momento
+da captura, por isso o Dashboard mostra `0` servidores e as falhas do histórico à direita.
+
+**Dashboard** — estado geral, lista de deploys com data e estratégia, e os dois painéis que só mostram o que já
+executou de verdade: falhas recentes e transferências em andamento.
+
+![Dashboard](docs/screenshots/dashboard.png)
+
+**Deploy · grafo** — pipeline desenhado na tela: nós com dependência entre si, um nó de espera de decisão (âmbar) e o
+formulário do nó selecionado embaixo, com tipo, etapa do motor, ambiente, condição, tentativas e quem depende de quem.
+
+![Grafo do pipeline](docs/screenshots/grafo-pipeline.png)
+
+**Histórico e auditoria** — o inventário local em SQLite, pesquisável e filtrável por categoria e nível. Cada linha é
+uma operação que ocorreu, com data, servidor/projeto e saída.
+
+![Histórico e auditoria](docs/screenshots/auditoria.png)
 
 ---
 
