@@ -424,8 +424,8 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
             <Button onClick={() => void check()} loading={checking} disabled={!profile || running}>
               Pré-vistoria
             </Button>
-            // O motivo no pai, não no botão: um botão desabilitado tem
-            // `pointer-events: none` e a dica de quem passa por cima nunca aparece.
+            {/* O motivo no pai, não no botão: um botão desabilitado tem
+                `pointer-events: none` e a dica de quem passa por cima nunca aparece. */}
             <span title={motivoPublicar} className="inline-flex">
               <Button variant="primary" disabled={!podePublicar || running} onClick={pedirExecucao}>
                 <RocketIcon className="size-4" /> Publicar
