@@ -1,5 +1,5 @@
 import type { ViewId } from "../types";
-import { CloudIcon, CommitIcon, DashboardIcon, FolderIcon, GitBranchIcon, HistoryIcon, RocketIcon, ServerIcon, SettingsIcon, TerminalIcon } from "./Icons";
+import { CloudIcon, CommitIcon, DashboardIcon, FolderIcon, GitBranchIcon, HistoryIcon, RocketIcon, SearchIcon, ServerIcon, SettingsIcon, TerminalIcon } from "./Icons";
 
 const NAV = [
   { id: "dashboard" as ViewId, label: "Dashboard", icon: DashboardIcon },
@@ -10,6 +10,7 @@ const NAV = [
   { id: "github" as ViewId, label: "GitHub", icon: CloudIcon },
   { id: "projects" as ViewId, label: "Projetos", icon: GitBranchIcon },
   { id: "deploy" as ViewId, label: "Deploy", icon: RocketIcon },
+  { id: "analise" as ViewId, label: "Análise", icon: SearchIcon },
   { id: "history" as ViewId, label: "Histórico", icon: HistoryIcon },
   { id: "settings" as ViewId, label: "Configurações", icon: SettingsIcon },
 ];
@@ -23,6 +24,7 @@ export const VIEW_TITLES: Record<ViewId, string> = {
   github: "GitHub",
   projects: "Projetos",
   deploy: "Deploy",
+  analise: "Análise de código",
   history: "Histórico e auditoria",
   settings: "Configurações",
 };

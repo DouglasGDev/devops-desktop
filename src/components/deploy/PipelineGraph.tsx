@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { CORTES, INSTRUMENTOS } from "../../lib/analysis";
 import { api } from "../../lib/api";
 import type {
   DeployRunStep,
   EngineStep,
+  NodeAnalyzer,
   NodeKind,
   PipelineNode,
   PipelineNodeInput,
+  SeverityGate,
   StepStatus,
 } from "../../types";
 import { useApp } from "../../store/AppContext";
@@ -22,6 +25,7 @@ const KIND_FILL: Record<NodeKind, string> = {
   comando: "fill-violet-500/10 dark:fill-violet-500/15",
   aprovacao: "fill-amber-500/10 dark:fill-amber-500/15",
   git: "fill-lime-500/10 dark:fill-lime-500/15",
+  analise: "fill-rose-500/10 dark:fill-rose-500/15",
 };
 
 const KIND_STROKE: Record<NodeKind, string> = {
@@ -29,6 +33,7 @@ const KIND_STROKE: Record<NodeKind, string> = {
   comando: "stroke-violet-500/70",
   aprovacao: "stroke-amber-500/70",
   git: "stroke-lime-500/70",
+  analise: "stroke-rose-500/70",
 };
 
 const STATUS_STROKE: Record<StepStatus, string> = {
@@ -80,6 +85,8 @@ function comoEntrada(no: PipelineNode): PipelineNodeInput {
     commands: no.commands,
     gitOp: no.gitOp,
     gitRef: no.gitRef,
+    analyzer: no.analyzer,
+    severityGate: no.severityGate,
     dependsOn: no.dependsOn,
     parallel: no.parallel,
     timeoutSecs: no.timeoutSecs,
@@ -369,7 +376,9 @@ export function PipelineGraph({
                       : no.kind === "aprovacao"
                         ? "espera decisão"
                         : no.kind === "git"
-                          ? `git · ${no.gitOp ?? "sem operação"}`
+                        ? `git · ${no.gitOp ?? "sem operação"}`
+                        : no.kind === "analise"
+                          ? `análise · ${no.analyzer} · ${no.severityGate || "sem corte"}`
                           : `${no.executor} · ${(no.commands ?? []).filter((c) => c.trim()).length} comando(s)`}
                   </text>
                   {no.requiresApproval || no.kind === "aprovacao" ? (
@@ -431,9 +440,13 @@ export function PipelineGraph({
                     kind,
                     engineStep: kind === "motor" ? (selecionado.engineStep ?? 1) : null,
                     commands: kind === "comando" ? (selecionado.commands ?? [""]) : [],
-                    executor: kind === "git" ? "local" : selecionado.executor,
+                    // Os dois lêem a pasta desta máquina: o executor deles é local
+                    // por definição, e um desenho com ssh seria recusado pelo motor.
+                    executor: kind === "git" || kind === "analise" ? "local" : selecionado.executor,
                     gitOp: kind === "git" ? (selecionado.gitOp ?? "pull") : null,
                     gitRef: null,
+                    analyzer: kind === "analise" ? (selecionado.analyzer ?? "embutido") : null,
+                    severityGate: kind === "analise" ? (selecionado.severityGate ?? "ERROR") : null,
                   });
                 }}
               >
@@ -441,6 +454,7 @@ export function PipelineGraph({
                 <option value="comando">comando</option>
                 <option value="aprovacao">aprovação</option>
                 <option value="git">git</option>
+                <option value="analise">análise de código</option>
               </Select>
             </Field>
             {selecionado.kind === "motor" ? (
@@ -483,6 +497,19 @@ export function PipelineGraph({
                   <option value="pull">pull</option>
                   <option value="checkout">checkout</option>
                   <option value="tag">tag</option>
+                </Select>
+              </Field>
+            ) : selecionado.kind === "analise" ? (
+              <Field label="Instrumento">
+                <Select
+                  value={selecionado.analyzer ?? "embutido"}
+                  onChange={(e) => alterar(selecionado.nodeKey, { analyzer: e.target.value as NodeAnalyzer })}
+                >
+                  {INSTRUMENTOS.map((i) => (
+                    <option key={i.valor} value={i.valor}>
+                      {i.rotulo}
+                    </option>
+                  ))}
                 </Select>
               </Field>
             ) : (
@@ -541,6 +568,44 @@ export function PipelineGraph({
                     className="font-mono text-xs"
                     value={selecionado.workingDir ?? ""}
                     onChange={(e) => alterar(selecionado.nodeKey, { workingDir: e.target.value })}
+                  />
+                </Field>
+              </>
+            ) : null}
+
+            {selecionado.kind === "analise" ? (
+              <>
+                <Field label="Corte de severidade">
+                  <Select
+                    value={selecionado.severityGate ?? "ERROR"}
+                    onChange={(e) =>
+                      alterar(selecionado.nodeKey, { severityGate: e.target.value as SeverityGate })
+                    }
+                  >
+                    {CORTES.map((c) => (
+                      <option key={c.valor} value={c.valor}>
+                        {c.rotulo}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label="Pasta no projeto">
+                  <Input
+                    spellCheck={false}
+                    className="font-mono text-xs"
+                    value={selecionado.workingDir ?? ""}
+                    onChange={(e) => alterar(selecionado.nodeKey, { workingDir: e.target.value })}
+                  />
+                </Field>
+                <Field label="Prazo (s, 0 = padrão)">
+                  <Input
+                    type="number"
+                    min={0}
+                    max={3600}
+                    value={selecionado.timeoutSecs ?? 0}
+                    onChange={(e) =>
+                      alterar(selecionado.nodeKey, { timeoutSecs: Math.min(3600, Math.max(0, Number(e.target.value) || 0)) })
+                    }
                   />
                 </Field>
               </>

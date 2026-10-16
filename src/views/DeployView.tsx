@@ -194,6 +194,37 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
     };
   }, [loadHistory, openRun, pushToast]);
 
+  // O cartão de progresso se reconcilia com o registro de corridas do motor. Um
+  // evento perdido — a corrida termina antes de a leitura do detalhe chegar, ou a
+  // janela era de outra tela quando ela aconteceu — não pode deixar a tela dizendo
+  // «em andamento» para sempre: o motor é quem diz o que ainda está em voo.
+  useEffect(() => {
+    if (!running) return;
+    let vivo = true;
+    const sonda = async () => {
+      const id = currentRun.current;
+      if (!id) return;
+      try {
+        const emVoo = await api.deployActive();
+        if (!vivo || emVoo.some((a) => a.runId === id)) return;
+        const detail = await api.deployRun(id);
+        if (!vivo || currentRun.current !== id || detail.status === "running") return;
+        setRun(detail);
+        setRunning(false);
+        setStopping(false);
+        void loadHistory();
+      } catch {
+        /* o motor responde na próxima varredura */
+      }
+    };
+    void sonda();
+    const timer = setInterval(() => void sonda(), 2000);
+    return () => {
+      vivo = false;
+      clearInterval(timer);
+    };
+  }, [running, loadHistory]);
+
   const check = async () => {
     if (!profile) return;
     setChecking(true);

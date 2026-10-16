@@ -4,15 +4,16 @@ Documento de retomada. Ele não substitui o [README](../README.md) (uso do aplic
 [SPEC.md](SPEC.md) (o que foi pedido); ele registra **o que já está pronto, onde está o código, como se prova
 cada parte e o que ainda não existe**. A base destas linhas é o modo sem servidor (`66da3a7`), a **etapa 2 do plano
 CI/CD** — o contrato central de pipeline (`4f005ee`) e a licença de contribuição (`df51de1`) —, a **etapa 3**, o
-construtor visual do grafo (`23beec2`), e a **etapa 4**, os executores de runtime (Docker, Docker Compose, PM2) com o
-git como passo do pipeline, registrada aqui em 2026-10-11.
+construtor visual do grafo (`23beec2`), a **etapa 4**, os executores de runtime (Docker, Docker Compose, PM2) com o
+git como passo do pipeline, e a **etapa 5**, a análise de código-fonte — na tela e como nó do mesmo grafo —, registrada
+aqui em 2026-10-15.
 
 ## 1. Retomar em três passos
 
 ```bash
 node ./node_modules/typescript/bin/tsc --noEmit     # tipos do frontend
 npm run build                                        # tsc + bundle
-(cd src-tauri && cargo test)                         # 261 testes de backend
+(cd src-tauri && cargo test)                         # 300 testes de backend
 (cd src-tauri && cargo clippy --all-targets -- -D warnings)
 node scripts/confira-repo.ts                         # o comparador remoto↔pasta, 9 formas reais de URL
 
@@ -35,15 +36,15 @@ Armadilhas já conhecidas nesta máquina:
   anterior acabou.
 - `cargo fmt` **não** é usado neste projeto — o formato é o do próprio autor, e `cargo fmt` reorganiza tudo.
 
-## 2. Estado verificado em 2026-10-10/11 (resultado lido, não presumido)
+## 2. Estado verificado em 2026-10-10 … 15 (resultado lido, não presumido)
 
 | Checagem | Resultado real |
 | --- | --- |
-| `tsc --noEmit` | saída vazia, código 0 (relido às 14:29, depois da última edição de tela) |
-| `npm run build` | `✓ 83 modules transformed`; `dist/assets/index-BC07Lf6F.js` 866.236 B e `index-C6ztCh7A.css` 61.003 B; `✓ built in 6.41s`; único aviso é o de chunk > 500 kB, que é de tamanho de bundle, não de código |
-| `cargo test` (todos os alvos) | **`261 passed; 0 failed; 0 ignored`** em `devops_desktop_lib` (17,90 s, lido na rodada das 14:40 desta sessão); `main.rs` e doc-tests com 0 testes. Histórico das rodadas anteriores: `229 passed` (etapa 3) e `208 passed` (antes da etapa 3) |
-| `cargo clippy --all-targets` | `Finished` sem nenhum aviso — nenhum `#[allow]` foi acrescentado para chegar aí; os avisos que apareceram nesta sessão foram corrigidos na causa (argumentos nomeados do `format!` que sobraram quando o filtro do docker passou a ser quotado) |
-| `node scripts/confira-repo.ts` | `todas as 9 formas conferem`, código 0 (relido hoje) |
+| `tsc --noEmit` | saída vazia, código 0 (relido às 16:29, depois da última edição de tela — o cartão de progresso do Deploy) |
+| `npm run build` | `✓ 83 modules transformed`; `dist/assets/index-BC07Lf6F.js` 866.236 B e `index-C6ztCh7A.css` 61.003 B; `✓ built in 6.41s`; único aviso é o de chunk > 500 kB, que é de tamanho de bundle, não de código. Na rodada da etapa 5: `dist/assets/index-l9oCfRyf.js` **882.386 B** e `index-nrYLLjTt.css` **61.921 B** (bytes contados no disco) |
+| `cargo test` (todos os alvos) | **`300 passed; 0 failed; 0 ignored; 0 measured; finished in 17,01 s`** em `devops_desktop_lib` (lido duas vezes na rodada final desta sessão, e sem nenhuma linha de `warning` na saída); `main.rs` e doc-tests com 0 testes. Histórico: `261 passed` (etapa 4), `229 passed` (etapa 3), `208 passed` (antes da etapa 3) |
+| `cargo clippy --all-targets` | **execução forçada**, depois de `cargo clean -p devops-desktop` (5.421 arquivos removidos) para o clippy não responder do cache: **zero linhas `warning`/`error`**, código 0. Nenhum `#[allow]` foi acrescentado para chegar aí; os avisos que apareceram nas sessões foram corrigidos na causa (argumentos nomeados do `format!` que sobraram quando o filtro do docker passou a ser quotado) |
+| `node scripts/confira-repo.ts` | `todas as 9 formas conferem`, código 0 (relido às 16:29) |
 | Migração `user_version` **9** no banco real | o banco de `AppData/Roaming/com.douglasgdev.devopsdesktop/devops-desktop.db` abriu em `user_version 7` e **foi lido de novo em 9** pela janela real desta sessão. Colunas novas conferidas no arquivo: em `deploy_profiles` — `runtime image_name dockerfile compose_file service_name publish_ports`; em `deploy_runs` — `previous_image`; em `pipeline_nodes` — `git_op git_ref`. Os **oito nós da etapa 3 sobreviveram** ao rebuild da tabela `pipeline_nodes` da migração 8 (lido de volta: `validar, git, coleta, preparo, publicar, gate, copia, historico`) |
 | **Fluxo sem servidor na janela real** (CDP, §4.1) | modelo `serverId: null` salvo · pré-vistoria `2 arquivo(s), 72.1 KB` · publicar #1 `success` com as 15 etapas · guarda `.devops-backups/1` com o README antigo **e** o excedente movido · reverter #2 `2 arquivo(s) reposto(s)` (conferido no disco) · publicar #3 `1 copiado · 1 já igual` (CRC32) · destino dentro do projeto **recusado na etapa 1** sem tocar no disco · caminho duplicado recusado (`o projeto já tem um modelo de deploy chamado "…"`) · remover o modelo → `deploy_runs` 5 → 0 e `audit_log` 57 → 58 (o histórico fica na auditoria, como a confirmação diz) · UI do modo local conferida no exe: destino "Nesta máquina (sem SSH)", estratégias só **C**/**D**, rótulo "Guardar o que já está no destino antes de sobrescrever", sem o checkbox de releases, e os quatro diálogos (pré-vistoria → publicar → reverter → remover) lidos na tela |
 | As quatro portas do "o deploy gera o próprio artefato" (exe das 11:01) | **W1** artefatos sem seleção + build gerando `saindo-do-build.txt`: 61 copiados, arquivo conferido no destino · **W2** artefatos declarando `gerado-pela-preparacao.txt` que **ainda não existe**: etapa 4 anuncia, preparação gera, 1 copiado, `success` · **W3** caminho que nenhum comando gera: `failed` na etapa 8 com "depois da preparação não sobrou nenhum arquivo para enviar — confira os caminhos" · **W4** `script`: `success` sem copiar nada (destino ficou vazio, como projetado) |
@@ -55,9 +56,13 @@ Armadilhas já conhecidas nesta máquina:
 | **Higiene da tela no binário final** (CDP) | o parágrafo "*Rode a pré-vistoria antes de publicar: ela mostra o que subiria e o que a checagem de segredos encontraria. O botão "Publicar" fica bloqueado até aí.*" **não está mais na tela** (`document.body.innerText` não contém a frase) — ele virou documentação no README §9.6. No lugar ficou o **estado**, no `title` de quem passa por cima do botão, lido no DOM: `span[title="Rode a pré-vistoria antes de publicar"]` envolvendo um botão com `disabled: true`. **Por que no pai e não no botão:** `Button` aplica `disabled:pointer-events-none` (`src/components/ui.tsx:44`), e um botão que não recebe ponteiro não mostra dica nenhuma — medido com `getComputedStyle`: botão `pointerEvents: "none"`, span `pointerEvents: "auto"`. O texto não é mais um só: `motivoPublicar` devolve o motivo do estado atual (sem modelo, pré-vistoria pendente, itens
 bloqueados sem autorização, execução em andamento, pronto). **Na janela só a variante "pré-vistoria pendente" foi lida de
 fato** — as outras quatro são o que o código devolve, e continuam pedindo o aceite visual dele (§6, item 5) |
-| Frontend embutido no executável | conferido **dentro da janela**: o pacote das 09:37 servia `index-5zynmBe_.js` enquanto `dist/` já tinha `index-Cko7uGOK.js` (frontend velho dentro de um binário novo). O binário das **14:55** serve `/assets/index-BC07Lf6F.js` lido de `document.querySelectorAll("script[src]")`, o mesmo hash de `dist/assets/` da rodada das 14:48 — incluindo a tela sem o parágrafo de ajuda |
-| Instalador | `npm run tauri build` (14:55, saída 0) → `DevOps Desktop_0.1.0_x64-setup.exe` 5.002.154 B (4,77 MiB) e `DevOps Desktop_0.1.0_x64_en-US.msi` 7.200.768 B (6,87 MiB) |
-| Executando | `devops-desktop.exe` aberto por `Start-Process`, `MainWindowTitle = "DevOps Desktop — Central de SSH, Git e Deploy"`, `Responding = True`, 10 telas navegáveis por clique |
+| Migração `user_version` **10** no banco real | o que prova as tabelas novas **não** é um `PRAGMA` lido agora, e sim o round-trip pelos comandos, na janela aberta hoje: `analysis_corridas` devolve **8** corridas gravadas (ids 1–8, com `project`, `root`, `rules`, `counts`, `blocked`) e `analysis_achados` devolve os achados de uma delas (`runId 6` → 12 linhas com `arquivo`, `linha`, `regra`, `severidade`, `cwe`, `trechoMascarado`); `pipeline_nodes` devolve para cada nó os campos `analyzer` e `severityGate`, que só existem porque a migração 10 os acrescentou em `pipeline_nodes`. O piloto da etapa 5 é o projeto **4** (`%TEMP%\piloto-etapa5`) e o do motor continua o **3** |
+| **Análise de código na janela real** (CDP, etapa 5 do plano CI/CD) | sonda da ferramenta lida agora: `analysis_detectar` → `estado "encontrado"`, `caminho C:\Users\dougl\AppData\Local\Temp\semgrep-probe\Scripts\semgrep.exe`, `versao "1.181.0"`, `duracaoMs 2609`, `regras 19`, `origem "configuração"` — ou seja, o semgrep **não está no `PATH`** desta máquina e é exatamente para isso que existe `analise.semgrep.caminho`, lido de `get_settings` com esse mesmo valor · `analysis_regras` → **19** regras embarcadas (`dd-101-shell-true`, `dd-102-sql-montado`, …) · `analysis_conferir` → `estado "validadas"`, `regras 19`, `codigo 0`, com a frase do próprio semgrep `Configuration is valid - found 0 configuration error(s), and 19 rule(s).` · **corrida #6** na tela, com o semgrep real: `status "concluida"`, `filesScanned 3`, `exitCode 0`, `toolErrors 0`, `counts {error 8, warning 4, info 0}`, `severityGate "ERROR"`, **`blocked: true`** — veredito da contagem contra o corte · os **12** achados lidos um a um, cada um com o trecho **relido do disco e mascarado**: `subprocess.call("curl -H 'Authorization: Bearer «valor mascarado»' https://api.example", shell=True)` e, filtrando o JSON inteiro dos 12 por `ghp_|sk-|token=|secret=`, **0** campos batem · a mesma #6 exportada como pacote: `esquema "devops-desktop/analise@1"`, `veredito {classificacao: "barra", bloqueia: true, corte: "ERROR", contagem: {error 8, warning 4, total 12}}`, `decisoes [{acao: "parar-a-publicacao", motivo: "12 achado(s) no corte ERROR ou acima"}]`, `cobertura {arquivosLidos 3, arquivosPulados 0, achadosGuardados 12}`, `execucao.codigoDeSaidaEProva: false` (e `codigoDeSaidaDaFerramenta: 0` escrito ao lado, para ficar claro que ele **não** é a prova), `truncado: false`, `nota: null`, `observacao "nenhum valor de credencial está aqui: os trechos passam pela mascaráção de security.rs antes de serem gravados"`, e um achado com `cwe "CWE-78: OS Command Injection"` |
+| **Nó `analise` rodando no mesmo motor** (CDP, etapa 5) | três execuções do **`deploy::start`** com o nó de análise no grafo, lidas hoje em `deploy_run`: **#44** `failed` com a linha `Nó 9:failed` às `19:54:10Z` — e a corrida de análise **do mesmo segundo** (#5) diz `tool "semgrep ausente"`, `status "falhou"`, `filesScanned 0`: **sem leitura não é verde** · **#45** `success` (`20:19:59Z → 20:20:05Z`) com a corrida **#7** `instrumento semgrep`, `versao 1.181.0`, `exitCode 0`, `concluida` · **#46** `success` (`20:22:26Z`) com a corrida **#8** `instrumento embutido`, 2 arquivos lidos, 1 ms, `exitCode null` (o embutido não tem processo externo, e mesmo assim a corrida é `concluida`) — as duas portas, a mesma `analysis::executar` · o `../fora` no nó de análise é recusado pelo **mesmo** validador do nó de comando, lido agora com `pipeline_check_nodes`: `nó “preparo”: a pasta de trabalho deve ser um caminho relativo dentro do projeto`, sem salvar nada · o grafo do piloto voltou ao desenho de origem e está lido assim: `pipeline_nodes` → **8** nós (`validar, git, coleta, preparo, publicar, gate, copia, historico`), `kinds` = `motor 6 · comando 1 · aprovação 1`, e `pipeline_validate` imprimindo `definição “Piloto sem servidor” v18 · artifacts · destino C:\Users\dougl\AppData\Local\Temp\piloto-etapa2\publicado · nesta máquina · grafo de 8 nó(s) · 6 etapa(s) do motor, 1 de comando, 1 de aprovação, 0 de git, 0 de análise` |
+| Frontend embutido no executável | conferido **dentro da janela**: o pacote das 09:37 servia `index-5zynmBe_.js` enquanto `dist/` já tinha `index-Cko7uGOK.js` (frontend velho dentro de um binário novo). O binário das **14:55** serve `/assets/index-BC07Lf6F.js` lido de `document.querySelectorAll("script[src]")`, o mesmo hash de `dist/assets/` da rodada das 14:48 — incluindo a tela sem o parágrafo de ajuda. **Etapa 5, binário das 16:11:** `document.querySelectorAll("script[src]")` devolve exatamente `["/assets/index-l9oCfRyf.js"]`, e `dist/assets/` tem `index-l9oCfRyf.js` (882.386 B) — o frontend dentro do instalador é o que está no disco |
+| Instalador | `npm run tauri build` (14:55, saída 0) → `DevOps Desktop_0.1.0_x64-setup.exe` 5.002.154 B (4,77 MiB) e `DevOps Desktop_0.1.0_x64_en-US.msi` 7.200.768 B (6,87 MiB). **Etapa 5 (rodada das 16:11):** as duas linhas lidas **no arquivo de log da compilação**, não no código de saída de um pipe — `bundle/nsis/…-setup.exe` **4.90 MiB** e `bundle/msi/…_en-US.msi` **8.18 MiB**, com `devops-desktop.exe` gravado no mesmo minuto (foi justamente ignorar o pipe que me fez publicar um binário velho nesta sessão; §5, item 25) |
+| **Cartão de progresso reconciliado** (CDP, etapa 5) | o **#46** começou e terminou no mesmo segundo (`16:22:26 → 16:22:26`), caso em que a leitura do detalhe chega **depois** do evento de fim — foi assim que ele ficou preso em "em andamento" com a corrida já `success` no banco (defeito #68, visto no print da janela das 16:12 com o **#45**). Lido de novo no binário das 16:11, às **16:33**: a linha do histórico `#46 Piloto Etapa 2 → nesta máquina … 16:22:26 · v17 · f40243ff · grafo · 1 de 1 nós` abre o cartão com `sucesso` e o botão **Repetir** presente, `em andamento` **ausente** do texto visível da tela. Causa e correção no §5, item 24 |
+| Executando | `devops-desktop.exe` aberto por `Start-Process`, `MainWindowTitle = "DevOps Desktop — Central de SSH, Git e Deploy"`, `Responding = True`, 10 telas navegáveis por clique. **Etapa 5 (o exe das 16:11, aberto às 16:12, lido no DOM agora):** **11** entradas na navegação — `Dashboard, Servidores, Terminal, Arquivos remotos, Git, GitHub, Projetos, Deploy, Análise, Histórico, Configurações` |
 | Git | `git push origin main` → `8e328c8..0308e84`, saída 0, e `git ls-remote origin refs/heads/main` devolve `0308e84c4b00f0c28c5c42e40dfbba0bb8e4d6b9`, o mesmo `git rev-parse HEAD` local — a **etapa 4 está pública** em <https://github.com/DouglasGDev/devops-desktop>. O push foi autorizado por ele nesta conversa, depois de eu registrar que a autorização anterior tinha coberto só a etapa 3. Etapa 3, medida na época: `efe551d..23beec2` |
 
 O que isso **não** cobre: as asserções automáticas continuam sendo de backend — o piloto de interface (§4.1) dirige a
@@ -68,10 +73,34 @@ locais), para não mexer no que não pude medir. **E o mesmo vale para os execut
 de Docker/Compose/PM2 é um roteiro POSIX que roda **no servidor**, então nenhum `docker build`, `docker compose up` ou
 `pm2 reload` foi executado contra um host real — o que foi medido é o roteiro gerado (teste unitário sobre o texto do
 script), a recusa da tela quando falta campo, e a recusa do validador quando o modelo não tem servidor. A realidade
-desta máquina, lida hoje: `docker` 29.3.1 **existe** mas a daemon do Docker Desktop **não está de pé**
-(`failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine`), e `pm2` **não está instalado**.
+desta máquina, **relida em 2026-10-15**: `docker` 29.3.1 **existe** mas a daemon do Docker Desktop **não está de pé**
+(`failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine … O sistema não pode encontrar o
+arquivo especificado`), e `pm2` **não está instalado** (`pm2: command not found`).
 Ou seja: mesmo localmente não haveria como rodar um container para conferir. O registro de auditoria guarda as execuções
 de teste (não há como apagar linhas de auditoria por desenho).
+
+E o recorte honesto da **etapa 5**, do mesmo jeito medido:
+
+- **`semgrep` não está no `PATH`** desta máquina (`semgrep: command not found`), mas **existe** fora dele, em
+  `C:\Users\dougl\AppData\Local\Temp\semgrep-probe\Scripts\semgrep.exe` (versão **1.181.0**, lida pela sonda da tela). Não
+  há correção de documento aqui porque nunca houve documento dizendo o contrário — o que existia era a minha frase em
+  conversa, "o semgrep está ausente nesta máquina", e ela estava errada: quem não existe é o `PATH`, não a ferramenta. É
+  exatamente o caso que `analise.semgrep.caminho` atende, e por isso a sonda tem `origem: "configuração"`.
+- **A linha do motor que *trava a corrida pelo corte* está provada só por teste unitário.** Na janela eu li o
+  `blocked: true` da corrida #6 (8 erros com corte `ERROR`) e li a corrida **falhando por ausência de leitura** (#44, com
+  a corrida de análise do mesmo segundo em `status "falhou"`), mas **nenhuma execução do pipeline foi bloqueada por
+  achado** nesta máquina: o piloto em que o nó `analise` roda (`%TEMP%\piloto-etapa2`) tem dois arquivos que as regras
+  embarcadas não acusam (#7 e #8 com `counts` zerado), e o piloto que tem código varrerável (`piloto-etapa5`) nunca virou
+  modelo de deploy. Tentar criar arquivo varrerável dentro do piloto da etapa 2 foi bloqueado pelo classificador de
+  permissões duas vezes, e eu não contornei o bloqueio. Primeiro passo para fechar isso na janela: cadastrar o
+  `%TEMP%\piloto-etapa5` como projeto com um modelo de deploy, pôr um nó `analise` com corte `ERROR` no grafo dele e
+  publicar — o esperado é a corrida `failed` com o veredito da contagem, não com o código de saída.
+- As seis palavras de classificação do pacote foram **lidas no JSON** para três delas — `barra` (#6), `cobertura-nula`
+  (#5, com `bloqueia: true`, `decisoes` `revisar-o-pedido` + `instalar-ou-apontar-a-ferramenta` e a `nota`
+  "o semgrep não estava disponível nesta máquina — instale-o ou aponte o caminho em `analise.semgrep.caminho` …") e
+  `sem-achados` (#7 e #8, `bloqueia: false`, `decisoes` `prosseguir|nada no corte declarado, com leitura efetiva e sem
+  erro de ferramenta`); `revalidar-varredura`, `achados-abaixo-do-corte` e `varredura-interrompida` são o que o código
+  devolve e o que os testes unitários asserem, não algo que eu tenha visto na janela.
 
 ### 4.1 Como a janela foi dirigida (reproduzível)
 
@@ -212,13 +241,42 @@ node scripts/ponte-cdp.mjs --drag-node publicar 48 16   # arrasta e devolve o tr
   mesmo risco, e em tempo de corrida `dir_do_no` ainda canonicaliza e recusa o que dobra para fora da raiz do projeto.
   Medido na janela real (§2): as três telas de executor, as recusas de campo, o nó git rodando nas execuções **#42** e
   **#43**, e `git tag -l` no disco confirindo a etiqueta que a tela anunciou.
+- **Análise de código na tela e no pipeline** (etapa 5 do plano CI/CD — `src-tauri/src/analysis.rs`,
+  `src-tauri/regras/dd-seguranca.yaml`, `src-tauri/src/deploy.rs`, `src-tauri/src/pipeline.rs`, `src-tauri/src/models.rs`,
+  `src/views/AnalysisView.tsx`, `src/lib/analysis.ts`, `src/components/deploy/PipelineGraph.tsx`): o app passa a ler o
+  **código-fonte** de um projeto, não só o que ele publica. **Um analisador, duas portas** — a tela **Análise** e o nó
+  `analise` do grafo chamam a mesma `analysis::executar`, e o veredito é sempre a contagem contra o corte escolhido
+  (`barra_o_corte`), nunca o código de saída da ferramenta: `codigoDeSaidaEProva: false` está dentro do pacote por
+  escrito. O instrumento **embutido** são 19 regras em YAML (`dd-101`…`dd-111`, Python/JS+TS/PHP/genéricas) lidas pelo
+  próprio app, sem dependência nova; o instrumento **semgrep** adapta o executável do projeto
+  [semgrep/semgrep](https://github.com/semgrep/semgrep) (`--config` com as regras embarcadas entregues, saída `--json`
+  convertida em achados nossos), com o caminho configurável em `analise.semgrep.caminho`. A sonda da ferramenta tem
+  **prazo próprio** e distingue `encontrado` / `ausente` / `sem-resposta`, porque "não respondeu" não é "não existe".
+  Cobertura é gravada junto (`arquivosLidos`, `arquivosPulados`) e uma varredura que não leu nada, ou que perdeu o
+  instrumento pedido, **falha** em vez de passar por limpa — `blocked` é o veredito, não um aviso. O trecho de cada
+  achado é **relido do disco e mascarado** por `security::mascarar` antes de ser gravado: a mesma dona da máscara dos
+  logs do motor e da checagem de commit, com a passada nova de `Bearer` que fecha o buraco medido nesta etapa (um token
+  `sk_live_…` apareceu destampado na tela antes da correção). Para apontar uma IA sobre a varredura sem inventar
+  contrato: **Exportar pacote** imprime `devops-desktop/analise@1` com `esquema`, `projeto`, `execucao`, `cobertura`,
+  `veredito` (classificação em palavras de ação: `barra`, `cobertura-nula`, `revalidar-varredura`, `sem-achados`,
+  `achados-abaixo-do-corte`, `varredura-interrompida`), `decisoes` (cada uma com `acao`/`motivo`/`evidencia` apontando
+  campo do próprio pacote — quem decide é quem recebe), `porRegra`, `achados`, `truncado`, `nota` e `observacao`; e
+  **Exportar SARIF** fala com o que já existe fora do app. No grafo, o quinto tipo de nó (`kind "analise"`, migração 10
+  com `analyzer`/`severity_gate` nas colunas de `pipeline_nodes`) é validado pelo mesmo `checar_grafo`, desenhado na
+  mesma tela, e executado pelo **mesmo** `deploy::start` — não há segundo motor nem segunda fila.
+  Medido na janela real (§2): a sonda achando o semgrep **1.181.0** fora do `PATH` pelo caminho configurado, as 19 regras
+  validadas pela própria ferramenta, a corrida **#6** com 12 achados `blocked: true` e o token plantado mascarado em todos
+  os trechos, o pacote `devops-desktop/analise@1` lido campo a campo, e o nó `analise` executado pelo motor em **#44**
+  (falha por ausência de leitura), **#45** (semgrep real) e **#46** (embutido).
 
-Total da superfície: **136 comandos Tauri registrados**, 23 arquivos Rust em `src-tauri/src`, 10 views,
-39.463 linhas de TS/TSX/Rust.
+Total da superfície: **147 comandos Tauri registrados** (contados por `#[tauri::command]` nos 24 arquivos de
+`src-tauri/src`), 24 arquivos Rust, 11 views, **44.302** linhas de TS/TSX/Rust (77 arquivos, `node_modules`, `target`,
+`dist` e a pasta `Python/` à parte).
 
-Persistência (SQLite local, migrações em `src-tauri/src/db.rs`) — as dez tabelas que existem hoje:
+Persistência (SQLite local, migrações em `src-tauri/src/db.rs`) — as treze tabelas que existem hoje:
 `settings`, `servers`, `projects`, `audit_log`, `routines`, `terminal_history`, `deploy_profiles`, `deploy_runs`,
-`deploy_run_steps`, `pipeline_revisions`. Não há tabela de série histórica de métrica: o painel lê do servidor na hora
+`deploy_run_steps`, `pipeline_revisions`, `pipeline_nodes`, `analysis_runs`, `analysis_findings`. Não há tabela de série
+histórica de métrica: o painel lê do servidor na hora
 pedida.
 
 ## 5. Decisões que não devem ser revertidas
@@ -348,17 +406,48 @@ Estas vieram do SPEC e de correções explícitas do Douglas; reverter qualquer 
     conferida pela **mesma** função do nó de comando local (`conferir_pasta_local`) — um `../fora` escrito na tela é
     recusado antes de salvar, e `dir_do_no` ainda canonicaliza na corrida. A resposta da linha é a do git, lida na janela:
     "tag v0.0.1-janela criada nesta máquina — sem remoto cadastrado", em vez de um sucesso mudo.
+24. **Um cartão de progresso se reconcilia com o estado do motor, não só com os eventos dele.** A tela de Deploy só
+    fechava o cartão pelo evento `deploy-done`; quando a corrida terminava **antes** de a leitura do detalhe chegar — ou
+    quando a janela estava em outra tela — o cartão ficava preso em "em andamento" para sempre, com o **Repetir**
+    inacessível (defeito #68, visto no print da janela com a corrida **#45** já `success` no banco). O motor é o
+    dono do estado, então a tela agora pergunta a ele: enquanto `running`, uma sonda a cada 2 s chama `deploy_active` e,
+    se a corrida não está mais em voo, relê `deploy_run` e converge o cartão (`src/views/DeployView.tsx`, efeito com
+    bandeira `vivo` para não escrever estado depois do desmonte). Lido na janela com o **#46**, que começou e terminou no
+    mesmo segundo: o cartão mostrou o status real e o **Repetir**. O princípio vale para qualquer tela que desenha
+    trabalho longo: **evento é aceleração, estado é a verdade**.
+25. **A saída de uma compilação se lê no arquivo de log, não no código de saída de um pipe.** `npm run tauri build` foi
+    lançado como `… | tail -25` enquanto o executável antigo ainda estava aberto: o `tail` escondeu o
+    `failed to remove file …devops-desktop.exe — Acesso negado (os error 5)`, o comando pareceu terminar bem, e eu
+    quase documentei como novo um binário que não tinha sido gravado. Só a comparação entre o hash servido pela janela
+    (`script[src]`) e o `dist/assets/` do disco descobriu o engano. Hoje: a compilação escreve log, o log é lido por
+    inteiro, e o hash dentro do `.exe` é conferido contra o disco antes de qualquer afirmação no documento.
+26. **Fixture de credencial tem de ser visivelmente falso.** O push desta etapa foi **recusado** pelo protetor de
+    segredos do GitHub (`! [remote rejected] main -> main (push declined due to repository rule violations)`) porque um
+    teste de mascaráção usava `sk_live_` seguido de 24 caracteres alfanuméricos de alto calibre: para o scanner do remoto
+    não importa a intenção — a *forma* é a de uma credencial real. A mecânica da máscara depende do **formato em volta**
+    do valor (`Bearer `, `chave = "…"`), nunca da entropia dele, então o fixture passou a
+    `sk_live_NAO-E-UMA-CHAVE-REAL-2026` e o token opaco a `um-token-opaco-sem-prefixo-de-especie`; os **300** testes
+    continuam verdes, conferidos **depois** da troca. Como o literal estava no diff do commit, corrigir em commit novo não
+    bastava: os commits locais foram reunidos em um só (`git reset --soft`, nenhum trabalho perdido) antes de empurrar.
 
 ## 6. Pendências assumidas (com o primeiro passo de cada)
 
 | # | Pendência | Primeiro passo concreto |
 | --- | --- | --- |
-| 0 | **Dados do piloto das etapas 2, 3 e 4, ainda cadastrados de propósito** | O projeto **Piloto Etapa 2** (`%TEMP%\piloto-etapa2`) com a definição *Piloto sem servidor* **v15** e as execuções **#23–#43** continuam no cadastro para ele abrir a janela e ver as telas conferidas — a v15 é o grafo de oito nós (`validar → git → coleta → preparo/publicar → gate → copia → historico`, com `preparo` de volta a `echo preparo`), a #34 é a corrida em que `preparo` falha e trava o resto, a #38/#39 são as duas execuções de nó sozinho lidas no binário final (`preparo` → "1 comando(s) nesta máquina", `gate` → "aprovado na janela"), e a **#42/#43 são as duas execuções do nó git** (uma `tag` que criou `v0.0.1-janela` de verdade no piloto e uma `checkout main` que respondeu "em main"). O que a etapa 4 criou para medir **foi desfeito e conferido**: o servidor temporário foi apagado (`list_servers` → 0), o modelo *medição docker* 21 foi removido pela confirmação da tela, a etiqueta `v0.0.1-janela` saiu do repositório do piloto (`git tag -l` → 0) e o grafo voltou aos oito nós. Quando ele decidir, o primeiro passo é **Projetos → Piloto Etapa 2 → Remover do cadastro** (a confirmação avisa quantos modelos saem junto; nenhum arquivo local é apagado) e depois apagar a pasta `%TEMP%\piloto-etapa2`. O arquivo de teste de 1,5 GB já foi removido do projeto e do destino |
+| 0 | **Dados do piloto das etapas 2, 3, 4 e 5, ainda cadastrados de propósito** | O projeto **Piloto Etapa 2** (`%TEMP%\piloto-etapa2`) com a definição *Piloto sem servidor* **v18** e as execuções **#23–#46** continuam no cadastro para ele abrir a janela e ver as telas conferidas — a v18 é o grafo de oito nós lido hoje (`validar, git, coleta, preparo, publicar, gate, copia, historico` · `motor 6 · comando 1 · aprovação 1 · git 0 · análise 0`, com `preparo` de volta a `echo preparo`), a #34 é a corrida em que `preparo` falha e trava o resto, a #38/#39 são as duas execuções de nó sozinho lidas no binário final (`preparo` → "1 comando(s) nesta máquina", `gate` → "aprovado na janela"), a **#42/#43** são as duas execuções do nó git (uma `tag` que criou `v0.0.1-janela` de verdade no piloto e uma `checkout main` que respondeu "em main") e a **#44/#45/#46** são as três execuções do nó `analise` pelo mesmo motor (falha por ferramenta ausente, sucesso com o semgrep 1.181.0, sucesso com o embutido). O projeto **Piloto Etapa 5** (`%TEMP%\piloto-etapa5`, `app.py`, `src/legado.php` e um `README.md`) é o que tem código varrerável — as corridas de análise **#1–#8** ficam no cadastro, e a **#6** é a das 12 linhas achadas com o token mascarado. O que a etapa 4 criou para medir **foi desfeito e conferido**: o servidor temporário foi apagado (`list_servers` → 0), o modelo *medição docker* 21 foi removido pela confirmação da tela, a etiqueta `v0.0.1-janela` saiu do repositório do piloto (`git tag -l` → 0) e o grafo voltou aos oito nós. Quando ele decidir, o primeiro passo é **Projetos → Piloto Etapa 2 → Remover do cadastro** (e o mesmo para o Piloto Etapa 5; a confirmação avisa quantos modelos saem junto; nenhum arquivo local é apagado) e depois apagar as duas pastas em `%TEMP%`. O `analise.semgrep.caminho` salvo hoje aponta para `%TEMP%\semgrep-probe\Scripts\semgrep.exe` — se a pasta cair, a sonda passa a dizer `ausente` e o instrumento embutido continua funcionando. O arquivo de teste de 1,5 GB já foi removido do projeto e do destino |
 | 1 | **Client ID na máquina do Douglas** | Colar o **Client ID** da OAuth App (o campo está em **GitHub → Configuração**) e gerar um secret novo no GitHub — o valor hexadecimal que estava salvo no banco era o **secret**, não o ID. Sem isso a aba GitHub não conecta: é limite de conta, não do código |
 | 2 | **Passada de visual (prioridade quando ele chamar)** | Só depois das funções; começar pelo print da tela que incomoda. Não refazer estilo por conta própria junto de feature |
 | 3 | **Pacotes Linux** | Os alvos `deb`/`rpm`/`AppImage` nunca foram gerados aqui. Rodar `npm run tauri build` numa imagem Linux e ajustar `bundle.targets` + paths (o código já usa `dirs`/caminhos relativos, mas isso precisa ser provado, não suposto) |
 | 4 | **Teste de interface automatizado** | Não há runner com asserções. O que existe hoje é o piloto `scripts/ponte-cdp.mjs` (§4.1), que dirige a janela real mas exige leitura humana a cada passo. Se um runner entrar, o mínimo é o fluxo do SPEC §17; a cobertura automática continua `tsc` + suíte Rust + `scripts/confira-repo.ts` |
-| 5 | **Aceite visual das últimas entregas** | `Git → Árvore`, `GitHub → repositório → Local`, `Git → Guardados`, os botões *Reproduzir este commit* / *Reverter este commit* / *Voltar para este commit*, o **fluxo de deploy sem servidor** (modelo com destino "Nesta máquina", pré-vistoria, publicar, reverter), o **contrato de pipeline** — em **Projetos → Modelos de deploy** o badge `v{n}`, o botão **Conferir** e a lista de **Versões salvas**; em **Deploy** a linha de procedência da execução (`definição v{n} · ambiente · destino · commit`), o `· v{n} · {sha8}` no histórico e o **Repetir** com o painel âmbar quando a política recusa — o **construtor visual** (aba **grafo**: nós arrastáveis, painel do nó, **Conferir**/**Salvar grafo**/**Esvaziar**, **Rodar sozinho** / **Com dependências**, estado vivo por nó durante a corrida e o modal de **Aprovação** com Aprovar/Rejeitar), e a **etapa 4**: o campo **Executor de runtime** do modelo com as três telas (Docker com *Nome da imagem* / *Dockerfile* / *Nome do container* / *Portas publicadas*, Compose com *Arquivo do compose* / *Serviço*, PM2 com *App no PM2*), o nó **git** do grafo (*operação*, referência e **Pasta no projeto**), a linha **"imagem anterior …"** no histórico de uma reversão de runtime, e o botão **Publicar** parado com o motivo no rótulo de quem passa por cima. Eu abri cada uma dessas telas e li o texto na janela real, mas **ele** ainda não viu nada disso nesta máquina — e o tooltip do botão desabilitado é justamente o tipo de coisa que só o olho confere |
+| 5 | **Aceite visual das últimas entregas** | `Git → Árvore`, `GitHub → repositório → Local`, `Git → Guardados`, os botões *Reproduzir este commit* / *Reverter este commit* / *Voltar para este commit*, o **fluxo de deploy sem servidor** (modelo com destino "Nesta máquina", pré-vistoria, publicar, reverter), o **contrato de pipeline** — em **Projetos → Modelos de deploy** o badge `v{n}`, o botão **Conferir** e a lista de **Versões salvas**; em **Deploy** a linha de procedência da execução (`definição v{n} · ambiente · destino · commit`), o `· v{n} · {sha8}` no histórico e o **Repetir** com o painel âmbar quando a política recusa — o **construtor visual** (aba **grafo**: nós arrastáveis, painel do nó, **Conferir**/**Salvar grafo**/**Esvaziar**, **Rodar sozinho** / **Com dependências**, estado vivo por nó durante a corrida e o modal de **Aprovação** com Aprovar/Rejeitar), e a **etapa 4**: o campo **Executor de runtime** do modelo com as três telas (Docker com *Nome da imagem* / *Dockerfile* / *Nome do container* / *Portas publicadas*, Compose com *Arquivo do compose* / *Serviço*, PM2 com *App no PM2*), o nó **git** do grafo (*operação*, referência e **Pasta no projeto**), a linha **"imagem anterior …"** no histórico de uma reversão de runtime, e o botão **Publicar** parado com o motivo no rótulo de quem passa por cima — e a **etapa 5**: a tela **Análise** com o
+projeto *Piloto Etapa 5* e a corrida **#6** na lista (12 achados, corte `ERROR`, selo de *barra a publicação*), o seletor
+de instrumento com **Embutido / Semgrep / Ambos**, **Sondar ferramenta** devolvendo `encontrado · 1.181.0`, **Conferir
+regras** e **Ver/Ocultar regras embarcadas (19)**, o campo **Caminho do semgrep** já preenchido com o caminho desta
+máquina, **Exportar pacote** / **Exportar SARIF**, e no grafo do Deploy o nó **análise de código** com o seletor de
+instrumento e o corte de severidade no painel do nó. Eu abri cada uma dessas telas e li o texto na janela real, mas **ele**
+ainda não viu nada disso nesta máquina — e o tooltip do botão desabilitado é justamente o tipo de coisa que só o olho
+confere |
+| 7 | **Ver o motor *bloquear* uma publicação pelo corte da análise, na janela** | A regra está escrita (`barra_o_corte`, `blocked` no pacote, o `sem_leitura` que faz a corrida **falhar**) e três classificações foram lidas no JSON exportado (`barra`, `cobertura-nula`, `sem-achados`), mas **nenhuma corrida do pipeline foi travada por achado nesta máquina** — detalhe e primeiro passo no fim do §2. É um piloto de dois cliques: cadastrar `%TEMP%\piloto-etapa5` como projeto e modelo de deploy, pôr um nó `analise` com corte `ERROR` no grafo, publicar. O esperado é a corrida `failed` citando a contagem, e as etapas depois do nó em `skipped` |
 | 6 | **Revalidar o deploy por SSH num host real — e pela primeira vez com um executor de runtime** | Além de `build_step`/`identify_step`, a etapa 2 mexeu no caminho com servidor: `validate_remoto` agora chama `deploy::checar_definicao(..., Some(&servidor))` e `insert_run` passou a receber a procedência. As checagens remotas foram movidas verbatim e `server_ref()` continua sendo a primeira delas, então por construção o remoto não muda — mas "por construção" sem medir num host é presunção. **A etapa 4 amplia essa pendência em vez de criar outra:** Docker, Compose e PM2 só rodo no servidor, e o que foi conferido aqui é o roteiro gerado e a recusa da tela, nunca um container subindo de verdade. Primeiro passo: cadastrar um servidor, repetir C/D com `server_id` preenchido conferindo que a etapa 1 recusa o que recusava antes, e então publicar **uma** aplicação real com `docker` (o caminho completo: build da imagem no servidor, container novo no ar, `previous_image` gravada, reversão voltando a imagem anterior) e, se houver, uma com `pm2`. Nesta máquina isso não tem como: o `docker` 29.3.1 existe mas a daemon do Docker Desktop está parada, e `pm2` não está instalado |
 
 ## 7. Lacunas honestas do "canivete suíço" (ainda NÃO existe)

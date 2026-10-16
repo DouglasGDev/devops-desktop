@@ -44,8 +44,9 @@ está em [docs/ENTREGAS.md](docs/ENTREGAS.md).
 | **Terminal** | Sessões PTY múltiplas ligadas a um servidor, com redimensionamento, histórico de comandos local e encerramento limpo ao fechar a janela. |
 | **Git** | Status, stage por arquivo ou por trecho (hunk), diff linha a linha, commit (com amend), gráfico de histórico de commits, árvore dos arquivos rastreados com o conteúdo que o Git guarda no HEAD, branches locais/remotas, criar/renomear/excluir/alternar, merge, rebase, resolução de conflito com lado escolhido, fetch/pull/push, tags, remotes, clone, reverter commit e mover a cabeça do ramo, publicação pelo Git (comandos locais + push + tag), teste de acesso ao remoto e abrir o repositório no editor (VS Code/Cursor/system). Funciona sozinho: nenhuma dessas ações depende de haver um servidor cadastrado. |
 | **Acesso da máquina** | Detectar o que está instalado (`ssh`, `ssh-add`, `git`, `gh`), quantas chaves o `ssh-agent` tem, a identidade que o git resolve, os editores encontrados no disco e a conta ativa do `gh`; dizer se a máquina já está liberada para publicar e, quando não está, abrir o navegador no fluxo de autorização do GitHub e confirmar `liberado como @login`. |
-| **Deploy** | Cinco estratégias reais: **A** SFTP sincronizado, **B** Git no servidor, **C** build local + artefatos, **D** sequência de scripts, **E** Docker/Compose. Pipeline visual de até 15 etapas com log, código de saída, verificação de ferramentas no servidor antes de executar, cancelamento cooperativo, release anterior preservada e rollback assistido; ou um **grafo** desenhado na tela (etapas do motor, comandos e aprovações, com dependências, prazo, repetição e condição por nó) que o mesmo motor percorre. O destino pode ser **esta máquina** (sem SSH, com **C** ou **D**): comparação por conteúdo, cópia só do que mudou, ponto de recuperação em `.devops-backups` e reversão que repõe inclusive os arquivos removidos da limpeza. |
+| **Deploy** | Cinco estratégias reais: **A** SFTP sincronizado, **B** Git no servidor, **C** build local + artefatos, **D** sequência de scripts, **E** Docker/Compose. Pipeline visual de até 15 etapas com log, código de saída, verificação de ferramentas no servidor antes de executar, cancelamento cooperativo, release anterior preservada e rollback assistido; ou um **grafo** desenhado na tela (etapas do motor, comandos, aprovações, passos de git e varredura de código, com dependências, prazo, repetição e condição por nó) que o mesmo motor percorre. O destino pode ser **esta máquina** (sem SSH, com **C** ou **D**): comparação por conteúdo, cópia só do que mudou, ponto de recuperação em `.devops-backups` e reversão que repõe inclusive os arquivos removidos da limpeza. |
 | **Segurança** | Bloqueio de commit/push quando o conteúdo que o Git publicaria contém segredo, varredura de projeto, regras extras configuráveis, remoção assistida do índice sem apagar o arquivo local. |
+| **Análise de código** | Varredura estática do código-fonte de um projeto com o analisador embutido (19 regras em YAML), com o **semgrep** externo, ou com os dois; corte de severidade escolhido por você, que decide se a varredura barra a publicação — nunca o código de saída da ferramenta. Histórico local por corrida, com cobertura, achados por regra e trecho de código já mascarado, exportação do pacote `devops-desktop/analise@1` (JSON) e de SARIF para um revisor humano ou uma IA, e o mesmo veredito disponível como nó **análise de código** dentro do grafo do deploy. |
 | **Dashboard** | Estado dos servidores, deploys recentes e resultado, falhas do histórico, transferências em andamento, alertas de configuração e métricas reais de CPU, memória, disco, containers e serviços — lidas do servidor só quando você pedir. |
 | **GitHub** (opcional) | Conectar a conta pelo fluxo de dispositivo do OAuth e trabalhar o repositório de dentro do app: bandeja com o que é seu (revisão pedida, seus PRs, suas issues), pull request com diff real, conversa de comentários, revisão (aprovar / pedir alterações) e mesclar com método escolhido, abrir um PR a partir de um ramo desta máquina, mapear a pasta local de um repo publicado — o app mostra o caminho exato e abre a pasta no Explorador — e abrir ali mesmo a seção Git completa daquela pasta (aba **Local**), issues com descrição e comentários, execuções do Actions com reexecução, visão geral que liga o remoto às pastas locais (clonar, vincular como `origin`) e criação de repositório. Tudo com confirmação nas ações que escrevem; sem conta conectada, a aba mostra só a conta e o Client ID. |
 | **Auditoria** | Tudo fica em SQLite local, pesquisável e filtrável por servidor, projeto, tipo, nível e resultado. |
@@ -519,6 +520,42 @@ mensagem nem token.
 
 Se a conta não estiver conectada, a aba mostra só a conta e o Client ID — nenhuma tabela de exemplo.
 
+### 9.8 Análise de código
+
+A tela **Análise** varre o código-fonte de um projeto cadastrado e guarda o resultado no inventário local. Dois
+instrumentos, escolhidos por varredura:
+
+| Instrumento | O que roda | Regras |
+| --- | --- | --- |
+| **Embutido** | o analisador do próprio aplicativo, no processo | as 19 regras em `src-tauri/regras/dd-seguranca.yaml` (`dd-101`…`dd-111`), por linguagem: Python, JavaScript/TypeScript, PHP e genéricas |
+| **Semgrep** | o executável do [semgrep](https://github.com/semgrep/semgrep), chamado com `--json` e lido de volta | as regras dele, mais as embarcadas entregues no mesmo diretório |
+| **Embutido + Semgrep** | os dois, na mesma corrida | a união, com o instrumento de cada achado na linha dele |
+
+O semgrep é uma ferramenta externa: **Sondar ferramenta** diz o estado real nesta máquina (`encontrado`, `ausente`,
+`sem-resposta`) com a versão, a origem do binário e quanto a sondagem levou. O caminho do executável, quando não está no
+`PATH`, é o campo de configuração `analise.semgrep.caminho`. **Conferir regras** valida o YAML embarcado antes de
+qualquer varredura.
+
+O veredito **nunca** é o código de saída da ferramenta: é a contagem de achados contra o **corte de severidade** que
+você escolheu — *Nada barra*, *Barra se houver erro*, *Barra se houver aviso ou erro*, *Barra se houver qualquer
+achado*. Uma corrida marcada `barra` na lista é uma promessa quebrada, não um aviso. E uma varredura que não leu
+arquivo nenhum, ou que perdeu o instrumento que pediu, **falha** em vez de passar por limpa: sem leitura não há o que
+afirmar sobre o código.
+
+Cada corrida guarda cobertura (arquivos lidos e pulados, com o motivo do pulo), a contagem por severidade, o prazo, a
+ferramenta e a versão dela. Os trechos de código exibidos são relidos do disco na hora de gravar e passam pela mesma
+máscara que protege os logs do motor e a checagem de commit — `security::mascarar` é a dona única dessa mecânica, e o
+que sai para a tela não carrega segredo. **Exportar pacote** gera o JSON do contrato `devops-desktop/analise@1`
+(esquema, projeto, execução, cobertura, veredito, decisão, achados por regra, observação) e **Exportar SARIF** o
+formato que um editor ou um revisor de código já entende; os dois são o ponto de partida para apontar uma IA sobre a
+varredura, e o pacote diz quantos achados ficaram de fora quando truncou.
+
+**No pipeline.** O construtor do grafo tem um quinto tipo de nó, **análise de código**, com o instrumento, o corte, a
+**Pasta no projeto** (caminho relativo dentro da pasta cadastrada — `../fora` é barrada ao conferir) e o prazo. Ele
+chama a mesma função da tela, `analysis::executar`, pelo mesmo motor que executa os outros nós: **Rodar sozinho** no
+nó varre, registra a corrida no histórico e decide pelo corte, e um nó que barra a publicação falha a corrida com a
+contagem na linha do histórico. Não existe um segundo analisador nem um segundo motor.
+
 ---
 
 ## 10. Modelo de segurança
@@ -625,7 +662,7 @@ cd src-tauri
 cargo test --lib
 ```
 
-Cobertura atual do backend (261 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
+Cobertura atual do backend (300 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
 timeout e cancelamento, sessões PTY, ciclo completo de Git em repositório temporário (status, stage por hunk, commit,
 log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), trabalho guardado e
 reprodução de commit no git real (`stash push` tira a alteração da pasta e `stash list` mostra exatamente a entrada que o
@@ -718,6 +755,19 @@ conferido pelo mesmo validador do resto do grafo: aceita `pull`, `checkout` e `t
 recusa nó git sem operação e nó git dividindo ramal com irmão (a pasta de trabalho do git é uma só), e a pasta dele passa
 pela mesma checagem do nó de comando local — relativo dentro do projeto, com `/etc`, `..\segredo` e `C:\Windows` recusados
 de antes de salvar.
+A análise de código-fonte é coberta pelo mesmo critério de não aceitar atalho: cada uma das 19 regras embarcadas é
+conferida contra o código em que ela deve bater (`cada_regra_embutida_ca_no_codigo_que_deve_caer`) e contra o código bom,
+que não pode acusar nada (`o_codigo_bom_nao_acusa_nada`); a marca de identificador respeita a borda de palavra e ignora
+formatação colada; o instrumento `ambos` grava o mesmo achado uma vez só (`o_mesmo_achado_dos_dois_instrumentos_e_gravado_uma_vez`); o
+envelope JSON do semgrep é lido **sem que o veredito dependa do código de saída** (`o_codigo_de_saida_da_ferramenta_nunca_e_o_veredito`, que
+comparece mesmo quando a ferramenta devolve `None`), e um envelope truncado ou com severidade desconhecida **não inventa
+número nem desaparece com o achado**; o trecho gravado não contém o valor do segredo
+(`o_trecho_gravado_nunca_tem_o_valor_de_um_segredo`) e é exatamente a linha apontada; a varredura não sai da pasta do
+projeto; as duas listas de regras — tela e instrumento — têm os mesmos ids na mesma ordem; e a sonda distingue os três
+estados (`a_conferencia_diz_os_tres_estados_da_ferramenta`, `uma_ferramenta_ausente_e_dita_ausente_e_nao_sem_resposta`),
+porque "não respondeu" não é "não existe". O pacote do revisor (IA ou humano) é testado na ordem determinística que pesa
+o que barra primeiro, na classificação que diz o que os números dizem, no agrupamento por regra e na forma do SARIF.
+Nenhum desses testes chama o semgrep: ele é ferramenta externa e opcional, e a suíte continua pedindo só `git` e `ssh`.
 Nenhum teste de rede é feito: as rotas que falam com o GitHub são exercitadas só na máquina, com dados de
 resposta fixos dentro do próprio teste.
 

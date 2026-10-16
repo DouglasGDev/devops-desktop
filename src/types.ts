@@ -525,10 +525,16 @@ export interface RetryPolicy {
 
 // ---------- Grafo do pipeline (plano CI/CD, etapa 3) ----------
 
-/** Os quatro tipos que o motor sabe executar: uma etapa dele, um comando, uma espera, uma operação de git desta máquina. */
-export type NodeKind = "motor" | "comando" | "aprovacao" | "git";
+/** Os cinco tipos que o motor sabe executar: uma etapa dele, um comando, uma espera, uma operação de git desta máquina, uma varredura de código. */
+export type NodeKind = "motor" | "comando" | "aprovacao" | "git" | "analise";
 
 export type NodeExecutor = "local" | "ssh";
+
+/** O instrumento de um nó `analise` — os mesmos três da tela de análise. */
+export type NodeAnalyzer = "embutido" | "semgrep" | "ambos";
+
+/** O corte de severidade. `""` é uma escolha legítima: o nó varre e informa, não barra. */
+export type SeverityGate = "" | "ERROR" | "WARNING" | "INFO";
 
 /** Uma das quinze etapas do motor, com o nome que o motor dá a ela no modo do modelo. */
 export interface EngineStep {
@@ -553,6 +559,10 @@ export interface PipelineNode {
   gitOp: string | null;
   /** Referência do nó `git` (o ramo no checkout, a tag na marcação); proibido no pull. */
   gitRef: string | null;
+  /** O instrumento de um nó `analise`; `embutido` nos demais tipos. */
+  analyzer: NodeAnalyzer;
+  /** O corte de um nó `analise`; `""` nos demais tipos e num nó que só informa. */
+  severityGate: SeverityGate;
   dependsOn: string[];
   parallel: boolean;
   /** 0 = herdar o prazo do modelo. */
@@ -579,6 +589,8 @@ export type PipelineNodeInput = {
   commands?: string[] | null;
   gitOp?: string | null;
   gitRef?: string | null;
+  analyzer?: NodeAnalyzer | null;
+  severityGate?: SeverityGate | null;
   dependsOn?: string[] | null;
   parallel?: boolean | null;
   timeoutSecs?: number | null;
@@ -623,6 +635,156 @@ export interface LogEvent {
 export interface DeployActive {
   runId: number;
   label: string;
+}
+
+// ---------- Análise de código-fonte (plano CI/CD, etapa 5) ----------
+
+/** O estado da ferramenta externa, medido nesta máquina. `ausente` não é `sem-resposta`: confundir os dois faria uma instalação lenta parecer uma ausência. */
+export interface AnalysisTool {
+  /** `encontrado`, `ausente` ou `sem-resposta`. */
+  estado: string;
+  caminho: string | null;
+  versao: string | null;
+  /** O que a sondagem levou, em ms — a tela diz "demorou" em vez de esconder o prazo estourado. */
+  duracaoMs: number;
+  /** Quantas regras o conjunto embarcado declara, lido do próprio texto. */
+  regras: number;
+  /** De onde o caminho veio: `configuração` ou `path`. */
+  origem: string;
+  /** O que a ferramenta respondeu na sondagem de versão, em uma linha. */
+  resposta: string;
+}
+
+/** Uma regra do analisador embarcado — as mesmas linhas de que a varredura sai. */
+export interface AnalysisRule {
+  id: string;
+  severidade: string;
+  mensagem: string;
+  cwe: string;
+  familias: string[];
+}
+
+/** O que a conferência externa das regras respondeu. Sem ferramenta, a resposta diz que não houve conferência. */
+export interface AnalysisCheck {
+  /** `validadas`, `inválidas`, `sem-ferramenta` ou `sem-resposta`. */
+  estado: string;
+  regras: number;
+  codigo: number | null;
+  mensagem: string;
+}
+
+export interface AnalysisCounts {
+  error: number;
+  warning: number;
+  info: number;
+}
+
+/** Uma varredura como ficou gravada. O código de saída da ferramenta é uma coluna e nunca o veredito. */
+export interface AnalysisRun {
+  id: number;
+  projectId: number;
+  project: string;
+  /** A pasta varrida, já absoluta. */
+  root: string;
+  analyzer: NodeAnalyzer;
+  /** O instrumento que de fato rodou, com o nome da ferramenta externa quando ela existia aqui. */
+  tool: string;
+  toolVersion: string | null;
+  rules: string;
+  severityGate: SeverityGate;
+  /** `rodando`, `concluida`, `falhou` ou `interrompida`. */
+  status: string;
+  startedAt: string;
+  finishedAt: string | null;
+  durationMs: number;
+  filesScanned: number;
+  filesSkipped: number;
+  exitCode: number | null;
+  /** Quantos erros a ferramenta reportou fora dos achados. */
+  toolErrors: number;
+  /** Se a corrida barra, pela contagem contra o corte. */
+  blocked: boolean;
+  counts: AnalysisCounts;
+  note: string | null;
+}
+
+/** Um achado. `snippet` é a linha do arquivo mascarada: o valor de um segredo nunca chega aqui. */
+export interface AnalysisFinding {
+  id: number;
+  runId: number;
+  ruleId: string;
+  /** `embutido` ou `semgrep` — quem viu a linha. */
+  source: string;
+  severity: "ERROR" | "WARNING" | "INFO";
+  /** Caminho relativo à raiz varrida, com barra. */
+  file: string;
+  lineStart: number;
+  lineEnd: number;
+  message: string;
+  cwe: string | null;
+  snippet: string | null;
+}
+
+/** O pedido de varredura. `path` é uma subpasta relativa dentro do projeto. */
+export interface AnalysisInput {
+  projectId: number;
+  analyzer?: NodeAnalyzer | null;
+  severityGate?: SeverityGate | null;
+  path?: string | null;
+  /** 0 = o padrão do aplicativo; o teto da varredura é 3600 segundos. */
+  timeoutSecs?: number | null;
+}
+
+/** O pacote que uma IA lê para decidir: a mesma corrida da tela, com cada ação apontando para o campo que a justifica. */
+export interface AnalysisPackage {
+  esquema: string;
+  geradoEm: string;
+  projeto: { id: number; nome: string; pasta: string };
+  execucao: {
+    id: number;
+    instrumento: string;
+    ferramenta: string;
+    versao: string | null;
+    regras: string[];
+    corte: string;
+    status: string;
+    inicio: string;
+    fim: string | null;
+    duracaoMs: number;
+    codigoDeSaidaDaFerramenta: number | null;
+    codigoDeSaidaEProva: boolean;
+    errosDaFerramenta: number;
+  };
+  cobertura: { arquivosLidos: number; arquivosPulados: number; achadosGuardados: number };
+  veredito: {
+    /** `barra`, `cobertura-nula`, `varredura-interrompida`, `revalidar-varredura`, `sem-achados` ou `achados-abaixo-do-corte`. */
+    classificacao: string;
+    bloqueia: boolean;
+    corte: string;
+    contagem: AnalysisCounts & { total: number };
+  };
+  decisoes: { acao: string; motivo: string; evidencia: string }[];
+  porRegra: {
+    regra: string;
+    severidade: string;
+    quantidade: number;
+    arquivosDiferentes: number;
+    exemplos: string[];
+  }[];
+  achados: {
+    regra: string;
+    origem: string;
+    severidade: string;
+    arquivo: string;
+    linha: number;
+    linhaAte: number;
+    mensagem: string;
+    cwe: string | null;
+    trechoMascarado: string | null;
+  }[];
+  truncado: boolean;
+  nota: string | null;
+  observacao: string;
 }
 
 export interface SecretFinding {
@@ -820,5 +982,6 @@ export type ViewId =
   | "projects"
   | "github"
   | "deploy"
+  | "analise"
   | "history"
   | "settings";

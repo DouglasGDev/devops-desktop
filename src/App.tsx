@@ -16,6 +16,7 @@ import { ServersView } from "./views/ServersView";
 import { SettingsView } from "./views/SettingsView";
 import { TerminalView } from "./views/TerminalView";
 import { Spinner } from "./components/ui";
+import { AnalysisView } from "./views/AnalysisView";
 
 function Shell() {
   const { ready } = useApp();
@@ -39,6 +40,7 @@ function Shell() {
               {view === "files" ? <FilesView onNavigate={setView} /> : null}
               {view === "projects" ? <ProjectsView /> : null}
               {view === "deploy" ? <DeployView onNavigate={setView} /> : null}
+              {view === "analise" ? <AnalysisView /> : null}
               {view === "git" ? (
                 <div className="h-full min-h-0">
                   <GitView onNavigate={setView} />

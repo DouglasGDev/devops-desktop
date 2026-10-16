@@ -30,7 +30,8 @@ use crate::{
     deploy,
     models::{
         DefinitionRevision, DeployProfile, DeployRun, DeployRunStep, PipelineNode,
-        PipelineNodeInput, MAX_NODES, NODE_EXECUTORS, NODE_GIT_OPS,
+        PipelineNodeInput, MAX_NODES, NODE_ANALISADORES, NODE_EXECUTORS, NODE_GIT_OPS,
+        SEVERIDADES,
     },
 };
 
@@ -56,6 +57,12 @@ pub struct NoParaChecar {
     /// conferência do grafo exige que ele venha preenchido quando o tipo é `git`:
     /// sem operação o nó seria um desenho no quadro que ninguém executa.
     pub operacao: String,
+    /// O instrumento de um nó `analise`, vazio nos outros tipos pela mesma razão
+    /// do campo acima: sem instrumento o nó varreria nada e aprovaria tudo.
+    pub instrumento: String,
+    /// O corte de severidade do nó `analise`. Vazio é uma escolha legítima — o nó
+    /// varre e informa sem barrar — mas um valor inventado barraria para sempre.
+    pub corte: String,
     pub dependencias: Vec<String>,
     pub paralelo: bool,
 }
@@ -69,6 +76,8 @@ impl From<&PipelineNode> for NoParaChecar {
             etapa: no.engine_step,
             executor: no.executor.clone(),
             operacao: no.git_op.clone().unwrap_or_default(),
+            instrumento: no.analyzer.clone(),
+            corte: no.severity_gate.clone(),
             dependencias: no.depends_on.clone(),
             paralelo: no.parallel,
         }
@@ -84,6 +93,8 @@ impl From<&PipelineNodeInput> for NoParaChecar {
             etapa: no.engine_step,
             executor: no.executor(),
             operacao: no.git_op(),
+            instrumento: no.analyzer(),
+            corte: no.severity_gate(),
             dependencias: no.depends_on(),
             paralelo: no.parallel.unwrap_or(false),
         }
@@ -189,6 +200,7 @@ pub fn checar_forma(nos: &[NoParaChecar]) -> Result<String, String> {
     let mut comandos = 0usize;
     let mut aprovacoes = 0usize;
     let mut git = 0usize;
+    let mut analises = 0usize;
     for no in nos {
         match no.kind.as_str() {
             "motor" => {
@@ -238,16 +250,42 @@ pub fn checar_forma(nos: &[NoParaChecar]) -> Result<String, String> {
                     ));
                 }
             }
+            "analise" => {
+                analises += 1;
+                if !NODE_ANALISADORES.contains(&no.instrumento.as_str()) {
+                    return Err(format!(
+                        "{} é um nó de análise sem instrumento que o motor rode: use {}",
+                        no.rotulo,
+                        NODE_ANALISADORES.join(", ")
+                    ));
+                }
+                if !(no.corte.is_empty() || SEVERIDADES.contains(&no.corte.as_str())) {
+                    return Err(format!(
+                        "{} corta por “{}”, e o corte dele aceita {}, vazio incluso — sem corte o nó informa, não barra",
+                        no.rotulo,
+                        no.corte,
+                        SEVERIDADES.join(", ")
+                    ));
+                }
+                // A varredura lê a pasta do projeto nesta máquina; não existe
+                // análise remota por SSH, então um nó assim seria um desenho falso.
+                if no.executor != "local" {
+                    return Err(format!(
+                        "{} analisa o código desta máquina, e o executor dele é local por definição",
+                        no.rotulo
+                    ));
+                }
+            }
             outro => {
                 return Err(format!(
-                    "{} é do tipo “{outro}”, e o motor só conhece motor, comando, aprovacao e git",
+                    "{} é do tipo “{outro}”, e o motor só conhece motor, comando, aprovacao, git e analise",
                     no.rotulo
                 ))
             }
         }
     }
     Ok(format!(
-        "grafo de {} nó(s) · {etapas} etapa(s) do motor, {comandos} de comando, {aprovacoes} de aprovação, {git} de git",
+        "grafo de {} nó(s) · {etapas} etapa(s) do motor, {comandos} de comando, {aprovacoes} de aprovação, {git} de git, {analises} de análise",
         nos.len()
     ))
 }
@@ -563,6 +601,13 @@ pub fn recover_open_runs(conn: &Connection) -> usize {
     execucoes
 }
 
+/// As varreduras de código que ficaram em 'rodando' porque o aplicativo fechou no
+/// meio delas. Entram na mesma abertura: são estado de execução, como o deploy, e
+/// uma análise que nunca terminou não pode aparecer como se tivesse passado.
+pub fn recover_open_analyses(conn: &Connection) -> usize {
+    db::recuperar_analises_abertas(conn)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -746,6 +791,8 @@ mod tests {
             etapa,
             executor: "local".into(),
             operacao: String::new(),
+            instrumento: String::new(),
+            corte: String::new(),
             dependencias: dependencias.iter().map(|d| d.to_string()).collect(),
             paralelo: false,
         }
@@ -755,6 +802,14 @@ mod tests {
         NoParaChecar {
             operacao: operacao.into(),
             ..no(chave, "git", None, dependencias)
+        }
+    }
+
+    fn no_analise(chave: &str, instrumento: &str, corte: &str, dependencias: &[&str]) -> NoParaChecar {
+        NoParaChecar {
+            instrumento: instrumento.into(),
+            corte: corte.into(),
+            ..no(chave, "analise", None, dependencias)
         }
     }
 
@@ -904,7 +959,7 @@ mod tests {
     fn tipo_de_no_que_o_motor_nao_conhece_e_recusado() {
         let nos = vec![no("magica", "agenda", None, &[])];
         let err = checar_forma(&nos).unwrap_err();
-        assert!(err.contains("motor, comando, aprovacao e git"), "{err}");
+        assert!(err.contains("motor, comando, aprovacao, git e analise"), "{err}");
     }
 
     #[test]
@@ -925,5 +980,41 @@ mod tests {
         paralelo.paralelo = true;
         let err = checar_forma(&[paralelo]).unwrap_err();
         assert!(err.contains("só um nó de comando pode dividir ramal"), "{err}");
+    }
+
+    #[test]
+    fn o_no_de_analise_existe_no_grafo_porque_o_motor_varre_ele() {
+        let mut nos = grafo_valido();
+        nos.push(no_analise("varredura", "ambos", "ERROR", &["confere"]));
+        let resumo = checar_forma(&nos).unwrap();
+        assert!(resumo.contains("1 de análise"), "{resumo}");
+
+        // sem corte o nó informa sem barrar: é uma escolha legítima, não um erro
+        assert!(checar_forma(&[no_analise("informa", "embutido", "", &[])]).is_ok());
+        assert!(checar_forma(&[no_analise("marca", "semgrep", "WARNING", &[])]).is_ok());
+
+        // instrumento que não existe varreria nada e aprovaria tudo
+        let inventado = checar_forma(&[no_analise("varre", "bandit", "ERROR", &[])]).unwrap_err();
+        assert!(inventado.contains("sem instrumento que o motor rode"), "{inventado}");
+        assert!(inventado.contains("embutido, semgrep, ambos"), "{inventado}");
+
+        // um corte inventado barraria para sempre — ninguém entenderia o porquê
+        let corte = checar_forma(&[no_analise("varre", "embutido", "CRITICO", &[])]).unwrap_err();
+        assert!(corte.contains("e o corte dele aceita"), "{corte}");
+
+        // análise remota não existe: o código lido é o desta máquina
+        let remoto = NoParaChecar {
+            executor: "ssh".into(),
+            ..no_analise("varre", "embutido", "ERROR", &[])
+        };
+        let err = checar_forma(&[remoto]).unwrap_err();
+        assert!(err.contains("executor dele é local por definição"), "{err}");
+
+        // varrer o projeto inteiro antes de qualquer etapa é um desenho válido
+        let standalone = checar_forma(&[
+            no_analise("varre", "embutido", "ERROR", &[]),
+            no("validar", "motor", Some(1), &["varre"]),
+        ]);
+        assert!(standalone.is_ok(), "{:?}", standalone);
     }
 }

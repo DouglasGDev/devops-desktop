@@ -29,10 +29,13 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use crate::{
-    audit, auth,
+    analysis, audit, auth,
     db::{self, DbHandle},
     files, git,
-    models::{strategy_needs_server, validate_strategy, DeployProfile, DeployRun, PipelineNode, Project, Server},
+    models::{
+        strategy_needs_server, validate_strategy, AnalysisInput, AnalysisRun, DeployProfile,
+        DeployRun, PipelineNode, Project, Server,
+    },
     runtime::{self},
     security, ssh_test, sshexec,
 };
@@ -662,6 +665,7 @@ impl Info {
     }
 }
 
+#[derive(Debug)]
 struct Fail {
     message: String,
     command: Option<String>,
@@ -1504,6 +1508,102 @@ fn rodar_no_git(ctx: &mut Ctx, no: &PipelineNode, posicao: i64) -> Result<String
     Ok(feito)
 }
 
+/// O nó `analise` varre o código do projeto nesta máquina e responde a uma única
+/// pergunta: o corte declarado na tela se cumpriu. O código de saída do semgrep
+/// não entra nessa conta — o que barra é a contagem lida do banco contra o corte
+/// do nó. E uma varredura que não conseguiu ler nada também para o nó: "não sei"
+/// nunca é um "está tudo bem". A varredura em si é a mesma da tela de Análise
+/// ([`crate::analysis::executar`]), chamada pela segunda porta.
+fn rodar_no_analise(ctx: &mut Ctx, no: &PipelineNode, posicao: i64) -> Result<String, Fail> {
+    let entrada = AnalysisInput {
+        project_id: ctx.project.id,
+        analyzer: Some(no.analyzer.clone()),
+        severity_gate: Some(no.severity_gate.clone()),
+        path: no.working_dir.clone(),
+        timeout_secs: Some(no.timeout_secs),
+    };
+    let corte = entrada.severity_gate();
+    let dados = db::pasta_de_dados(&ctx.app).map_err(Fail::new)?;
+    let raiz = analysis::raiz_do_projeto(&ctx.project).map_err(Fail::new)?;
+    ctx.mark(posicao, "running", Some("em execução"), None, None);
+    ctx.log(
+        posicao,
+        "out",
+        &format!(
+            "+ análise de código · {} · {}",
+            entrada.analyzer(),
+            if corte.is_empty() { "sem corte".to_string() } else { format!("corte {corte}") }
+        ),
+    );
+    let run = {
+        let conn = ctx
+            .db
+            .lock()
+            .map_err(|_| Fail::new("o banco não respondeu durante a varredura"))?;
+        analysis::executar(&conn, &dados, &ctx.project, &raiz, &entrada, &ctx.cancel)
+            .map_err(Fail::new)?
+    };
+    ctx.log(
+        posicao,
+        "out",
+        &format!(
+            "{} arquivo(s) lido(s) · {} achado(s): {} erro, {} aviso, {} info",
+            run.files_scanned, run.counts.total(), run.counts.error, run.counts.warning, run.counts.info
+        ),
+    );
+    if let Some(nota) = run.note.as_deref() {
+        ctx.log(posicao, "err", nota);
+    }
+    veredito_do_no(&run)
+}
+
+/// O veredito que o nó `analise` dá a uma corrida já gravada: barra quando o corte
+/// foi atingido, falha quando a varredura não pôde ser lida, e só então conclui
+/// com a linha que fica no histórico. Separado do motor porque depende apenas da
+/// corrida — é a mesma resposta que a tela de Análise mostra, e assim ela pode ser
+/// conferida sem uma janela nem um semgrep na máquina.
+fn veredito_do_no(run: &AnalysisRun) -> Result<String, Fail> {
+    let corte = if run.severity_gate.is_empty() {
+        "sem corte".to_string()
+    } else {
+        run.severity_gate.clone()
+    };
+    let texto = format!(
+        "{} achado(s) com {} arquivo(s) lidos — {}",
+        run.counts.total(),
+        run.files_scanned,
+        if run.blocked {
+            format!("o corte {corte} foi atingido")
+        } else if run.severity_gate.is_empty() {
+            "nada barra".to_string()
+        } else {
+            format!("dentro do corte {corte}")
+        }
+    );
+    if run.blocked {
+        return Err(Fail::failed(
+            format!("análise de código (corte {corte})"),
+            None,
+            format!(
+                "{} · erro {}, aviso {}, info {} — a varredura de {} barra a publicação",
+                run.tool, run.counts.error, run.counts.warning, run.counts.info, run.root
+            ),
+        ));
+    }
+    // Sem corte o nó informa, mas uma varredura que não leu nada ou que perdeu o
+    // instrumento pedido não informa coisa nenhuma: é falha, não sucesso.
+    if run.status == "falhou" {
+        return Err(Fail::failed(
+            format!("análise de código ({})", run.tool),
+            None,
+            run.note
+                .clone()
+                .unwrap_or_else(|| "a varredura não conseguiu ler o código".to_string()),
+        ));
+    }
+    Ok(texto)
+}
+
 /// Como um nó terminou. `Pulado` é diferente de falha: a condição do nó não se
 /// cumpriu, então nada foi executado e nada está errado.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1644,6 +1744,7 @@ fn executar_conteudo(ctx: &mut Ctx, no: &PipelineNode, row: &NodeRow) -> Result<
             }
             "comando" => rodar_comandos(ctx, no, row.position).map(|_| None),
             "git" => rodar_no_git(ctx, no, row.position).map(Some),
+            "analise" => rodar_no_analise(ctx, no, row.position).map(Some),
             // Um tipo que o motor não sabe executar não pode terminar como concluído:
             // é o nó que faz nada e sorri.
             outro => Err(Fail::new(format!(
@@ -4288,6 +4389,8 @@ mod tests {
             commands: Vec::new(),
             git_op: None,
             git_ref: None,
+            analyzer: String::new(),
+            severity_gate: String::new(),
             depends_on: dep.iter().map(|d| d.to_string()).collect(),
             parallel: false,
             timeout_secs: 0,
@@ -4561,5 +4664,65 @@ mod tests {
         let erro = git_do_no(&dir, "reset", "HEAD~1").unwrap_err();
         assert!(erro.contains("pull, checkout, tag"), "{erro}");
         assert!(erro.contains("reset"), "{erro}");
+    }
+
+    /// Uma corrida de análise como ela sairia do banco, para conferir só o que o
+    /// nó decide com ela na mão.
+    fn corrida(blocked: bool, status: &str, corte: &str, nota: Option<&str>) -> AnalysisRun {
+        AnalysisRun {
+            id: 7,
+            project_id: 1,
+            project: "casa".to_string(),
+            root: "C:/projetos/casa".to_string(),
+            analyzer: "embutido".to_string(),
+            tool: "embutido".to_string(),
+            tool_version: None,
+            rules: "dd-101-shell-true".to_string(),
+            severity_gate: corte.to_string(),
+            status: status.to_string(),
+            started_at: "agora".to_string(),
+            finished_at: Some("agora".to_string()),
+            duration_ms: 12,
+            files_scanned: 40,
+            files_skipped: 0,
+            exit_code: None,
+            tool_errors: 0,
+            blocked,
+            counts: crate::models::AnalysisCounts {
+                error: if blocked { 2 } else { 0 },
+                warning: 1,
+                info: 0,
+            },
+            note: nota.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn o_no_de_analise_barra_com_a_contagem_e_nao_com_o_codigo_de_saida() {
+        let atingido = veredito_do_no(&corrida(true, "concluida", "ERROR", None)).unwrap_err();
+        assert_eq!(atingido.command.as_deref(), Some("análise de código (corte ERROR)"));
+        assert!(atingido.message.contains("erro 2, aviso 1"), "{}", atingido.message);
+        assert!(atingido.message.contains("barra a publicação"), "{}", atingido.message);
+        assert_eq!(atingido.exit_code, None, "o nó não tem código de saída de ferramenta");
+
+        let dentro = veredito_do_no(&corrida(false, "concluida", "ERROR", None)).unwrap();
+        assert!(dentro.contains("dentro do corte ERROR"), "{dentro}");
+        assert!(dentro.contains("1 achado(s) com 40 arquivo(s) lidos"), "{dentro}");
+    }
+
+    #[test]
+    fn o_no_de_analise_nao_passa_por_limpo_sem_leitura() {
+        // Sem corte o nó informa, mas uma varredura que falhou não informa nada:
+        // é falha dita com a nota de quem varreu, nunca um sucesso presumido.
+        let sem_corte = veredito_do_no(&corrida(false, "falhou", "", Some("a varredura não leu arquivo nenhum")))
+            .unwrap_err();
+        assert!(
+            sem_corte.message.contains("a varredura não leu arquivo nenhum"),
+            "{}",
+            sem_corte.message
+        );
+        // e um nó que só informa, com a leitura feita, conclui dizendo que nada barra
+        let informativo = veredito_do_no(&corrida(false, "concluida", "", None)).unwrap();
+        assert!(informativo.contains("nada barra"), "{informativo}");
     }
 }

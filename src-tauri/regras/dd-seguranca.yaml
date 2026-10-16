@@ -1,0 +1,220 @@
+# Regras de análise de código embarcadas no DevOps Desktop.
+#
+# São regras locais: o semgrep as lê deste arquivo, nunca do registro (o `p/`
+# exige rede e manda métricas para fora). Os identificadores são os mesmos do
+# analisador embutido em `src-tauri/src/analysis.rs`, então o mesmo achado tem o
+# mesmo nome venha de quem vier.
+#
+# Uma família de linguagem por regra, medido no semgrep 1.181: a mesma regra
+# declarada para `[python, javascript]` não dispara em arquivo nenhum, enquanto
+# as duas separadas disparam. O dialeto JavaScript cobre `.ts` também.
+#
+# Segredo no código não é regra daqui: quem varre valor de credencial é
+# `security.rs`, na etapa própria do pipeline — duas mecânicas para a mesma
+# coisa é a duplicação que a especificação deste app recusa.
+rules:
+  # ---------- comando de sistema montado no código ----------
+  - id: dd-101-shell-true
+    languages: [python]
+    severity: ERROR
+    message: um comando é montado e entregue a um shell; se qualquer parte vier de fora, é injeção
+    metadata:
+      cwe: "CWE-78: OS Command Injection"
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.$CALL(..., shell=True, ...)
+          - pattern: os.system(...)
+          - pattern: os.popen(...)
+
+  - id: dd-101-shell-true-php
+    languages: [php]
+    severity: ERROR
+    message: entrada é levada a um comando de sistema
+    metadata:
+      cwe: "CWE-78: OS Command Injection"
+    patterns:
+      - pattern-either:
+          - pattern: system(...)
+          - pattern: shell_exec(...)
+          - pattern: passthru(...)
+          - pattern: exec(...)
+
+  # ---------- SQL montado no código ----------
+  - id: dd-102-sql-montado
+    languages: [python]
+    severity: ERROR
+    message: a consulta SQL é montada no código em vez de usar parâmetros ligados
+    metadata:
+      cwe: "CWE-89: SQL Injection"
+    patterns:
+      - pattern-either:
+          - pattern: $CURSOR.execute(f"...")
+          - pattern: $CURSOR.execute("..." % $X)
+          - pattern: $CURSOR.execute("..." + $X)
+
+  - id: dd-102-sql-montado-js
+    languages: [javascript]
+    severity: ERROR
+    message: a consulta SQL é montada por template literal em vez de parâmetros ligados
+    metadata:
+      cwe: "CWE-89: SQL Injection"
+    patterns:
+      - pattern-either:
+          - pattern: $DB.query(`...`)
+          - pattern: $DB.raw(`...`)
+          - pattern: $DB.execute(`...`)
+
+  # ---------- HTML escrito sem escapamento ----------
+  - id: dd-103-html-injetado
+    languages: [javascript]
+    severity: ERROR
+    message: HTML é escrito numa página sem escapamento
+    metadata:
+      cwe: "CWE-79: Cross-site Scripting"
+    patterns:
+      - pattern-either:
+          - pattern: $EL.innerHTML = $VAL
+          - pattern: $EL.outerHTML = $VAL
+          - pattern: document.write($VAL)
+
+  # ---------- TLS sem conferência de certificado ----------
+  - id: dd-104-tls-desligado
+    languages: [python]
+    severity: ERROR
+    message: a conferência do certificado TLS está desligada aqui
+    metadata:
+      cwe: "CWE-295: Improper Certificate Validation"
+    patterns:
+      - pattern-either:
+          - pattern: requests.$CALL(..., verify=False, ...)
+          - pattern: ssl._create_unverified_context(...)
+          - pattern: ssl.CERT_NONE
+
+  - id: dd-104-tls-desligado-js
+    languages: [javascript]
+    severity: ERROR
+    message: o cliente aceita qualquer certificado — o nome dele não é conferido
+    metadata:
+      cwe: "CWE-295: Improper Certificate Validation"
+    pattern-regex: '(rejectUnauthorized|strictSSL)\s*:\s*false'
+
+  # ---------- texto executado como código ----------
+  - id: dd-105-avaliacao-de-codigo
+    languages: [python]
+    severity: ERROR
+    message: texto é executado como código
+    metadata:
+      cwe: "CWE-94: Code Injection"
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: exec(...)
+          - pattern: compile(...)
+
+  - id: dd-105-avaliacao-de-codigo-js
+    languages: [javascript]
+    severity: ERROR
+    message: texto é executado como código
+    metadata:
+      cwe: "CWE-94: Code Injection"
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: new Function(...)
+
+  # ---------- desserialização do que veio de fora ----------
+  - id: dd-106-desserializacao
+    languages: [python]
+    severity: WARNING
+    message: bytes de fora são desserializados; o formato permite executar código na leitura
+    metadata:
+      cwe: "CWE-502: Deserialization of Untrusted Data"
+    patterns:
+      - pattern-either:
+          - pattern: pickle.loads(...)
+          - pattern: pickle.load(...)
+          - pattern: yaml.load(...)
+
+  - id: dd-106-desserializacao-php
+    languages: [php]
+    severity: WARNING
+    message: bytes de fora são desserializados; o formato permite executar código na leitura
+    metadata:
+      cwe: "CWE-502: Deserialization of Untrusted Data"
+    patterns:
+      - pattern: unserialize(...)
+
+  # ---------- hash criptográfico quebrado ----------
+  - id: dd-107-criptografia-frac
+    languages: [python]
+    severity: WARNING
+    message: hash quebrado (MD5 ou SHA-1) usado para proteger alguma coisa
+    metadata:
+      cwe: "CWE-327: Broken or Risky Cryptographic Algorithm"
+    patterns:
+      - pattern-either:
+          - pattern: hashlib.md5(...)
+          - pattern: hashlib.sha1(...)
+
+  - id: dd-107-criptografia-frac-js
+    languages: [javascript]
+    severity: WARNING
+    message: hash quebrado (MD5 ou SHA-1) usado para proteger alguma coisa
+    metadata:
+      cwe: "CWE-327: Broken or Risky Cryptographic Algorithm"
+    patterns:
+      - pattern-either:
+          - pattern: crypto.createHash("md5")
+          - pattern: crypto.createHash("sha1")
+
+  - id: dd-107-criptografia-frac-php
+    languages: [php]
+    severity: WARNING
+    message: hash quebrado (MD5 ou SHA-1) usado para proteger alguma coisa
+    metadata:
+      cwe: "CWE-327: Broken or Risky Cryptographic Algorithm"
+    patterns:
+      - pattern-either:
+          - pattern: md5(...)
+          - pattern: sha1(...)
+
+  # ---------- política de origem / checagem calada / falha escondida ----------
+  - id: dd-108-cors-aberto
+    languages: [generic]
+    severity: WARNING
+    message: qualquer origem da internet está autorizada a chamar este serviço
+    metadata:
+      cwe: "CWE-942: Permissive Cross-domain Policy"
+    pattern-regex: '(?i)(Access-Control-Allow-Origin[^;]{0,8}\*|allow_origins\s*=\s*\[\s*.\*.\s*\])'
+
+  - id: dd-109-verificacao-suprimida
+    languages: [generic]
+    severity: WARNING
+    message: uma checagem automática foi calada nesta linha — o motivo precisa estar escrito aqui
+    pattern-regex: '(?i)(#\s*nosec|#\s*nosemgrep|//\s*nosemgrep|eslint-disable|tslint:disable|phpcs:ignore)'
+
+  - id: dd-110-falha-escondida
+    languages: [python]
+    severity: INFO
+    message: a exceção é capturada e descartada; o que falhou não chega a lugar nenhum
+    metadata:
+      cwe: "CWE-703: Improper Check or Handling of Exceptional Conditions"
+    pattern-regex: '(?m)^\s*except[^:#]*:\s*$\n\s+pass\s*$'
+
+  # ---------- depuração que ficou ligada ----------
+  - id: dd-111-debug-ativo
+    languages: [python]
+    severity: INFO
+    message: um modo de depuração ficou ligado no código
+    metadata:
+      cwe: "CWE-489: Active Debug Code"
+    pattern-regex: '(?m)\.run\([^)]*debug\s*=\s*True'
+
+  - id: dd-111-debug-ativo-js
+    languages: [javascript]
+    severity: INFO
+    message: um ponto de parada de depuração ficou no código
+    metadata:
+      cwe: "CWE-489: Active Debug Code"
+    patterns:
+      - pattern: debugger

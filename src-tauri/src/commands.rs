@@ -7,11 +7,11 @@ use std::{
 
 use rusqlite::{types::ToSql, Connection};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 use tauri_plugin_opener::{open_path, open_url};
 
 use crate::{
-    audit,
+    analysis, audit,
     auth::{self, AskPass, AuthBroker},
     db::{self, AppState},
     deploy,
@@ -19,7 +19,8 @@ use crate::{
     files_transfer::{self, TransferInfo, TransferState},
     git, git_probe, github, infra,
     models::{
-        AuditEntry, ConnectionTestResult, DefinitionRevision, DeployProfile, DeployProfileInput, DeployRun, EditorInstalado,
+        AnalysisFinding, AnalysisInput, AnalysisRun, AuditEntry, ConnectionTestResult,
+        DefinitionRevision, DeployProfile, DeployProfileInput, DeployRun, EditorInstalado,
         ImportSshHost, Project, PipelineNode, PipelineNodeInput, RemoteEntry, Routine,
         RoutineInput, SearchProjectRow, SearchResults, SearchServerRow, Server, ServerInput,
         SshDiscoveryReport, TerminalHistoryEntry, TerminalSessionInfo, ToolVersions,
@@ -94,10 +95,7 @@ async fn set_setting(state: State<'_, AppState>, key: String, value: String) -> 
 
 #[tauri::command]
 fn get_app_data_dir(app: AppHandle) -> Result<String, String> {
-    app.path()
-        .app_data_dir()
-        .map(|p| p.display().to_string())
-        .map_err(|e| format!("não foi possível determinar o diretório de dados: {e}"))
+    db::pasta_de_dados(&app).map(|p| p.display().to_string())
 }
 
 #[tauri::command]
@@ -3138,6 +3136,188 @@ async fn git_checkout_pull(
     .await
 }
 
+// Análise de código-fonte (plano CI/CD, etapa 5). A segunda porta da mesma
+// mecânica: a tela fala com estes comandos e o nó `analise` do grafo chama a
+// mesma `analysis::executar` por dentro do motor — uma varredura, um veredito.
+
+#[tauri::command]
+async fn analysis_detectar(state: State<'_, AppState>) -> Result<analysis::Ferramenta, String> {
+    let db = state.db.clone();
+    spawn("analysis_detectar", move || {
+        let conn = lock_db(&db)?;
+        analysis::sonda_ferramenta(&conn)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn analysis_regras() -> Result<Vec<analysis::RegraInfo>, String> {
+    Ok(analysis::regras_embarcadas())
+}
+
+#[tauri::command]
+async fn analysis_conferir(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<analysis::Validacao, String> {
+    let db = state.db.clone();
+    let dados = db::pasta_de_dados(&app)?;
+    spawn("analysis_conferir", move || {
+        let conn = lock_db(&db)?;
+        analysis::conferir_regras(&conn, &dados)
+    })
+    .await
+}
+
+/// Roda a varredura pedida e devolve a corrida como ela ficou gravada. A varredura
+/// é lenta de propósito (ler o projeto inteiro), por isso vai para a thread
+/// bloqueante e por isso o registro recusa a segunda do mesmo projeto.
+#[tauri::command]
+async fn analysis_executar(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    varreduras: State<'_, analysis::Estado>,
+    entrada: AnalysisInput,
+) -> Result<AnalysisRun, String> {
+    let projeto = {
+        let conn = lock_db(&state.db)?;
+        db::get_project(&conn, entrada.project_id)?
+    };
+    let nome = projeto.name.clone();
+    let raiz = analysis::raiz_do_projeto(&projeto)?;
+    let dados = db::pasta_de_dados(&app)?;
+    let db = state.db.clone();
+    let id = projeto.id;
+    let flag = varreduras.iniciar(id)?;
+    let resultado = spawn("analysis_executar", move || {
+        let conn = lock_db(&db)?;
+        analysis::executar(&conn, &dados, &projeto, &raiz, &entrada, &flag)
+    })
+    .await;
+    varreduras.terminar(id);
+    let corrida = resultado?;
+    let conn = lock_db(&state.db)?;
+    let _ = audit::log(
+        &conn,
+        if corrida.status != "concluida" {
+            "error"
+        } else if corrida.blocked {
+            "warning"
+        } else {
+            "info"
+        },
+        "análise",
+        &format!("Varredura {} · {}", corrida.tool, nome),
+        None,
+        Some(&nome),
+        corrida.exit_code,
+        Some(&format!(
+            "corrida #{} · {} arquivo(s) · {} achado(s): {} erro, {} aviso, {} info · {}",
+            corrida.id,
+            corrida.files_scanned,
+            corrida.counts.total(),
+            corrida.counts.error,
+            corrida.counts.warning,
+            corrida.counts.info,
+            corrida.note.as_deref().unwrap_or("sem nota")
+        )),
+    );
+    Ok(corrida)
+}
+
+#[tauri::command]
+async fn analysis_interromper(
+    varreduras: State<'_, analysis::Estado>,
+    project_id: i64,
+) -> Result<bool, String> {
+    Ok(varreduras.interromper(project_id))
+}
+
+#[tauri::command]
+async fn analysis_varrendo(varreduras: State<'_, analysis::Estado>) -> Result<Vec<i64>, String> {
+    Ok(varreduras.em_andamento())
+}
+
+#[tauri::command]
+async fn analysis_corridas(
+    state: State<'_, AppState>,
+    project_id: Option<i64>,
+    limit: Option<i64>,
+) -> Result<Vec<AnalysisRun>, String> {
+    let conn = lock_db(&state.db)?;
+    db::listar_analises(&conn, project_id, limit.unwrap_or(50).clamp(1, 200))
+}
+
+#[tauri::command]
+async fn analysis_achados(
+    state: State<'_, AppState>,
+    run_id: i64,
+    severidade: Option<String>,
+    limit: Option<i64>,
+) -> Result<Vec<AnalysisFinding>, String> {
+    let conn = lock_db(&state.db)?;
+    db::listar_achados(
+        &conn,
+        run_id,
+        severidade.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+        limit.unwrap_or(500).clamp(1, 5000),
+    )
+}
+
+/// O pacote que uma IA lê para decidir. É a mesma corrida da tela, em texto
+/// determinístico, com o que não foi lido dito em voz alta.
+#[tauri::command]
+async fn analysis_pacote(
+    state: State<'_, AppState>,
+    run_id: i64,
+    limite: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    let conn = lock_db(&state.db)?;
+    analysis::pacote(&conn, run_id, limite)
+}
+
+#[tauri::command]
+async fn analysis_exportar(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    run_id: i64,
+    formato: String,
+    limite: Option<usize>,
+) -> Result<String, String> {
+    let db = state.db.clone();
+    let dados = db::pasta_de_dados(&app)?;
+    spawn("analysis_exportar", move || {
+        let conn = lock_db(&db)?;
+        analysis::exportar(&conn, &dados, run_id, formato.trim(), limite)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn analysis_remover(state: State<'_, AppState>, run_id: i64) -> Result<(), String> {
+    let corrida = {
+        let conn = lock_db(&state.db)?;
+        let corrida = db::obter_analise(&conn, run_id)?;
+        db::apagar_analise(&conn, run_id)?;
+        corrida
+    };
+    let conn = lock_db(&state.db)?;
+    let _ = audit::log(
+        &conn,
+        "warning",
+        "análise",
+        "Corrida de análise removida",
+        None,
+        Some(&corrida.project),
+        None,
+        Some(&format!(
+            "corrida #{run_id} · {} · {} achado(s)",
+            corrida.tool,
+            corrida.counts.total()
+        )),
+    );
+    Ok(())
+}
 
 pub fn register_all(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
     builder.invoke_handler(tauri::generate_handler![
@@ -3254,6 +3434,17 @@ pub fn register_all(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri
         pipeline_run_node,
         pipeline_approve,
         pipeline_approvals_pending,
+        analysis_detectar,
+        analysis_regras,
+        analysis_conferir,
+        analysis_executar,
+        analysis_interromper,
+        analysis_varrendo,
+        analysis_corridas,
+        analysis_achados,
+        analysis_pacote,
+        analysis_exportar,
+        analysis_remover,
         github_status,
         github_set_client_id,
         github_connect_start,

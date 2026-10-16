@@ -1,3 +1,4 @@
+mod analysis;
 mod audit;
 mod auth;
 mod commands;
@@ -32,12 +33,16 @@ pub fn run() {
             // Nenhuma execução sobrevive ao fechamento do aplicativo: antes de
             // mostrar o banco, o que estava `'running'` vira interrompido.
             pipeline::recover_open_runs(&conn);
+            // O mesmo para uma varredura de código cortada no meio: ela não leu o
+            // fim de nada e não pode aparecer no histórico como se tivesse lido.
+            pipeline::recover_open_analyses(&conn);
             app.manage(db::AppState::new(conn));
             app.manage(terminal::TerminalState::new());
             app.manage(files_transfer::TransferState::new());
             app.manage(auth::AuthBroker::new());
             app.manage(deploy::DeployState::new());
             app.manage(github::GitHubState::new());
+            app.manage(analysis::Estado::novo());
             Ok(())
         });
 

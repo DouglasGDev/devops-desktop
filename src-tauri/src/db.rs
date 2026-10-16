@@ -4,9 +4,9 @@ use rusqlite::{Connection, OptionalExtension, Row};
 use tauri::Manager;
 
 use crate::models::{
-    AuditEntry, DefinitionRevision, DeployProfile, DeployProfileInput, DeployRun, DeployRunStep,
-    PipelineNode, PipelineNodeInput, Project, Routine, RoutineInput, RoutineParam, Server,
-    ServerInput, TerminalHistoryEntry,
+    AnalysisCounts, AnalysisFinding, AnalysisRun, AuditEntry, DefinitionRevision, DeployProfile,
+    DeployProfileInput, DeployRun, DeployRunStep, PipelineNode, PipelineNodeInput, Project,
+    Routine, RoutineInput, RoutineParam, Server, ServerInput, TerminalHistoryEntry,
 };
 
 pub struct AppState {
@@ -340,13 +340,108 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE deploy_runs ADD COLUMN previous_image TEXT;
     "#,
+    // v10 — análise de código-fonte (plano CI/CD, etapa 5). Duas tabelas novas porque
+    // uma varredura não é uma etapa de publicação: ela tem vida própria, pode ser
+    // rodada sem deploy nenhum, e o histórico dela precisa continuar quando o projeto
+    // muda de modelo. A cascata é pelo projeto — apagar o cadastro apaga o que foi
+    // visto nele. `counts` é JSON: três números que mudam juntos e são lidos juntos.
+    // `pipeline_nodes` é reconstruída de novo, pelo mesmo motivo da v8: não existe
+    // ALTER que acrescente um valor a um `CHECK` inline, e um tipo de nó que a tela
+    // desenha mas o banco recusa é o botão enfeitado que a especificação proíbe.
+    r#"
+    CREATE TABLE IF NOT EXISTS analysis_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        analyzer TEXT NOT NULL CHECK (analyzer IN ('embutido','semgrep','ambos')),
+        tool TEXT NOT NULL,
+        tool_version TEXT,
+        root TEXT NOT NULL,
+        rules TEXT NOT NULL DEFAULT '',
+        severity_gate TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'rodando'
+            CHECK (status IN ('rodando','concluida','falhou','interrompida')),
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        duration_ms INTEGER NOT NULL DEFAULT 0,
+        files_scanned INTEGER NOT NULL DEFAULT 0,
+        files_skipped INTEGER NOT NULL DEFAULT 0,
+        exit_code INTEGER,
+        tool_errors INTEGER NOT NULL DEFAULT 0,
+        blocked INTEGER NOT NULL DEFAULT 0,
+        counts TEXT NOT NULL DEFAULT '{"error":0,"warning":0,"info":0}',
+        note TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_analysis_runs_project ON analysis_runs(project_id, started_at DESC);
+    CREATE TABLE IF NOT EXISTS analysis_findings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL REFERENCES analysis_runs(id) ON DELETE CASCADE,
+        rule_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        severity TEXT NOT NULL CHECK (severity IN ('ERROR','WARNING','INFO')),
+        file TEXT NOT NULL,
+        line_start INTEGER NOT NULL,
+        line_end INTEGER NOT NULL,
+        message TEXT NOT NULL,
+        cwe TEXT,
+        snippet TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_analysis_findings_run ON analysis_findings(run_id, severity, file);
+    PRAGMA foreign_keys=OFF;
+    CREATE TABLE pipeline_nodes_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        profile_id INTEGER NOT NULL REFERENCES deploy_profiles(id) ON DELETE CASCADE,
+        node_key TEXT NOT NULL,
+        title TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('motor','comando','aprovacao','git','analise')),
+        engine_step INTEGER,
+        executor TEXT NOT NULL DEFAULT 'local' CHECK (executor IN ('local','ssh')),
+        environment TEXT,
+        working_dir TEXT,
+        commands TEXT NOT NULL DEFAULT '[]',
+        depends_on TEXT NOT NULL DEFAULT '[]',
+        parallel INTEGER NOT NULL DEFAULT 0,
+        timeout_secs INTEGER NOT NULL DEFAULT 0,
+        retry_limit INTEGER NOT NULL DEFAULT 0,
+        condition TEXT,
+        requires_approval INTEGER NOT NULL DEFAULT 0,
+        touches_destination INTEGER NOT NULL DEFAULT 0,
+        git_op TEXT CHECK (git_op IN ('pull','checkout','tag')),
+        git_ref TEXT,
+        analyzer TEXT NOT NULL DEFAULT 'embutido' CHECK (analyzer IN ('embutido','semgrep','ambos')),
+        severity_gate TEXT NOT NULL DEFAULT 'ERROR' CHECK (severity_gate IN ('','ERROR','WARNING','INFO')),
+        x INTEGER NOT NULL DEFAULT 0,
+        y INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (profile_id, node_key)
+    );
+    -- Os dois campos novos entram escritos, não pelo default da tabela: um nó que
+    -- não é análise não tem corte, e é assim que o gravador dos nós salva um motor,
+    -- um comando ou um git. Duas origens dizendo coisas diferentes da mesma fila
+    -- seria o tipo de discrepância que só aparece na tela.
+    INSERT INTO pipeline_nodes_new (id, profile_id, node_key, title, kind, engine_step, executor,
+        environment, working_dir, commands, depends_on, parallel, timeout_secs, retry_limit,
+        condition, requires_approval, touches_destination, git_op, git_ref, analyzer, severity_gate, x, y)
+    SELECT id, profile_id, node_key, title, kind, engine_step, executor,
+        environment, working_dir, commands, depends_on, parallel, timeout_secs, retry_limit,
+        condition, requires_approval, touches_destination, git_op, git_ref, 'embutido', '', x, y FROM pipeline_nodes;
+    DROP TABLE pipeline_nodes;
+    ALTER TABLE pipeline_nodes_new RENAME TO pipeline_nodes;
+    CREATE INDEX IF NOT EXISTS idx_pipeline_nodes_profile ON pipeline_nodes(profile_id, x, y);
+    PRAGMA foreign_keys=ON;
+    "#,
 ];
 
-pub fn init(app: &tauri::AppHandle) -> Result<Connection, String> {
-    let dir: PathBuf = app
+/// A pasta onde o aplicativo guarda o que é dele: o banco e, ao lado dele, as
+/// regras de análise que o semgrep lê do disco. Uma dona única porque duas
+/// janelas resolvendo caminhos diferentes escreveriam em dois lugares.
+pub fn pasta_de_dados(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("não foi possível determinar o diretório de dados: {e}"))?;
+        .map_err(|e| format!("não foi possível determinar o diretório de dados: {e}"))
+}
+
+pub fn init(app: &tauri::AppHandle) -> Result<Connection, String> {
+    let dir = pasta_de_dados(app)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("não foi possível criar o diretório de dados {}: {e}", dir.display()))?;
     let db_path = dir.join("devops-desktop.db");
     let conn = Connection::open(&db_path)
@@ -1243,7 +1338,8 @@ pub fn set_default_deploy_profile(conn: &Connection, id: i64) -> Result<DeployPr
 // ---------- nós do grafo (plano CI/CD, etapa 3) ----------
 
 const NODE_COLUMNS: &str = "id, profile_id, node_key, title, kind, engine_step, executor, \
-     environment, working_dir, commands, git_op, git_ref, depends_on, parallel, timeout_secs, \
+     environment, working_dir, commands, git_op, git_ref, analyzer, severity_gate, \
+     depends_on, parallel, timeout_secs, \
      retry_limit, condition, requires_approval, touches_destination, x, y";
 
 fn row_to_node(row: &Row) -> rusqlite::Result<PipelineNode> {
@@ -1262,6 +1358,8 @@ fn row_to_node(row: &Row) -> rusqlite::Result<PipelineNode> {
         commands: json_list(&commands),
         git_op: row.get("git_op")?,
         git_ref: row.get("git_ref")?,
+        analyzer: row.get("analyzer")?,
+        severity_gate: row.get("severity_gate")?,
         depends_on: json_list(&depends),
         parallel: row.get("parallel")?,
         timeout_secs: row.get("timeout_secs")?,
@@ -1320,11 +1418,19 @@ pub fn replace_pipeline_nodes(
             "git" => (Some(node.git_op()), clean_optional(&node.git_ref)),
             _ => (None, None),
         };
+        // Do mesmo jeito, o instrumento e o corte pertencem só ao nó de análise: um
+        // nó que deixou de ser análise não pode continuar carregando a varredura de
+        // um outro tipo.
+        let (analyzer, severity_gate) = match node.kind().as_str() {
+            "analise" => (node.analyzer(), node.severity_gate()),
+            _ => ("embutido".to_string(), String::new()),
+        };
         conn.execute(
             "INSERT INTO pipeline_nodes (profile_id, node_key, title, kind, engine_step, executor, \
-             environment, working_dir, commands, git_op, git_ref, depends_on, parallel, timeout_secs, \
+             environment, working_dir, commands, git_op, git_ref, analyzer, severity_gate, \
+             depends_on, parallel, timeout_secs, \
              retry_limit, condition, requires_approval, touches_destination, x, y) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
             rusqlite::params![
                 profile_id,
                 node.node_key.trim(),
@@ -1337,6 +1443,8 @@ pub fn replace_pipeline_nodes(
                 to_json_list(&node.commands())?,
                 git_op,
                 git_ref,
+                analyzer,
+                severity_gate,
                 to_json_list(&node.depends_on())?,
                 node.parallel.unwrap_or(false) as i64,
                 node.timeout_secs.unwrap_or(0),
@@ -1614,6 +1722,246 @@ pub fn setting_value(conn: &Connection, key: &str) -> Result<Option<String>, Str
     conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0))
         .optional()
         .map_err(|e| format!("falha ao ler configuração: {e}"))
+}
+
+// ---------- análise de código-fonte (plano CI/CD, etapa 5) ----------
+
+fn row_to_analysis_run(row: &Row) -> rusqlite::Result<AnalysisRun> {
+    let contagem: String = row.get("counts")?;
+    Ok(AnalysisRun {
+        id: row.get("id")?,
+        project_id: row.get("project_id")?,
+        project: row.get("project_name")?,
+        root: row.get("root")?,
+        analyzer: row.get("analyzer")?,
+        tool: row.get("tool")?,
+        tool_version: row.get("tool_version")?,
+        rules: row.get("rules")?,
+        severity_gate: row.get("severity_gate")?,
+        status: row.get("status")?,
+        started_at: row.get("started_at")?,
+        finished_at: row.get("finished_at")?,
+        duration_ms: row.get("duration_ms")?,
+        files_scanned: row.get("files_scanned")?,
+        files_skipped: row.get("files_skipped")?,
+        exit_code: row.get("exit_code")?,
+        tool_errors: row.get("tool_errors")?,
+        blocked: row.get::<_, i64>("blocked")? != 0,
+        // O JSON gravado é o que a contagem era; se ele não for legível o que
+        // aparece são os achados contados na tabela, nunca um zero inventado —
+        // por isso quem lê esta coluna chama `count_analise` depois.
+        counts: serde_json::from_str(&contagem).unwrap_or_default(),
+        note: row.get("note")?,
+    })
+}
+
+/// A linha de uma varredura em andamento, antes de qualquer achado existir. É o
+/// que permite à tela acompanhar uma análise longa e ao fechamento do aplicativo
+/// marcá-la como interrompida em vez de deixá-la 'rodando' para sempre.
+pub fn abrir_analise(conn: &Connection, run: &AnalysisRun) -> Result<i64, String> {
+    conn.execute(
+        "INSERT INTO analysis_runs (project_id, analyzer, tool, tool_version, root, rules, \
+         severity_gate, status, started_at, counts) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,'rodando',?8,'{\"error\":0,\"warning\":0,\"info\":0}')",
+        rusqlite::params![
+            run.project_id,
+            run.analyzer,
+            run.tool,
+            run.tool_version,
+            run.root,
+            run.rules,
+            run.severity_gate,
+            run.started_at,
+        ],
+    )
+    .map_err(|e| format!("falha ao abrir a análise: {e}"))?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Fecha a varredura com o que ela viu. Os números vêm da contagem real dos
+/// achados gravados, não de uma promessa de quem os escreveu.
+pub fn fechar_analise(conn: &Connection, run_id: i64, run: &AnalysisRun) -> Result<(), String> {
+    conn.execute(
+        "UPDATE analysis_runs SET tool = ?2, tool_version = ?3, root = ?4, rules = ?5, \
+         severity_gate = ?6, status = ?7, finished_at = ?8, duration_ms = ?9, \
+         files_scanned = ?10, files_skipped = ?11, exit_code = ?12, tool_errors = ?13, \
+         blocked = ?14, counts = ?15, note = ?16 WHERE id = ?1",
+        rusqlite::params![
+            run_id,
+            run.tool,
+            run.tool_version,
+            run.root,
+            run.rules,
+            run.severity_gate,
+            run.status,
+            run.finished_at,
+            run.duration_ms,
+            run.files_scanned,
+            run.files_skipped,
+            run.exit_code,
+            run.tool_errors,
+            run.blocked as i64,
+            serde_json::to_string(&run.counts).map_err(|e| format!("falha ao gravar a contagem: {e}"))?,
+            run.note,
+        ],
+    )
+    .map_err(|e| format!("falha ao fechar a análise: {e}"))?;
+    Ok(())
+}
+
+/// Grava os achados de uma varredura. Um achado sem severidade conhecida não
+/// chega aqui — o `CHECK` da tabela recusa, e a mensagem dele diz qual linha.
+pub fn gravar_achados(conn: &Connection, run_id: i64, achados: &[AnalysisFinding]) -> Result<(), String> {
+    for a in achados {
+        conn.execute(
+            "INSERT INTO analysis_findings (run_id, rule_id, source, severity, file, line_start, \
+             line_end, message, cwe, snippet) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            rusqlite::params![
+                run_id,
+                a.rule_id,
+                a.source,
+                a.severity,
+                a.file,
+                a.line_start,
+                a.line_end,
+                a.message,
+                a.cwe,
+                a.snippet,
+            ],
+        )
+        .map_err(|e| format!("falha ao gravar o achado “{}”: {e}", a.rule_id))?;
+    }
+    Ok(())
+}
+
+/// Quantos achados de cada severidade uma varredura deixou, contados na tabela.
+pub fn contar_achados(conn: &Connection, run_id: i64) -> Result<AnalysisCounts, String> {
+    let mut stmt = conn
+        .prepare("SELECT severity, COUNT(*) FROM analysis_findings WHERE run_id = ?1 GROUP BY severity")
+        .map_err(|e| format!("falha ao preparar a contagem: {e}"))?;
+    let mut contagem = AnalysisCounts::default();
+    let linhas = stmt
+        .query_map([run_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .map_err(|e| format!("falha ao contar os achados: {e}"))?;
+    for linha in linhas {
+        let (severidade, quantidade) = linha.map_err(|e| format!("falha ao contar os achados: {e}"))?;
+        match severidade.as_str() {
+            "ERROR" => contagem.error = quantidade,
+            "WARNING" => contagem.warning = quantidade,
+            "INFO" => contagem.info = quantidade,
+            _ => {}
+        }
+    }
+    Ok(contagem)
+}
+
+/// As colunas da corrida, já com o alias da tabela: `projects` entra no mesmo
+/// SELECT para a tela não precisar de segunda consulta para dizer de qual
+/// projeto é a varredura.
+const ANALYSIS_RUN_SELECT: &str = "SELECT a.id, a.project_id, a.analyzer, a.tool, a.tool_version, \
+     a.root, a.rules, a.severity_gate, a.status, a.started_at, a.finished_at, a.duration_ms, \
+     a.files_scanned, a.files_skipped, a.exit_code, a.tool_errors, a.blocked, a.counts, a.note, \
+     p.name AS project_name FROM analysis_runs a JOIN projects p ON p.id = a.project_id";
+
+pub fn listar_analises(
+    conn: &Connection,
+    project_id: Option<i64>,
+    limit: i64,
+) -> Result<Vec<AnalysisRun>, String> {
+    let sql = match project_id {
+        Some(_) => format!("{ANALYSIS_RUN_SELECT} WHERE a.project_id = ?1 ORDER BY a.started_at DESC, a.id DESC LIMIT ?2"),
+        None => format!("{ANALYSIS_RUN_SELECT} ORDER BY a.started_at DESC, a.id DESC LIMIT ?1"),
+    };
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("falha ao preparar o histórico de análises: {e}"))?;
+    let linhas: Vec<AnalysisRun> = match project_id {
+        Some(id) => stmt
+            .query_map(rusqlite::params![id, limit], row_to_analysis_run)
+            .map_err(|e| format!("falha ao listar as análises: {e}"))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("falha ao ler as análises: {e}"))?,
+        None => stmt
+            .query_map([limit], row_to_analysis_run)
+            .map_err(|e| format!("falha ao listar as análises: {e}"))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("falha ao ler as análises: {e}"))?,
+    };
+    Ok(linhas)
+}
+
+pub fn obter_analise(conn: &Connection, run_id: i64) -> Result<AnalysisRun, String> {
+    conn.query_row(
+        &format!("{ANALYSIS_RUN_SELECT} WHERE a.id = ?1"),
+        [run_id],
+        row_to_analysis_run,
+    )
+    .optional()
+    .map_err(|e| format!("falha ao ler a análise: {e}"))?
+    .ok_or_else(|| format!("a análise {run_id} não existe neste banco"))
+}
+
+/// Os achados de uma varredura, na ordem em que pesam: primeiro o que barra,
+/// depois o arquivo e a linha. O corte é um parâmetro, nunca texto colado na
+/// consulta — o que chega da tela passa por aqui sem virar sintaxe.
+pub fn listar_achados(
+    conn: &Connection,
+    run_id: i64,
+    severidade: Option<&str>,
+    limite: i64,
+) -> Result<Vec<AnalysisFinding>, String> {
+    let corte = severidade.unwrap_or("");
+    let sql = "SELECT id, run_id, rule_id, source, severity, file, line_start, line_end, message, \
+         cwe, snippet FROM analysis_findings \
+         WHERE run_id = ?1 AND (?2 = '' OR severity = ?2) \
+         ORDER BY CASE severity WHEN 'ERROR' THEN 0 WHEN 'WARNING' THEN 1 ELSE 2 END, \
+         file, line_start LIMIT ?3";
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| format!("falha ao preparar os achados: {e}"))?;
+    let linhas = stmt
+        .query_map(rusqlite::params![run_id, corte, limite], row_to_analysis_finding)
+        .map_err(|e| format!("falha ao listar os achados: {e}"))?;
+    let mut out = Vec::new();
+    for linha in linhas {
+        out.push(linha.map_err(|e| format!("falha ao ler os achados: {e}"))?);
+    }
+    Ok(out)
+}
+
+fn row_to_analysis_finding(row: &Row) -> rusqlite::Result<AnalysisFinding> {
+    Ok(AnalysisFinding {
+        id: row.get("id")?,
+        run_id: row.get("run_id")?,
+        rule_id: row.get("rule_id")?,
+        source: row.get("source")?,
+        severity: row.get("severity")?,
+        file: row.get("file")?,
+        line_start: row.get("line_start")?,
+        line_end: row.get("line_end")?,
+        message: row.get("message")?,
+        cwe: row.get("cwe")?,
+        snippet: row.get("snippet")?,
+    })
+}
+
+pub fn apagar_analise(conn: &Connection, run_id: i64) -> Result<(), String> {
+    obter_analise(conn, run_id)?;
+    conn.execute("DELETE FROM analysis_runs WHERE id = ?1", [run_id])
+        .map_err(|e| format!("falha ao apagar a análise: {e}"))?;
+    Ok(())
+}
+
+/// As varreduras que ficaram 'rodando' porque o aplicativo fechou no meio delas.
+/// São interrompidas, não concluídas: ninguém leu o fim delas.
+pub fn recuperar_analises_abertas(conn: &Connection) -> usize {
+    conn.execute(
+        "UPDATE analysis_runs SET status = 'interrompida', \
+         note = COALESCE(note, 'o aplicativo fechou durante a varredura'), \
+         finished_at = COALESCE(finished_at, ?1) WHERE status = 'rodando'",
+        [now_rfc3339()],
+    )
+    .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -2210,6 +2558,8 @@ mod tests {
             commands: None,
             git_op: Some(" TAG ".into()),
             git_ref: Some(" v1.2.0 ".into()),
+            analyzer: None,
+            severity_gate: None,
             depends_on: None,
             parallel: Some(false),
             timeout_secs: Some(0),
@@ -2668,6 +3018,8 @@ mod tests {
             commands: Some(vec!["echo pronto".into()]),
             git_op: None,
             git_ref: None,
+            analyzer: None,
+            severity_gate: None,
             depends_on: Some(deps.iter().map(|d| d.to_string()).collect()),
             parallel: Some(false),
             timeout_secs: Some(0),

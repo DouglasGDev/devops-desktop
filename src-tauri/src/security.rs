@@ -5,9 +5,10 @@ use serde::Serialize;
 use crate::git;
 
 /// Limite de leitura para a checagem de conteúdo. Arquivos maiores são
-/// julgados apenas pelo nome.
-const MAX_CONTENT_BYTES: u64 = 2 * 1024 * 1024;
-const PROBE_BYTES: usize = 8 * 1024;
+/// julgados apenas pelo nome. É público porque a análise de código lê exatamente
+/// os mesmos bytes: um arquivo que escapa de uma varredura escapa da outra.
+pub const MAX_CONTENT_BYTES: u64 = 2 * 1024 * 1024;
+pub const PROBE_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,13 +47,21 @@ const BLOCK_NAMES: [&str; 22] = [
     "session_secret",
 ];
 
+/// Prefixos que denunciam um token de provedor. A máscara da análise e a checagem
+/// de commit lêem esta mesma lista: o que sai da tela como «valor mascarado» é o
+/// mesmo que bloqueia um commit.
+const PREFIXOS_TOKEN: [&str; 13] = [
+    "github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "xoxb-", "xoxp-", "AKIA", "sk_live_", "sk_test_", "sk-ant-",
+    "sk-proj-", "glpat-",
+];
+
 const BLOCK_EXTENSIONS: [&str; 17] = [
     "key", "pem", "p8", "p12", "pfx", "jks", "keystore", "ks", "ppk", "kdbx", "pwd", "crt.bak", "kdb", "asc", "gpg",
     "snk", "pypirc",
 ];
 
 /// Pastas de cache, dependências e build: não devem estar no índice do Git.
-const NOISE_DIRS: [&str; 12] = [
+pub const NOISE_DIRS: [&str; 12] = [
     "node_modules",
     "target",
     "dist",
@@ -69,6 +78,14 @@ const NOISE_DIRS: [&str; 12] = [
 
 fn lower(name: &str) -> String {
     name.to_lowercase()
+}
+
+/// A única regra de "esta pasta não é código do projeto". Quem varre árvore no
+/// aplicativo usa isto — a checagem de segredo e a análise de código pulam as
+/// mesmas pastas porque é a mesma árvore sendo lida.
+pub fn pular_dir(nome: &str) -> bool {
+    let base = lower(nome);
+    base == ".git" || NOISE_DIRS.contains(&base.as_str())
 }
 
 fn basename(path: &str) -> &str {
@@ -155,6 +172,106 @@ fn looks_like_assignment(line: &str) -> Option<&'static str> {
     None
 }
 
+/// O valor de um segredo nunca deixa esta função. A linha mascarada é o que vai
+/// para o banco, para a tela e para o pacote que uma IA lê — é a mesma regra da
+/// checagem de segredo, aplicada antes de qualquer texto de arquivo ser guardado.
+pub fn mascarar(line: &str) -> String {
+    let com_atribuicao = match looks_like_assignment(line) {
+        Some(key) => mascarar_atribuicao(line, key).unwrap_or_else(|| line.to_string()),
+        None => line.to_string(),
+    };
+    // O `Bearer` age antes da passada de prefixos: se ele esconde o token inteiro,
+    // não sobra prefixo para uma segunda máscara cortar no meio do «valor mascarado».
+    mascarar_prefixos(&mascarar_bearer(&com_atribuicao))
+}
+
+/// Esconde o valor de um cabeçalho `Bearer …`. A palavra fica à vista porque é o
+/// formato, não o segredo; o que vem depois dela é a credencial, e ela pode ser
+/// um token opaco, sem prefixo de espécie nenhuma para a máscara reconhecer.
+fn mascarar_bearer(line: &str) -> String {
+    const MARCA: &str = "bearer ";
+    let minuscula = line.to_lowercase();
+    if minuscula.len() != line.len() {
+        return line.to_string();
+    }
+    let mut saida = String::with_capacity(line.len());
+    let mut cursor = 0usize;
+    while let Some(pos) = minuscula[cursor..].find(MARCA) {
+        let inicio = cursor + pos + MARCA.len();
+        let cauda = &minuscula[inicio..];
+        let fim = cauda
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';'))
+            .unwrap_or(cauda.len());
+        saida.push_str(&line[cursor..inicio]);
+        if fim > 0 {
+            saida.push_str("«valor mascarado»");
+        }
+        cursor = inicio + fim;
+    }
+    saida.push_str(&line[cursor..]);
+    saida
+}
+
+/// Esconde o lado direito de `chave = "valor"`. Os deslocamentos são os mesmos
+/// da detecção, e só são usados quando a forma minúscula tem o mesmo tamanho de
+/// bytes: se o casing não-ASCII mudou o tamanho, cortar a originalceria no meio
+/// de um caractere, então a linha fica como está e só a passada de prefixos age.
+fn mascarar_atribuicao(line: &str, chave: &str) -> Option<String> {
+    let minuscula = line.to_lowercase();
+    if minuscula.len() != line.len() {
+        return None;
+    }
+    let ate = minuscula.find(chave)? + chave.len();
+    let depois = minuscula[ate..].trim_start();
+    let separador = depois.as_bytes().first()?;
+    if *separador != b'=' && *separador != b':' {
+        return None;
+    }
+    let espaco = &line[ate..];
+    let inicio = ate + (espaco.len() - espaco.trim_start().len()) + 1;
+    let apos = &line[inicio..];
+    let valor = inicio + (apos.len() - apos.trim_start().len());
+    let com_aspa = &line[valor..];
+    let aspa = match com_aspa.chars().next() {
+        Some(c @ ('"' | '\'')) => c.len_utf8(),
+        _ => 0,
+    };
+    let corpo = &line[valor + aspa..];
+    let fim = corpo
+        .find([' ', '#', ';', ',', '"', '\''])
+        .unwrap_or(corpo.len());
+    Some(format!(
+        "{}«valor mascarado»{}",
+        &line[..valor + aspa],
+        &line[valor + aspa + fim..]
+    ))
+}
+
+/// Esconde a cauda de um token conhecido (`ghp_…`, `AKIA…`). O prefixo fica à
+/// vista: é ele que diz a espécie do segredo, e não é segredo.
+fn mascarar_prefixos(line: &str) -> String {
+    let mut saida = String::with_capacity(line.len());
+    let mut restante = line;
+    while !restante.is_empty() {
+        let Some((pos, prefixo)) = PREFIXOS_TOKEN
+            .iter()
+            .filter_map(|p| restante.find(p).map(|i| (i, *p)))
+            .min_by_key(|(i, _)| *i)
+        else {
+            saida.push_str(restante);
+            break;
+        };
+        let cauda = &restante[pos + prefixo.len()..];
+        let fim = cauda
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .unwrap_or(cauda.len());
+        saida.push_str(&restante[..pos + prefixo.len()]);
+        saida.push_str("«valor mascarado»");
+        restante = &cauda[fim..];
+    }
+    saida
+}
+
 fn content_findings(rel: &str, bytes: &[u8]) -> Vec<Finding> {
     let text = String::from_utf8_lossy(bytes);
     let mut out: Vec<Finding> = Vec::new();
@@ -188,11 +305,11 @@ fn content_findings(rel: &str, bytes: &[u8]) -> Vec<Finding> {
                 );
             }
         }
-        for prefix in ["ghp_", "gho_", "ghu_", "ghs_", "github_pat_", "xoxb-", "xoxp-"] {
+        for prefix in PREFIXOS_TOKEN.iter().filter(|p| **p != "AKIA") {
             if let Some(at) = line.find(prefix) {
                 let tail: String = line[at + prefix.len()..]
                     .chars()
-                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
                     .collect();
                 if tail.len() >= 12 {
                     push(
@@ -201,6 +318,20 @@ fn content_findings(rel: &str, bytes: &[u8]) -> Vec<Finding> {
                         "revogue o token e use um segredo gerenciado fora do repositório".into(),
                     );
                 }
+            }
+        }
+        let low = line.to_lowercase();
+        if let Some(at) = low.find("bearer ") {
+            let tail: String = low[at + 7..]
+                .chars()
+                .take_while(|c| !(c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';')))
+                .collect();
+            if tail.len() >= 12 {
+                push(
+                    "conteudo",
+                    "traz uma credencial no cabeçalho Bearer".into(),
+                    "revogue a credencial e monte o cabeçalho a partir de um segredo de ambiente".into(),
+                );
             }
         }
         if let Some(key) = looks_like_assignment(line) {
@@ -214,7 +345,9 @@ fn content_findings(rel: &str, bytes: &[u8]) -> Vec<Finding> {
     out
 }
 
-fn is_probably_text(head: &[u8]) -> bool {
+/// Mesma amostra da checagem de segredo: um arquivo binário não é código lido.
+/// Público porque a análise de código varre a mesma árvore com a mesma régua.
+pub fn he_texto(head: &[u8]) -> bool {
     !head.contains(&0)
 }
 
@@ -238,11 +371,27 @@ pub fn inspect_bytes(rel: &str, bytes: &[u8], extra: &[String]) -> Vec<Finding> 
         return out;
     }
     let head = &bytes[..bytes.len().min(PROBE_BYTES)];
-    if !is_probably_text(head) {
+    if !he_texto(head) {
         return out;
     }
     push_content(&mut out, rel, bytes);
     out
+}
+
+/// O texto de um arquivo de código, lido com a régua compartilhada: arquivo
+/// comum, dentro do limite de bytes e sem byte nulo no começo da amostra. `None`
+/// é "não foi lido" — pasta, grande demais, binário ou ilegível — e quem varre
+/// decide o que fazer com cada um desses casos.
+pub fn texto_do_arquivo(abs: &Path) -> Option<Vec<u8>> {
+    let meta = fs::metadata(abs).ok()?;
+    if !meta.is_file() || meta.len() > MAX_CONTENT_BYTES {
+        return None;
+    }
+    let data = fs::read(abs).ok()?;
+    if !he_texto(&data[..data.len().min(PROBE_BYTES)]) {
+        return None;
+    }
+    Some(data)
 }
 
 /// Analisa um arquivo do disco. `rel` é o caminho relativo mostrado ao usuário.
@@ -252,18 +401,7 @@ pub fn inspect_file(abs: &Path, rel: &str, extra: &[String]) -> Vec<Finding> {
         out.push(f);
         // nome já bloqueia; a leitura do conteúdo ainda é útil quando o arquivo é pequeno
     }
-    let meta = match fs::metadata(abs) {
-        Ok(m) => m,
-        Err(_) => return out,
-    };
-    if !meta.is_file() || meta.len() > MAX_CONTENT_BYTES {
-        return out;
-    }
-    let Ok(data) = fs::read(abs) else { return out };
-    let head = &data[..data.len().min(PROBE_BYTES)];
-    if !is_probably_text(head) {
-        return out;
-    }
+    let Some(data) = texto_do_arquivo(abs) else { return out };
     push_content(&mut out, rel, &data);
     out
 }
@@ -284,8 +422,7 @@ pub fn scan_tree(root: &Path, extra: &[String], max_entries: usize) -> Result<Ve
             };
             let is_dir = path.is_dir();
             if is_dir {
-                let base = lower(basename(&rel));
-                if base == ".git" || NOISE_DIRS.contains(&base.as_str()) {
+                if pular_dir(&name) {
                     continue;
                 }
                 stack.push(path);
@@ -456,6 +593,44 @@ mod tests {
         let found = content_findings("t.txt", aws);
         assert!(found.iter().any(|f| f.reason.contains("AWS")), "{found:?}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_mascara_esconde_o_token_que_a_tela_mostra() {
+        // A linha medida na janela real: um comando de shell com o cabeçalho de
+        // autorização dentro. O achado é legítimo, o valor do token não. O valor
+        // escrito aqui é visivelmente falso de propósito: um fixture com forma de
+        // credencial real é recusado pelo protetor de push do GitHub, e a máscara não
+        // depende da entropia do valor — depende do formato em volta dele.
+        let linha = "    subprocess.call(\"curl -H 'Authorization: Bearer sk_live_NAO-E-UMA-CHAVE-REAL-2026' https://api.example\", shell=True)";
+        let saida = mascarar(linha);
+        assert!(saida.contains("Bearer "), "{saida}");
+        assert!(saida.contains("«valor mascarado»"), "{saida}");
+        assert!(!saida.contains("NAO-E-UMA-CHAVE-REAL-2026"), "{saida}");
+        // Uma passada não corta a outra no meio do marcador.
+        assert!(!saida.contains("mascarado» mascarado"), "{saida}");
+    }
+
+    #[test]
+    fn o_prefixo_fica_a_vista_e_a_cauda_nao() {
+        let saida = mascarar("stripe = \"sk_live_NAO-E-UMA-CHAVE-REAL-2026\"");
+        assert!(saida.contains("sk_live_"), "{saida}");
+        assert!(!saida.contains("NAO-E-UMA-CHAVE-REAL-2026"), "{saida}");
+        let opaco = mascarar("curl -H 'Authorization: Bearer um-token-opaco-sem-prefixo-de-especie'");
+        assert!(opaco.contains("Bearer «valor mascarado»"), "{opaco}");
+        assert!(!opaco.contains("um-token-opaco"), "{opaco}");
+    }
+
+    #[test]
+    fn um_bearer_no_arquivo_bloqueia_o_commit() {
+        let bruto = "HEADERS = {'Authorization': 'Bearer um-token-opaco-sem-prefixo-de-especie'}\n".as_bytes();
+        let found = content_findings("app.py", bruto);
+        assert!(found.iter().any(|f| f.reason.contains("Bearer")), "{found:?}");
+
+        // um texto comum que só menciona o esquema não bloqueia
+        let doc = "o cliente envia Bearer vazio quando não está autenticado\n".as_bytes();
+        let found = content_findings("README.md", doc);
+        assert!(!found.iter().any(|f| f.reason.contains("Bearer")), "{found:?}");
     }
 
     #[test]

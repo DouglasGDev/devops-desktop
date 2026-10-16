@@ -778,16 +778,24 @@ pub struct DefinitionRevision {
 
 // ---------- grafo do pipeline (plano CI/CD, etapa 3) ----------
 
-/// Os quatro tipos de nó que o motor sabe executar. Não há tipo sem execução:
+/// Os cinco tipos de nó que o motor sabe executar. Não há tipo sem execução:
 /// `motor` chama uma das quinze etapas reais, `comando` roda comandos pelo
-/// executor escolhido, `aprovacao` espera a decisão de quem usa e `git` faz uma
-/// operação real de Git nesta máquina, pelas mesmas funções da aba Git.
-pub const NODE_KINDS: [&str; 4] = ["motor", "comando", "aprovacao", "git"];
+/// executor escolhido, `aprovacao` espera a decisão de quem usa, `git` faz uma
+/// operação real de Git nesta máquina, pelas mesmas funções da aba Git, e
+/// `analise` varre o código-fonte pelo mesmo caminho da aba Análise.
+pub const NODE_KINDS: [&str; 5] = ["motor", "comando", "aprovacao", "git", "analise"];
 pub const NODE_EXECUTORS: [&str; 2] = ["local", "ssh"];
 /// O que um nó `git` pode fazer. São operações que existem em `git.rs`, não uma
 /// lista de desejos: `pull` atualiza o código, `checkout` alterna para a referência
 /// declarada, `tag` marca o commit e, havendo remoto, publica a marca.
 pub const NODE_GIT_OPS: [&str; 3] = ["pull", "checkout", "tag"];
+/// Os instrumentos de um nó `analise`, e são os mesmos da tela: `embutido` é o
+/// analisador do próprio aplicativo, `semgrep` é a ferramenta externa quando ela
+/// existe nesta máquina, `ambos` roda os dois e guarda um achado por posição.
+pub const NODE_ANALISADORES: [&str; 3] = ["embutido", "semgrep", "ambos"];
+/// As severidades que uma análise devolve, da mais alta à mais baixa. É o token
+/// que o semgrep usa, então a tela, o banco e a ferramenta dizem o mesmo nome.
+pub const SEVERIDADES: [&str; 3] = ["ERROR", "WARNING", "INFO"];
 /// Limite do grafo salvo: acima disso o construtor deixa de ser legível e o
 /// histórico de uma execução vira impossível de conferir.
 pub const MAX_NODES: usize = 40;
@@ -817,6 +825,12 @@ pub struct PipelineNode {
     /// A referência do nó `git`: o ramo a alternar (`checkout`) ou a tag a criar
     /// (`tag`). Vazio em `pull`, que trabalha no ramo atual.
     pub git_ref: Option<String>,
+    /// O instrumento de um nó `analise`: `embutido`, `semgrep` ou `ambos`. Vazio
+    /// nos outros tipos, do mesmo jeito que a operação de git é vazia aqui.
+    pub analyzer: String,
+    /// A partir de qual severidade o nó `analise` trava a publicação. É o corte
+    /// dele, não uma média: quem desenha decide o que barra.
+    pub severity_gate: String,
     /// As chaves dos nós que precisam terminar antes deste.
     pub depends_on: Vec<String>,
     /// Permite rodar junto com os irmãos que estiverem prontos ao mesmo tempo.
@@ -850,6 +864,8 @@ pub struct PipelineNodeInput {
     pub commands: Option<Vec<String>>,
     pub git_op: Option<String>,
     pub git_ref: Option<String>,
+    pub analyzer: Option<String>,
+    pub severity_gate: Option<String>,
     pub depends_on: Option<Vec<String>>,
     pub parallel: Option<bool>,
     pub timeout_secs: Option<i64>,
@@ -907,6 +923,26 @@ impl PipelineNodeInput {
         self.depends_on.clone().unwrap_or_default()
     }
 
+    /// O instrumento declarado por um nó `analise`, já normalizado; o padrão é o
+    /// analisador do aplicativo, porque ele é o único que existe em toda máquina.
+    pub fn analyzer(&self) -> String {
+        match self.analyzer.as_deref().map(str::trim) {
+            None | Some("") => "embutido".to_string(),
+            Some(nome) => nome.to_lowercase(),
+        }
+    }
+
+    /// O corte de severidade do nó `analise`. Vazio é "não barra", porque um nó
+    /// desenhado só para informar é uma escolha legítima de quem desenha.
+    pub fn severity_gate(&self) -> String {
+        self.severity_gate
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_uppercase())
+            .unwrap_or_default()
+    }
+
     /// Se o nó mexe no destino. `motor` a partir da etapa de preparação (8),
     /// que é onde a publicação começa a existir lá; `ssh` em qualquer comando,
     /// porque o que roda no servidor muda o servidor.
@@ -943,7 +979,7 @@ impl PipelineNodeInput {
         let kind = self.kind();
         if !NODE_KINDS.contains(&kind.as_str()) {
             return Err(format!(
-                "{rotulo}: tipo de nó inválido “{kind}”; use motor, comando, aprovacao ou git"
+                "{rotulo}: tipo de nó inválido “{kind}”; use motor, comando, aprovacao, git ou analise"
             ));
         }
         match kind.as_str() {
@@ -1035,6 +1071,46 @@ impl PipelineNodeInput {
                     }
                 }
             }
+            "analise" => {
+                let instrumento = self.analyzer();
+                if !NODE_ANALISADORES.contains(&instrumento.as_str()) {
+                    return Err(format!(
+                        "{rotulo}: o nó de análise usa “{instrumento}”; use {}",
+                        NODE_ANALISADORES.join(", ")
+                    ));
+                }
+                let corte = self.severity_gate();
+                if !corte.is_empty() && !SEVERIDADES.contains(&corte.as_str()) {
+                    return Err(format!(
+                        "{rotulo}: o corte de severidade aceita {}, não “{corte}”",
+                        SEVERIDADES.join(", ")
+                    ));
+                }
+                if !self.commands().is_empty() {
+                    return Err(format!(
+                        "{rotulo}: o nó de análise varre o código do projeto, não comandos soltos"
+                    ));
+                }
+                // Lê o código desta máquina, na pasta do projeto: o executor é
+                // sempre local e a contenção de caminho é a mesma do nó de comando.
+                if self.executor() != "local" {
+                    return Err(format!(
+                        "{rotulo}: a análise de código lê a pasta do projeto nesta máquina — escolha o executor local"
+                    ));
+                }
+                conferir_pasta_local(
+                    self.working_dir.as_deref().unwrap_or("").trim(),
+                    &rotulo,
+                )?;
+                // O prazo do nó é o prazo da varredura, e a varredura tem o teto
+                // dela: um nó desenhado com 21600 segundos falharia ao executar.
+                let prazo = self.timeout_secs.unwrap_or(0);
+                if prazo > 3600 {
+                    return Err(format!(
+                        "{rotulo}: o prazo da varredura vai de 0 (o padrão do aplicativo) a 3600 segundos"
+                    ));
+                }
+            }
             _ => {}
         }
         let prazo = self.timeout_secs.unwrap_or(0);
@@ -1066,6 +1142,153 @@ impl PipelineNodeInput {
             }
         }
         Ok(())
+    }
+}
+
+
+// ---------- análise de código-fonte (plano CI/CD, etapa 5) ----------
+
+/// Quantos achados de cada severidade uma varredura deixou. É a contagem do que
+/// foi gravado, não uma estimativa: o corte da publicação compara este número
+/// com o corte declarado no nó, e os dois vêm da mesma corrida.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisCounts {
+    pub error: i64,
+    pub warning: i64,
+    pub info: i64,
+}
+
+impl AnalysisCounts {
+    pub fn total(&self) -> i64 {
+        self.error + self.warning + self.info
+    }
+}
+
+/// Uma varredura de código como ela fica guardada. O código de saída da
+/// ferramenta é uma coluna e nunca um veredito: medido no semgrep 1.181, uma
+/// varredura completa pode voltar com achados e código 2 (um arquivo que ela não
+/// interpretou) e com zero achados e código 0. O que barra é a contagem contra o
+/// corte, e o que a ferramenta não conseguiu ler é dito como leitura falha.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisRun {
+    pub id: i64,
+    pub project_id: i64,
+    /// Nome do cadastro, para a tela não precisar de segunda consulta.
+    pub project: String,
+    /// A pasta varrida, já absoluta — é o que diz se a corrida foi do projeto
+    /// inteiro ou de um subdiretório.
+    pub root: String,
+    /// O instrumento pedido: `embutido`, `semgrep` ou `ambos`.
+    pub analyzer: String,
+    /// O instrumento que de fato rodou, com o nome da ferramenta externa quando
+    /// ela existia nesta máquina.
+    pub tool: String,
+    pub tool_version: Option<String>,
+    /// As regras usadas, como identificadores separados por vírgula.
+    pub rules: String,
+    /// O corte de severidade desta corrida; vazio é "nada barra".
+    pub severity_gate: String,
+    /// `concluida`, `falhou` ou `interrompida`.
+    pub status: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub duration_ms: i64,
+    pub files_scanned: i64,
+    /// Arquivos que a ferramenta disse ter pulado (grandes demais, binários).
+    pub files_skipped: i64,
+    pub exit_code: Option<i64>,
+    /// Quantos erros a ferramenta reportou fora dos achados.
+    pub tool_errors: i64,
+    /// Se a corrida barra, pela contagem contra o corte.
+    pub blocked: bool,
+    pub counts: AnalysisCounts,
+    /// O resumo de uma varredura que não deu para confiar: prazo estourado,
+    /// ferramenta ausente ou regras inválidas.
+    pub note: Option<String>,
+}
+
+/// Um achado de análise. O `snippet` é a linha do arquivo **mascarada** por
+/// [`crate::security::mascarar`]: o valor de um segredo nunca chega ao banco, à
+/// tela nem ao pacote que uma IA lê.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisFinding {
+    pub id: i64,
+    pub run_id: i64,
+    pub rule_id: String,
+    /// `embutido` ou `semgrep` — quem viu, porque o mesmo arquivo pode ter os
+    /// dois instrumentos apontando a mesma linha.
+    pub source: String,
+    pub severity: String,
+    /// Caminho relativo à raiz varrida, com barra.
+    pub file: String,
+    pub line_start: i64,
+    pub line_end: i64,
+    pub message: String,
+    pub cwe: Option<String>,
+    pub snippet: Option<String>,
+}
+
+/// O que a tela pede como varredura. `path` é um subdiretório opcional dentro do
+/// projeto — a mesma contenção de caminho dos nós de comando locais.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisInput {
+    pub project_id: i64,
+    pub analyzer: Option<String>,
+    pub severity_gate: Option<String>,
+    pub path: Option<String>,
+    pub timeout_secs: Option<i64>,
+}
+
+impl AnalysisInput {
+    pub fn analyzer(&self) -> String {
+        match self.analyzer.as_deref().map(str::trim) {
+            None | Some("") => "embutido".to_string(),
+            Some(nome) => nome.to_lowercase(),
+        }
+    }
+
+    pub fn severity_gate(&self) -> String {
+        self.severity_gate
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_uppercase())
+            .unwrap_or_default()
+    }
+
+    /// Conferência do pedido, antes de qualquer arquivo ser aberto. Devolve a
+    /// pasta relativa limpa (`None` = projeto inteiro).
+    pub fn conferir(&self) -> Result<Option<String>, String> {
+        if !NODE_ANALISADORES.contains(&self.analyzer().as_str()) {
+            return Err(format!(
+                "instrumento “{}” não existe; use {}",
+                self.analyzer(),
+                NODE_ANALISADORES.join(", ")
+            ));
+        }
+        let corte = self.severity_gate();
+        if !corte.is_empty() && !SEVERIDADES.contains(&corte.as_str()) {
+            return Err(format!(
+                "o corte de severidade aceita {}, não “{corte}”",
+                SEVERIDADES.join(", ")
+            ));
+        }
+        let prazo = self.timeout_secs.unwrap_or(0);
+        if !(0..=3600).contains(&prazo) {
+            return Err("o prazo da varredura vai de 0 (o padrão) a 3600 segundos".to_string());
+        }
+        let bruto = self.path.as_deref().map(str::trim).unwrap_or("");
+        if bruto.is_empty() {
+            return Ok(None);
+        }
+        // A mesma régua da pasta de trabalho de um nó local: é o mesmo risco, um
+        // caminho que dobra para fora do que está cadastrado.
+        conferir_pasta_local(bruto, "a varredura")?;
+        Ok(Some(bruto.trim_end_matches('/').to_string()))
     }
 }
 
@@ -1118,6 +1341,8 @@ mod tests {
             commands: None,
             git_op: Some(op.into()),
             git_ref: referencia.map(str::to_string),
+            analyzer: None,
+            severity_gate: None,
             depends_on: None,
             parallel: None,
             timeout_secs: None,
@@ -1127,6 +1352,16 @@ mod tests {
             x: None,
             y: None,
         }
+    }
+
+    fn no_analise(chave: &str, instrumento: Option<&str>, corte: Option<&str>) -> PipelineNodeInput {
+        let mut no = no_git(chave, "pull", None);
+        no.kind = "analise".into();
+        no.git_op = None;
+        no.git_ref = None;
+        no.analyzer = instrumento.map(str::to_string);
+        no.severity_gate = corte.map(str::to_string);
+        no
     }
 
     #[test]
@@ -1166,6 +1401,46 @@ mod tests {
         ramal.validate().unwrap();
         // o nó git mexe na pasta do projeto, não no destino da publicação
         assert!(!no_git("marca", "tag", Some("v1")).touches_destination());
+    }
+
+    #[test]
+    fn o_no_de_analise_e_desenhado_so_com_o_que_o_motor_varre() {
+        // sem instrumento e sem corte é a varredura padrão: embutido, informativa
+        no_analise("varre", None, None).validate().unwrap();
+        no_analise("varre", Some("Ambos"), Some("warning")).validate().unwrap();
+        // um instrumento que não existe varreria nada e o nó aprovaria tudo
+        let inventado = no_analise("varre", Some("bandit"), None)
+            .validate()
+            .unwrap_err();
+        assert!(inventado.contains("embutido, semgrep, ambos"), "{inventado}");
+        // um corte inventado barraria a publicação para sempre
+        let corte = no_analise("varre", None, Some("CRITICO"))
+            .validate()
+            .unwrap_err();
+        assert!(corte.contains("ERROR, WARNING, INFO"), "{corte}");
+        // o nó varre o código; comandos soltos não são o que ele executa
+        let mut com_comando = no_analise("varre", None, None);
+        com_comando.commands = Some(vec!["npm audit".into()]);
+        assert!(com_comando.validate().unwrap_err().contains("comandos soltos"));
+        // ele lê a pasta do projeto nesta máquina — um executor ssh leria o servidor
+        let mut remoto = no_analise("varre", None, None);
+        remoto.executor = Some("ssh".into());
+        assert!(remoto.validate().unwrap_err().contains("executor local"));
+        // e a pasta varrida é dentro do projeto, a mesma régua dos outros nós locais
+        for fora in ["/etc", "..\\segredo"] {
+            let mut no = no_analise("varre", None, None);
+            no.working_dir = Some(fora.into());
+            let erro = no.validate().unwrap_err();
+            assert!(erro.contains("relativo dentro do projeto"), "{fora} passou: {erro}");
+        }
+        // o prazo do nó é o prazo da varredura: acima do teto a varredura falharia
+        let mut longo = no_analise("varre", None, None);
+        longo.timeout_secs = Some(21_600);
+        assert!(longo.validate().unwrap_err().contains("prazo da varredura"));
+        longo.timeout_secs = Some(1_800);
+        longo.validate().unwrap();
+        // ler código-fonte não mexe no destino da publicação
+        assert!(!no_analise("varre", None, None).touches_destination());
     }
 
     #[test]

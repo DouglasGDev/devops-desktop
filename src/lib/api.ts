@@ -1,6 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  AnalysisCheck,
+  AnalysisFinding,
+  AnalysisInput,
+  AnalysisPackage,
+  AnalysisRule,
+  AnalysisRun,
+  AnalysisTool,
   AuditEntry,
   AuthRequest,
   BranchInfo,
@@ -193,6 +200,31 @@ export const api = {
   pipelineApprove: (requestId: number, approved: boolean) =>
     invoke<void>("pipeline_approve", { requestId, approved }),
   pipelineApprovalsPending: () => invoke<number>("pipeline_approvals_pending"),
+
+  // Análise de código-fonte: a segunda porta da mesma mecânica. O que estes comandos
+  // rodam é o mesmo `analysis::executar` que o nó `analise` do grafo chama por dentro
+  // do motor — uma varredura, um veredito, duas portas.
+  analysisDetectar: () => invoke<AnalysisTool>("analysis_detectar"),
+  analysisRegras: () => invoke<AnalysisRule[]>("analysis_regras"),
+  analysisConferir: () => invoke<AnalysisCheck>("analysis_conferir"),
+  analysisExecutar: (entrada: AnalysisInput) =>
+    invoke<AnalysisRun>("analysis_executar", { entrada }),
+  analysisInterromper: (projectId: number) =>
+    invoke<boolean>("analysis_interromper", { projectId }),
+  analysisVarrendo: () => invoke<number[]>("analysis_varrendo"),
+  analysisCorridas: (projectId: number | null, limit?: number | null) =>
+    invoke<AnalysisRun[]>("analysis_corridas", { projectId, limit: limit ?? null }),
+  analysisAchados: (runId: number, severidade?: string | null, limit?: number | null) =>
+    invoke<AnalysisFinding[]>("analysis_achados", {
+      runId,
+      severidade: severidade ?? null,
+      limit: limit ?? null,
+    }),
+  analysisPacote: (runId: number, limite?: number | null) =>
+    invoke<AnalysisPackage>("analysis_pacote", { runId, limite: limite ?? null }),
+  analysisExportar: (runId: number, formato: "pacote" | "sarif", limite?: number | null) =>
+    invoke<string>("analysis_exportar", { runId, formato, limite: limite ?? null }),
+  analysisRemover: (runId: number) => invoke<void>("analysis_remover", { runId }),
 
   queryAuditLog: (params: {
     category?: string | null;
