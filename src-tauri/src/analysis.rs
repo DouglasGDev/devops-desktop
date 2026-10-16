@@ -1226,6 +1226,9 @@ pub fn executar(
     if !alvo.starts_with(&raiz_real) {
         return Err("a varredura só roda dentro da pasta cadastrada do projeto".to_string());
     }
+    // A contenção foi medida nos caminhos canônicos; o que vai para a tela e para o
+    // pacote é o caminho que outro programa reconhece.
+    let alvo = git_probe::simple(&alvo);
     let instrumento = entrada.analyzer();
     let corte = entrada.severity_gate();
     let prazo = if entrada.timeout_secs.unwrap_or(0) > 0 {
@@ -2390,6 +2393,35 @@ mod tests {
         let de_volta = db::obter_analise(&conn, corrida.id).unwrap();
         assert_eq!(de_volta.counts, corrida.counts);
         assert_eq!(de_volta.root, corrida.root);
+        let _ = std::fs::remove_dir_all(&casa);
+        let _ = std::fs::remove_dir_all(&dados);
+    }
+
+    #[test]
+    fn a_raiz_gravada_e_a_mesma_rgua_da_contencao_sem_o_prefixo_verbatim() {
+        let casa = pasta_de_teste("raiz-gravada");
+        escrever(
+            &casa,
+            "bom.py",
+            "import subprocess\ndef f(cmd):\n    subprocess.run(cmd, check=True)\n",
+        );
+        let conn = banco();
+        let projeto = projeto_de_teste(&conn, &casa);
+        let dados = pasta_de_teste("dados-raiz-gravada");
+        let raiz = raiz_do_projeto(&projeto).unwrap();
+        let corrida = executar(
+            &conn,
+            &dados,
+            &projeto,
+            &raiz,
+            &pedido(projeto.id, "embutido", "ERROR"),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        // No Windows `canonicalize()` devolve `\\?\C:\...`, que nenhum outro programa
+        // abre; a contenção mede nesse caminho, a tela e o pacote mostram o outro.
+        assert!(!corrida.root.starts_with(r"\\?\"), "{}", corrida.root);
+        assert_eq!(corrida.root, raiz.display().to_string());
         let _ = std::fs::remove_dir_all(&casa);
         let _ = std::fs::remove_dir_all(&dados);
     }

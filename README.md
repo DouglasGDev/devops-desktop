@@ -662,7 +662,7 @@ cd src-tauri
 cargo test --lib
 ```
 
-Cobertura atual do backend (300 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
+Cobertura atual do backend (301 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
 timeout e cancelamento, sessões PTY, ciclo completo de Git em repositório temporário (status, stage por hunk, commit,
 log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), trabalho guardado e
 reprodução de commit no git real (`stash push` tira a alteração da pasta e `stash list` mostra exatamente a entrada que o
@@ -763,7 +763,8 @@ envelope JSON do semgrep é lido **sem que o veredito dependa do código de saí
 comparece mesmo quando a ferramenta devolve `None`), e um envelope truncado ou com severidade desconhecida **não inventa
 número nem desaparece com o achado**; o trecho gravado não contém o valor do segredo
 (`o_trecho_gravado_nunca_tem_o_valor_de_um_segredo`) e é exatamente a linha apontada; a varredura não sai da pasta do
-projeto; as duas listas de regras — tela e instrumento — têm os mesmos ids na mesma ordem; e a sonda distingue os três
+projeto, e a raiz que vai para a tela e para o pacote é a mesma régua usada nessa contenção, só que sem o prefixo
+`\\?\` que o `canonicalize()` do Windows devolve (`a_raiz_gravada_e_a_mesma_rgua_da_contencao_sem_o_prefixo_verbatim`); as duas listas de regras — tela e instrumento — têm os mesmos ids na mesma ordem; e a sonda distingue os três
 estados (`a_conferencia_diz_os_tres_estados_da_ferramenta`, `uma_ferramenta_ausente_e_dita_ausente_e_nao_sem_resposta`),
 porque "não respondeu" não é "não existe". O pacote do revisor (IA ou humano) é testado na ordem determinística que pesa
 o que barra primeiro, na classificação que diz o que os números dizem, no agrupamento por regra e na forma do SARIF.
