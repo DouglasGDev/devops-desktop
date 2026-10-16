@@ -159,6 +159,7 @@ export const CATEGORY_LABELS: Record<string, string> = {
   security: "Segurança",
   terminal: "Terminal",
   app: "Aplicativo",
+  análise: "Análise",
 };
 
 export function Modal({

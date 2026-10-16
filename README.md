@@ -534,7 +534,9 @@ instrumentos, escolhidos por varredura:
 O semgrep é uma ferramenta externa: **Sondar ferramenta** diz o estado real nesta máquina (`encontrado`, `ausente`,
 `sem-resposta`) com a versão, a origem do binário e quanto a sondagem levou. O caminho do executável, quando não está no
 `PATH`, é o campo de configuração `analise.semgrep.caminho`. **Conferir regras** valida o YAML embarcado antes de
-qualquer varredura.
+qualquer varredura. As duas deixam linha no **Histórico** (categoria *Análise*), com o que estava apontado em
+Configurações, de onde o caminho saiu, quanto levou e o que a máquina respondeu — inclusive quando a resposta é "não
+está aqui" ou "não respondeu".
 
 O veredito **nunca** é o código de saída da ferramenta: é a contagem de achados contra o **corte de severidade** que
 você escolheu — *Nada barra*, *Barra se houver erro*, *Barra se houver aviso ou erro*, *Barra se houver qualquer
@@ -662,7 +664,7 @@ cd src-tauri
 cargo test --lib
 ```
 
-Cobertura atual do backend (301 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
+Cobertura atual do backend (303 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
 timeout e cancelamento, sessões PTY, ciclo completo de Git em repositório temporário (status, stage por hunk, commit,
 log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), trabalho guardado e
 reprodução de commit no git real (`stash push` tira a alteração da pasta e `stash list` mostra exatamente a entrada que o
@@ -766,7 +768,11 @@ número nem desaparece com o achado**; o trecho gravado não contém o valor do 
 projeto, e a raiz que vai para a tela e para o pacote é a mesma régua usada nessa contenção, só que sem o prefixo
 `\\?\` que o `canonicalize()` do Windows devolve (`a_raiz_gravada_e_a_mesma_rgua_da_contencao_sem_o_prefixo_verbatim`); as duas listas de regras — tela e instrumento — têm os mesmos ids na mesma ordem; e a sonda distingue os três
 estados (`a_conferencia_diz_os_tres_estados_da_ferramenta`, `uma_ferramenta_ausente_e_dita_ausente_e_nao_sem_resposta`),
-porque "não respondeu" não é "não existe". O pacote do revisor (IA ou humano) é testado na ordem determinística que pesa
+porque "não respondeu" não é "não existe". As duas verificações da tela — **Sondar ferramenta** e **Conferir regras** —
+deixam linha no Histórico, e é o módulo da análise que decide o que cada estado vale ali: apontamento que não existe é
+aviso citando o valor apontado, ferramenta que não respondeu e regra inválida são erro, e nada vira "ok" presumido
+(`a_sonda_grava_o_valor_apontado_quando_a_ferramenta_nao_esta_aqui`,
+`a_conferencia_gravada_diz_o_estado_e_nunca_presume_ok`). O pacote do revisor (IA ou humano) é testado na ordem determinística que pesa
 o que barra primeiro, na classificação que diz o que os números dizem, no agrupamento por regra e na forma do SARIF.
 Nenhum desses testes chama o semgrep: ele é ferramenta externa e opcional, e a suíte continua pedindo só `git` e `ssh`.
 Nenhum teste de rede é feito: as rotas que falam com o GitHub são exercitadas só na máquina, com dados de

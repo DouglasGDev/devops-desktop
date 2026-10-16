@@ -3140,14 +3140,38 @@ async fn git_checkout_pull(
 // mecânica: a tela fala com estes comandos e o nó `analise` do grafo chama a
 // mesma `analysis::executar` por dentro do motor — uma varredura, um veredito.
 
+/// Uma verificação deixa rastro no Histórico: o que foi apontado e o que a máquina
+/// respondeu, inclusive quando a resposta é "não está aqui". A linha em si vem do
+/// módulo da análise, que é quem sabe o que cada estado quer dizer; o comando só a
+/// grava — falhar ao gravar nunca come a resposta que a tela precisa mostrar.
+fn registrar_verificacao<T>(
+    db: &DbHandle,
+    categoria: &str,
+    resultado: &Result<T, String>,
+    linha: fn(&T) -> analysis::LinhaVerificacao,
+) {
+    let (nivel, operacao, detalhe) = match resultado {
+        Ok(valor) => {
+            let l = linha(valor);
+            (l.nivel, l.operacao, l.detalhe)
+        }
+        Err(mensagem) => ("error", format!("{categoria} · falhou"), mensagem.clone()),
+    };
+    if let Ok(conn) = lock_db(db) {
+        let _ = audit::log(&conn, nivel, categoria, &operacao, None, None, None, Some(&detalhe));
+    }
+}
+
 #[tauri::command]
 async fn analysis_detectar(state: State<'_, AppState>) -> Result<analysis::Ferramenta, String> {
     let db = state.db.clone();
-    spawn("analysis_detectar", move || {
+    let resultado = spawn("analysis_detectar", move || {
         let conn = lock_db(&db)?;
         analysis::sonda_ferramenta(&conn)
     })
-    .await
+    .await;
+    registrar_verificacao(&state.db, "análise", &resultado, analysis::linha_da_sonda);
+    resultado
 }
 
 #[tauri::command]
@@ -3162,11 +3186,13 @@ async fn analysis_conferir(
 ) -> Result<analysis::Validacao, String> {
     let db = state.db.clone();
     let dados = db::pasta_de_dados(&app)?;
-    spawn("analysis_conferir", move || {
+    let resultado = spawn("analysis_conferir", move || {
         let conn = lock_db(&db)?;
         analysis::conferir_regras(&conn, &dados)
     })
-    .await
+    .await;
+    registrar_verificacao(&state.db, "análise", &resultado, analysis::linha_da_conferencia);
+    resultado
 }
 
 /// Roda a varredura pedida e devolve a corrida como ela ficou gravada. A varredura

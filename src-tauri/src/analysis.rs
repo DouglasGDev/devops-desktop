@@ -96,6 +96,10 @@ pub struct Ferramenta {
     pub regras: usize,
     /// De onde o caminho veio: `configuração` ou `path`.
     pub origem: String,
+    /// O valor que alguém **apontou** em Configurações, antes de qualquer
+    /// resolução — é o que a linha de auditoria precisa dizer quando o apontado não
+    /// existe, porque aí `caminho` é nulo e `origem` fica vazio.
+    pub apontado: String,
     /// O que a ferramenta respondeu na sondagem de versão, em uma linha.
     pub resposta: String,
 }
@@ -154,6 +158,7 @@ fn resolver_explicito(bruto: &str) -> Option<String> {
 pub fn localizar(caminho_explicito: Option<&str>) -> Ferramenta {
     let inicio = Instant::now();
     let regras = contar_regras(REGRAS_YAML);
+    let apontado = caminho_explicito.unwrap_or("").trim().to_string();
     let mut origem = String::new();
     let mut binario = caminho_explicito
         .and_then(resolver_explicito)
@@ -175,6 +180,7 @@ pub fn localizar(caminho_explicito: Option<&str>) -> Ferramenta {
             duracao_ms: duracao_ms(inicio),
             regras,
             origem,
+            apontado,
             resposta: String::new(),
         };
     };
@@ -187,6 +193,7 @@ pub fn localizar(caminho_explicito: Option<&str>) -> Ferramenta {
             duracao_ms: duracao_ms(inicio),
             regras,
             origem,
+            apontado,
             resposta: cauda(&chamada.stderr),
         };
     }
@@ -197,6 +204,7 @@ pub fn localizar(caminho_explicito: Option<&str>) -> Ferramenta {
         duracao_ms: duracao_ms(inicio),
         regras,
         origem,
+        apontado,
         resposta: cauda(&chamada.stdout),
     }
 }
@@ -301,6 +309,85 @@ pub struct Validacao {
     pub regras: usize,
     pub codigo: Option<i64>,
     pub mensagem: String,
+}
+
+/// A linha que uma verificação deixa na auditoria. Fica no módulo da análise, e não
+/// no comando, porque é aqui que cada estado tem significado: `ausente` é aviso,
+/// `sem-resposta` é erro, e nenhum dos dois vira "está tudo certo".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinhaVerificacao {
+    pub nivel: &'static str,
+    pub operacao: String,
+    pub detalhe: String,
+}
+
+/// A sonda do semgrep: o que foi apontado, de onde o caminho saiu e o que a
+/// máquina respondeu. Quando o apontado não existe, a linha diz o valor apontado —
+/// é justamente o caso em que alguém mudou Configurações e quer saber no Histórico
+/// o que aquilo produziu.
+pub fn linha_da_sonda(f: &Ferramenta) -> LinhaVerificacao {
+    let apontado = if f.apontado.is_empty() {
+        "nada apontado em Configurações".to_string()
+    } else {
+        format!("apontado “{}”", f.apontado)
+    };
+    // `origem` só existe junto com um binário resolvido; dizer "origem lugar nenhum"
+    // ao lado de um valor apontado contradiria a própria linha.
+    let origem = match (&f.caminho, f.origem.is_empty()) {
+        (Some(_), false) => format!(" · origem {}", f.origem),
+        (Some(_), true) => String::new(),
+        (None, _) => " · nenhum binário resolvido a partir dali".to_string(),
+    };
+    let tempo = format!("{} ms", f.duracao_ms);
+    match f.estado.as_str() {
+        "encontrado" => LinhaVerificacao {
+            nivel: "info",
+            operacao: format!("Sonda do semgrep · encontrado · {} regra(s) embarcada(s)", f.regras),
+            detalhe: format!(
+                "{apontado}{origem} · caminho {} · versão {} · {tempo} · resposta: {}",
+                f.caminho.as_deref().unwrap_or("(sem caminho)"),
+                f.versao.as_deref().unwrap_or("não lida"),
+                f.resposta
+            ),
+        },
+        "sem-resposta" => LinhaVerificacao {
+            nivel: "error",
+            operacao: "Sonda do semgrep · sem resposta".to_string(),
+            detalhe: format!(
+                "{apontado}{origem} · caminho {} · {tempo} · o prazo passou e nada voltou",
+                f.caminho.as_deref().unwrap_or("(sem caminho)"),
+            ),
+        },
+        estado => LinhaVerificacao {
+            nivel: "warning",
+            operacao: format!("Sonda do semgrep · {estado}"),
+            detalhe: format!(
+                "{apontado}{origem} · {tempo} · o instrumento externo não está nesta máquina; o embutido continua disponível",
+            ),
+        },
+    }
+}
+
+/// A conferência do conjunto embarcado com a ferramenta externa. Sem ferramenta a
+/// linha diz que **não houve** conferência externa, nunca um "ok" presumido.
+pub fn linha_da_conferencia(v: &Validacao) -> LinhaVerificacao {
+    let codigo = v
+        .codigo
+        .map(|c| format!("código {c}"))
+        .unwrap_or_else(|| "sem código de saída".to_string());
+    let nivel = match v.estado.as_str() {
+        "validadas" => "info",
+        "inválidas" | "sem-resposta" => "error",
+        _ => "warning",
+    };
+    LinhaVerificacao {
+        nivel,
+        operacao: format!(
+            "Conferência das regras · {} · {} regra(s)",
+            v.estado, v.regras
+        ),
+        detalhe: format!("{codigo} · {}", v.mensagem),
+    }
 }
 
 /// Confere o conjunto embarcado com a ferramenta externa — o `--validate` do
@@ -1248,6 +1335,7 @@ pub fn executar(
             duracao_ms: 0,
             regras: contar_regras(REGRAS_YAML),
             origem: String::new(),
+            apontado: String::new(),
             resposta: String::new(),
         }
     };
@@ -2564,5 +2652,88 @@ mod tests {
         // quem não respondeu não é "inválidas" — e muito menos "validadas"
         assert_eq!(estado_da_conferencia(&chamada("", "", None, true)), "sem-resposta");
         assert_eq!(estado_da_conferencia(&chamada("", "", Some(0), true)), "sem-resposta");
+    }
+
+    fn sonda(estado: &str, apontado: &str, caminho: Option<&str>, versao: Option<&str>) -> Ferramenta {
+        Ferramenta {
+            estado: estado.to_string(),
+            caminho: caminho.map(str::to_string),
+            versao: versao.map(str::to_string),
+            duracao_ms: 2609,
+            regras: 19,
+            origem: if caminho.is_some() { "configuração".to_string() } else { String::new() },
+            apontado: apontado.to_string(),
+            resposta: "semgrep 1.181.0".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_sonda_grava_o_valor_apontado_quando_a_ferramenta_nao_esta_aqui() {
+        // O caso que alguém aponta em Configurações e quer conferir depois no
+        // Histórico: `caminho` é nulo e `origem` fica vazio, então sem o valor
+        // apontado a linha não diria o que foi tentado.
+        let linha = linha_da_sonda(&sonda("ausente", r"C:\pasta\semgrep.exe", None, None));
+        assert_eq!(linha.nivel, "warning");
+        assert!(linha.operacao.contains("ausente"), "{}", linha.operacao);
+        assert!(linha.detalhe.contains(r#"“C:\pasta\semgrep.exe”"#), "{}", linha.detalhe);
+        assert!(
+            linha.detalhe.contains("nenhum binário resolvido"),
+            "{}",
+            linha.detalhe
+        );
+        assert!(
+            !linha.detalhe.contains("origem"),
+            "sem binário não há origem a dizer: {}",
+            linha.detalhe
+        );
+        assert!(linha.detalhe.contains("embutido"), "{}", linha.detalhe);
+
+        let nada = linha_da_sonda(&sonda("ausente", "", None, None));
+        assert!(nada.detalhe.contains("nada apontado"), "{}", nada.detalhe);
+
+        // sem resposta não é ausente, e nunca é "encontrado"
+        let muda = linha_da_sonda(&sonda("sem-resposta", "semgrep", Some("/usr/bin/semgrep"), None));
+        assert_eq!(muda.nivel, "error");
+        assert!(muda.operacao.contains("sem resposta"), "{}", muda.operacao);
+        assert!(muda.detalhe.contains("/usr/bin/semgrep"), "{}", muda.detalhe);
+
+        let achada = linha_da_sonda(&sonda("encontrado", "semgrep", Some("/usr/bin/semgrep"), Some("1.181.0")));
+        assert_eq!(achada.nivel, "info");
+        assert!(achada.operacao.contains("19 regra(s) embarcada(s)"), "{}", achada.operacao);
+        assert!(achada.detalhe.contains("origem configuração"), "{}", achada.detalhe);
+        assert!(achada.detalhe.contains("1.181.0"), "{}", achada.detalhe);
+        assert!(achada.detalhe.contains("2609 ms"), "{}", achada.detalhe);
+    }
+
+    #[test]
+    fn a_conferencia_gravada_diz_o_estado_e_nunca_presume_ok() {
+        let validadas = linha_da_conferencia(&Validacao {
+            estado: "validadas".to_string(),
+            regras: 19,
+            codigo: Some(0),
+            mensagem: "Configuration is valid".to_string(),
+        });
+        assert_eq!(validadas.nivel, "info");
+        assert!(validadas.operacao.contains("validadas"), "{}", validadas.operacao);
+        assert!(validadas.detalhe.contains("código 0"), "{}", validadas.detalhe);
+
+        let sem_ferramenta = linha_da_conferencia(&Validacao {
+            estado: "sem-ferramenta".to_string(),
+            regras: 19,
+            codigo: None,
+            mensagem: "nenhuma conferência externa".to_string(),
+        });
+        assert_eq!(sem_ferramenta.nivel, "warning", "ausência de ferramenta não é verde");
+        assert!(sem_ferramenta.detalhe.contains("sem código de saída"), "{}", sem_ferramenta.detalhe);
+
+        for estado in ["inválidas", "sem-resposta"] {
+            let l = linha_da_conferencia(&Validacao {
+                estado: estado.to_string(),
+                regras: 19,
+                codigo: Some(7),
+                mensagem: String::new(),
+            });
+            assert_eq!(l.nivel, "error", "{estado}");
+        }
     }
 }
