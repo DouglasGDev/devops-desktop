@@ -22,6 +22,7 @@ import type {
   DefinitionSummary,
   LogEvent,
   StepEvent,
+  StepLogLine,
   ApprovalRequest,
   EngineStep,
   PipelineNode,
@@ -177,6 +178,8 @@ export const api = {
   pipelineValidate: (definitionId: number) =>
     invoke<string>("pipeline_validate", { definitionId }),
   pipelineRetryPolicy: (runId: number) => invoke<RetryPolicy>("pipeline_retry_policy", { runId }),
+  pipelineStepLogs: (runId: number, position: number, query?: string | null) =>
+    invoke<StepLogLine[]>("pipeline_step_logs", { runId, position, query: query ?? null, limit: null }),
   pipelineRetry: (runId: number, secretValues: Record<string, string>) =>
     invoke<number>("pipeline_retry", { runId, secretValues }),
 

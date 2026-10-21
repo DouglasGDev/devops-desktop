@@ -632,7 +632,7 @@ export function DeployView({ onNavigate }: { onNavigate: (v: ViewId) => void }) 
             <p className="mt-2 rounded-lg bg-zinc-100 px-3 py-2 text-xs dark:bg-zinc-800/60">{run.detail}</p>
           ) : null}
           <div className="mt-3">
-            <StepPipeline steps={run.steps} />
+            <StepPipeline steps={run.steps} runId={run.id} />
           </div>
         </Card>
       ) : null}

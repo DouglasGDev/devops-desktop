@@ -732,6 +732,19 @@ pub struct DeployRunStep {
     pub touched_destination: bool,
 }
 
+/// Uma linha de saída de etapa que sobreviveu no banco. `attempt` é o que separa
+/// as tentativas de um nó com repetição: cada tentativa é um bloco próprio, e a
+/// ordem dentro do bloco é o `seq`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepLogLine {
+    pub attempt: i64,
+    pub seq: i64,
+    pub stream: String,
+    pub ts: String,
+    pub text: String,
+}
+
 /// Um deploy registrado no histórico local.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

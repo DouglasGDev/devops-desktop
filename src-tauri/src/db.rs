@@ -6,7 +6,7 @@ use tauri::Manager;
 use crate::models::{
     AnalysisCounts, AnalysisFinding, AnalysisRun, AuditEntry, DefinitionRevision, DeployProfile,
     DeployProfileInput, DeployRun, DeployRunStep, PipelineNode, PipelineNodeInput, Project,
-    Routine, RoutineInput, RoutineParam, Server, ServerInput, TerminalHistoryEntry,
+    Routine, RoutineInput, RoutineParam, Server, ServerInput, StepLogLine, TerminalHistoryEntry,
 };
 
 pub struct AppState {
@@ -427,6 +427,32 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE pipeline_nodes_new RENAME TO pipeline_nodes;
     CREATE INDEX IF NOT EXISTS idx_pipeline_nodes_profile ON pipeline_nodes(profile_id, x, y);
     PRAGMA foreign_keys=ON;
+    "#,
+    // v11 — o log de cada etapa sobrevive à corrida (plano CI/CD, prioridade 1).
+    // Até aqui a saída de um comando ia para a tela por evento (`deploy-log`) e era
+    // deitada fora: o banco guardava só a `message` de `deploy_run_steps`, que é um
+    // *tail* e é escrita com ON CONFLICT(run_id, position) — a segunda tentativa de
+    // um nó apagava a primeira, e reabrir a tela não tinha o que reler. Uma linha
+    // por (`run_id`, `position`, `attempt`, `seq`) resolve as duas metades: a
+    // tentativa é bloco próprio, nunca sobrescrito, e a ordem dentro do bloco é o
+    // `seq`, não o id. A cascata é pela corrida, como a das etapas: apagar o
+    // histórico apaga o que foi visto. `text` só recebe o que já passou pela
+    // máscara do motor — é por isso que o valor de uma variável nunca chega aqui.
+    r#"
+    CREATE TABLE IF NOT EXISTS deploy_step_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL REFERENCES deploy_runs(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL,
+        attempt INTEGER NOT NULL DEFAULT 1,
+        stream TEXT NOT NULL CHECK (stream IN ('stdout','stderr','system')),
+        seq INTEGER NOT NULL,
+        ts TEXT NOT NULL,
+        text TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_step_logs_ordem
+        ON deploy_step_logs(run_id, position, attempt, seq);
+    CREATE INDEX IF NOT EXISTS idx_step_logs_run_pos
+        ON deploy_step_logs(run_id, position, seq);
     "#,
 ];
 
@@ -1596,6 +1622,130 @@ pub fn upsert_step(conn: &Connection, etapa: &StepUpdate) -> Result<(), String> 
     )
     .map_err(|e| format!("falha ao registrar etapa do deploy: {e}"))?;
     Ok(())
+}
+
+/// Uma linha de saída pedida ao banco. O chamador já passou pelo que máscara:
+/// `append_step_logs` não redige nada, ele grava exatamente o que recebeu, e é
+/// assim que se pode provar o que o motor viu.
+pub struct LinhaDeLog<'a> {
+    pub stream: &'a str,
+    pub text: &'a str,
+}
+
+/// Grava o bloco de saída de uma tentativa de uma etapa. O `seq` recomeça em cada
+/// (`position`, `attempt`) e é ele que segura a ordem — não o `id`, que é global e
+/// avançaria com o de outras linhas entre uma tentativa e a outra. O `ts` é o
+/// instante em que o bloco foi escrito, declarado assim para ninguém ler a hora do
+/// comando onde há a hora da gravação.
+pub fn append_step_logs(
+    conn: &Connection,
+    run_id: i64,
+    position: i64,
+    attempt: i64,
+    linhas: &[LinhaDeLog<'_>],
+) -> Result<(), String> {
+    if linhas.is_empty() {
+        return Ok(());
+    }
+    let proximo_seq: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM deploy_step_logs \
+             WHERE run_id = ?1 AND position = ?2 AND attempt = ?3",
+            rusqlite::params![run_id, position, attempt],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("falha ao ler a ordem do log da etapa: {e}"))?;
+    let agora = now_rfc3339();
+    let mut st = conn
+        .prepare_cached(
+            "INSERT INTO deploy_step_logs (run_id, position, attempt, stream, seq, ts, text) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )
+        .map_err(|e| format!("falha ao preparar o log da etapa: {e}"))?;
+    for (offset, linha) in linhas.iter().enumerate() {
+        st.execute(rusqlite::params![
+            run_id,
+            position,
+            attempt,
+            linha.stream,
+            proximo_seq + offset as i64,
+            agora,
+            linha.text
+        ])
+        .map_err(|e| format!("falha ao gravar o log da etapa: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Quantas linhas de uma tentativa já estão gravadas. É o que diz ao motor onde o
+/// bloco dele cabe ou onde o corte precisa ser declarado.
+pub fn count_step_logs(
+    conn: &Connection,
+    run_id: i64,
+    position: i64,
+    attempt: i64,
+) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM deploy_step_logs WHERE run_id = ?1 AND position = ?2 AND attempt = ?3",
+        rusqlite::params![run_id, position, attempt],
+        |r| r.get(0),
+    )
+    .map_err(|e| format!("falha ao contar o log da etapa: {e}"))
+}
+
+fn row_to_step_log(row: &Row) -> rusqlite::Result<StepLogLine> {
+    Ok(StepLogLine {
+        attempt: row.get("attempt")?,
+        seq: row.get("seq")?,
+        stream: row.get("stream")?,
+        ts: row.get("ts")?,
+        text: row.get("text")?,
+    })
+}
+
+/// As linhas gravadas de uma etapa, por tentativa e ordem. A busca é um `LIKE` com
+/// curingas escapados e sempre ligada por parâmetro: o texto que alguém digita no
+/// campo de busca nunca faz parte do SQL.
+pub fn read_step_logs(
+    conn: &Connection,
+    run_id: i64,
+    position: i64,
+    attempt: Option<i64>,
+    busca: Option<&str>,
+    limite: i64,
+) -> Result<Vec<StepLogLine>, String> {
+    let termo = busca
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| {
+            format!(
+                "%{}%",
+                t.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+            )
+        });
+    // O tope é por bloco de tentativa, não pela leitura inteira: um bloco grande não
+    // pode esconder o seguinte, e é no fim de cada bloco que o motor escreve o aviso
+    // de corte.
+    let sql = "SELECT attempt, seq, stream, ts, text FROM ( \
+         SELECT attempt, seq, stream, ts, text, \
+                ROW_NUMBER() OVER (PARTITION BY attempt ORDER BY seq) AS rn \
+         FROM deploy_step_logs \
+         WHERE run_id = ?1 AND position = ?2 \
+           AND (?3 IS NULL OR attempt = ?3) \
+           AND (?4 IS NULL OR text LIKE ?4 ESCAPE '\\') \
+       ) WHERE rn <= ?5 ORDER BY attempt, seq";
+    let mut st = conn
+        .prepare_cached(sql)
+        .map_err(|e| format!("falha ao preparar a leitura do log da etapa: {e}"))?;
+    let linhas = st
+        .query_map(
+            rusqlite::params![run_id, position, attempt, termo, limite],
+            row_to_step_log,
+        )
+        .map_err(|e| format!("falha ao ler o log da etapa: {e}"))?
+        .collect::<Result<Vec<StepLogLine>, _>>()
+        .map_err(|e| format!("falha ao ler o log da etapa: {e}"))?;
+    Ok(linhas)
 }
 
 pub fn finish_run(
@@ -3073,5 +3223,171 @@ mod tests {
         // e um nó fora do tipo que o motor conhece é recusado pelo SQLite
         let quebrado = no("estranho", "agenda", None, &[], 40);
         assert!(replace_pipeline_nodes(&conn, modelo.id, &[quebrado]).is_err());
+    }
+
+    /// Uma execução real do banco, para as linhas de log terem a quem pertencer.
+    fn execucao_de_teste(conn: &Connection) -> i64 {
+        conn.execute(
+            "INSERT INTO projects (id, name, local_path, is_git_repo, created_at, updated_at) \
+             VALUES (900, 'site', 'C:/projetos/site', 0, 'agora', 'agora')",
+            [],
+        )
+        .expect("projeto de teste");
+        conn.execute(
+            "INSERT INTO deploy_profiles (id, project_id, name, server_id, strategy, remote_path, \
+             created_at, updated_at) \
+             VALUES (900, 900, 'produção', NULL, 'script', 'C:/publicados', 'agora', 'agora')",
+            [],
+        )
+        .expect("modelo de teste");
+        insert_run(conn, 900, &proc_de_teste("C:/publicados")).expect("execução de teste")
+    }
+
+    #[test]
+    fn cada_tentativa_de_uma_etapa_e_um_bloco_que_nao_se_sobrescreve() {
+        let conn = mem_db();
+        let execucao = execucao_de_teste(&conn);
+
+        let primeira: Vec<LinhaDeLog<'_>> = ["copiando a.html", "copiando b.html"]
+            .iter()
+            .map(|t| LinhaDeLog {
+                stream: "stdout",
+                text: t,
+            })
+            .collect();
+        append_step_logs(&conn, execucao, 7, 1, &primeira).unwrap();
+        append_step_logs(
+            &conn,
+            execucao,
+            7,
+            2,
+            &[LinhaDeLog {
+                stream: "stderr",
+                text: "permissão negada",
+            }],
+        )
+        .unwrap();
+
+        // A repetição de um nó não pode apagar a falha que a motivou: as três linhas
+        // estão lá, cada bloco com seu `seq` começando do zero.
+        let todas = read_step_logs(&conn, execucao, 7, None, None, 50).unwrap();
+        assert_eq!(todas.len(), 3);
+        assert_eq!(
+            (todas[0].attempt, todas[0].seq, todas[0].stream.as_str()),
+            (1, 0, "stdout")
+        );
+        assert_eq!((todas[1].attempt, todas[1].seq), (1, 1));
+        assert_eq!(
+            (todas[2].attempt, todas[2].seq, todas[2].stream.as_str()),
+            (2, 0, "stderr")
+        );
+        assert_eq!(count_step_logs(&conn, execucao, 7, 1).unwrap(), 2);
+        assert_eq!(count_step_logs(&conn, execucao, 7, 2).unwrap(), 1);
+
+        // A busca chega ligada por parâmetro: o `%` procurado é literal, não curinga.
+        assert_eq!(
+            read_step_logs(&conn, execucao, 7, None, Some("a.html"), 50)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(read_step_logs(&conn, execucao, 7, None, Some("%"), 50)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            read_step_logs(&conn, execucao, 7, Some(2), None, 50)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // O `seq` recomeça onde o bloco parou, e o índice único não aceita atalho.
+        append_step_logs(
+            &conn,
+            execucao,
+            7,
+            1,
+            &[LinhaDeLog {
+                stream: "stdout",
+                text: "depois",
+            }],
+        )
+        .unwrap();
+        let de_novo = read_step_logs(&conn, execucao, 7, Some(1), None, 50).unwrap();
+        assert_eq!((de_novo.len(), de_novo.last().unwrap().seq), (3, 2));
+        assert!(conn
+            .execute(
+                "INSERT INTO deploy_step_logs (run_id, position, attempt, stream, seq, ts, text) \
+                 VALUES (?1, 7, 1, 'stdout', 2, 'agora', 'repetida')",
+                rusqlite::params![execucao],
+            )
+            .is_err());
+
+        // Apagar a execução leva o log junto — é a cascata declarada na v11.
+        conn.execute(
+            "DELETE FROM deploy_runs WHERE id = ?1",
+            rusqlite::params![execucao],
+        )
+        .unwrap();
+        assert_eq!(count_step_logs(&conn, execucao, 7, 1).unwrap(), 0);
+    }
+
+    #[test]
+    fn o_valor_da_variavel_nao_chega_ao_log_gravado() {
+        use crate::deploy::{bloco_de_log, Secrets};
+        use std::collections::HashMap;
+
+        let mut fornecidos = HashMap::new();
+        fornecidos.insert("TOKEN".to_string(), "valor-da-variavel-9f3c".to_string());
+        let declaradas = vec!["TOKEN".to_string()];
+        let segredos = Secrets::new(&declaradas, &fornecidos);
+
+        let saida = "enviando a.html\n\
+             cabeçalho TOKEN=valor-da-variavel-9f3c\n\
+             Authorization: Bearer ghp_NAO-E-UM-TOKEN-REAL-2026\n\
+             \n\
+             fim";
+        let mascarado = segredos.mask(saida);
+        let bloco = bloco_de_log("out", &mascarado, 0);
+
+        let conn = mem_db();
+        let execucao = execucao_de_teste(&conn);
+        let linhas: Vec<LinhaDeLog<'_>> = bloco
+            .iter()
+            .map(|(s, t)| LinhaDeLog {
+                stream: s.as_str(),
+                text: t.as_str(),
+            })
+            .collect();
+        append_step_logs(&conn, execucao, 3, 1, &linhas).unwrap();
+
+        // Lido cru da tabela, sem passar por nada que pudesse esconder agora: nem o
+        // valor da variável, nem o token pelo formato.
+        let bruto: String = conn
+            .query_row(
+                "SELECT group_concat(text, char(10)) FROM deploy_step_logs WHERE run_id = ?1",
+                rusqlite::params![execucao],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!bruto.contains("valor-da-variavel-9f3c"), "{bruto}");
+        assert!(
+            !bruto.contains("NAO-E-UM-TOKEN-REAL-2026"),
+            "{bruto}"
+        );
+        // e o que o motor viu continua lá, linha por linha, sem as em branco: a
+        // variável vira `***` e o formato conhecido de token perde só a cauda.
+        let gravadas = read_step_logs(&conn, execucao, 3, None, None, 50).unwrap();
+        assert_eq!(
+            gravadas.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            vec![
+                "enviando a.html",
+                "cabeçalho TOKEN=***",
+                "Authorization: Bearer ghp_***",
+                "fim",
+            ]
+        );
+        assert_eq!(gravadas[0].stream, "stdout");
+        assert_eq!(gravadas[3].seq, 3);
     }
 }

@@ -65,6 +65,11 @@ const MAX_FILES: usize = 20_000;
 const UPLOAD_CHUNK: usize = 40;
 /// Linhas de saída reaproveitadas no diagnóstico de uma etapa.
 const MAX_TAIL_LINES: usize = 20;
+/// O teto de linhas de saída gravadas por tentativa de uma etapa. Passou do teto,
+/// uma última linha `system` declara o corte: bloco truncado em silêncio é igual a
+/// bloco que não existe, e quem lê precisa saber que aquilo não é o fim. É o mesmo
+/// número que a leitura usa como tope, para ninguém pedir mais do que existe.
+pub const TETO_LINHAS_POR_TENTATIVA: i64 = 2_000;
 /// Pasta dentro do destino local onde os pontos de recuperação ficam. É sempre
 /// ignorada pela cópia, pela limpeza de excedentes e pela conferência final.
 const BACKUPS_DIR: &str = ".devops-backups";
@@ -750,6 +755,46 @@ fn secret_findings(ctx: &Ctx) -> Vec<security::Finding> {
     security::summarize(found)
 }
 
+/// O bloco que uma chamada de log manda para o banco: o nome de stream do esquema
+/// (`out`/`err` viram `stdout`/`stderr`, o resto é `system`), as linhas que têm
+/// texto, e — quando o teto da tentativa é cruzado — uma última linha `system`
+/// declarando o corte. Separado da gravação para o corte poder ser conferido sem
+/// motor nenhum, e para a gravação receber só texto já mascarado. Visível ao módulo
+/// do banco porque é aqui, e não na tabela, que o corte e o nome do fluxo significam
+/// alguma coisa.
+pub(crate) fn bloco_de_log(stream: &str, masked: &str, gravadas: i64) -> Vec<(String, String)> {
+    if gravadas >= TETO_LINHAS_POR_TENTATIVA {
+        // O teto já foi declarado no bloco; repetir o aviso linha a linha seria o
+        // corte fingindo tamanho.
+        return Vec::new();
+    }
+    let nome = match stream {
+        "out" => "stdout",
+        "err" => "stderr",
+        _ => "system",
+    };
+    let livres = (TETO_LINHAS_POR_TENTATIVA - gravadas) as usize;
+    let visiveis: Vec<&str> = masked
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    let mut bloco: Vec<(String, String)> = visiveis
+        .iter()
+        .take(livres)
+        .map(|text| (nome.to_string(), text.to_string()))
+        .collect();
+    if visiveis.len() > livres {
+        bloco.push((
+            "system".to_string(),
+            format!(
+                "… truncado em {TETO_LINHAS_POR_TENTATIVA} linha(s) por tentativa — {} linha(s) além do teto não foram gravadas",
+                visiveis.len() - livres
+            ),
+        ));
+    }
+    bloco
+}
+
 // ---------- contexto ----------
 
 struct Ctx {
@@ -802,6 +847,10 @@ struct Ctx {
     /// Uma corrida de reversão não pôs código novo no destino: as etapas que mudam
     /// o runtime ficam quietas e só a leitura de saúde confere o resultado.
     reversao: bool,
+    /// Qual tentativa desta etapa está no ar, começando em 1. É o que separa o bloco
+    /// de log de uma tentativa do bloco da seguinte: sem ele, a repetição de um nó
+    /// escrevia por cima da falha que a motivou.
+    attempt: i64,
 }
 
 impl Ctx {
@@ -849,6 +898,8 @@ impl Ctx {
             node_row: Some(row),
             node_timeout,
             reversao: self.reversao,
+            // O ramal é outro nó: a tentativa dele recomeça em 1.
+            attempt: 1,
         }
     }
 
@@ -966,8 +1017,8 @@ impl Ctx {
     fn registra(&self, linha: &Linha, status: &str, message: Option<&str>, command: Option<&str>, exit_code: Option<i64>) {
         let message = message.map(|m| self.secrets.mask(m));
         let command = command.map(|c| self.secrets.mask(c));
-        if let Ok(conn) = self.db.lock() {
-            if let Err(e) = db::upsert_step(
+        let falha_de_registro = if let Ok(conn) = self.db.lock() {
+            db::upsert_step(
                 &conn,
                 &db::StepUpdate {
                     run_id: self.run_id,
@@ -980,10 +1031,15 @@ impl Ctx {
                     node_key: linha.chave.as_deref(),
                     touched_destination: linha.tocando,
                 },
-            ) {
-                // Etapa sem registro no histórico é dado perdido: mostra na tela.
-                self.log(linha.position, "err", &format!("falha ao registrar a etapa: {e}"));
-            }
+            )
+            .err()
+        } else {
+            None
+        };
+        // Fora do lock: `log` também escreve no banco, e o mutex não é reentrante.
+        if let Some(e) = falha_de_registro {
+            // Etapa sem registro no histórico é dado perdido: mostra na tela.
+            self.log(linha.position, "err", &format!("falha ao registrar a etapa: {e}"));
         }
         let _ = self.app.emit(
             "deploy-step",
@@ -1008,6 +1064,7 @@ impl Ctx {
             .as_ref()
             .map(|row| row.position)
             .unwrap_or(position);
+        self.gravar_log(linha, stream, &masked);
         for line in masked.lines().take(200) {
             if line.trim().is_empty() {
                 continue;
@@ -1019,6 +1076,42 @@ impl Ctx {
                     position: linha,
                     stream: stream.to_string(),
                     text: line.to_string(),
+                },
+            );
+        }
+    }
+
+    /// A mesma saída mascarada que a tela recebe fica no banco, antes do evento: é
+    /// assim que reabrir a janela tem o que reler, e o que a tela mostra passa a ser
+    /// o que está gravado. A máscara é a de `Secrets::mask` — o valor de cada
+    /// variável desta corrida some primeiro, depois os formatos conhecidos de
+    /// segredo — por isso nenhum valor chega ao disco. Um bloco por tentativa: a
+    /// repetição de um nó não apaga a falha que a motivou.
+    fn gravar_log(&self, position: i64, stream: &str, masked: &str) {
+        let gravacao = || -> Result<(), String> {
+            let conn = self
+                .db
+                .lock()
+                .map_err(|e| format!("o banco está indisponível: {e}"))?;
+            let gravadas = db::count_step_logs(&conn, self.run_id, position, self.attempt)?;
+            let bloco = bloco_de_log(stream, masked, gravadas);
+            let linhas: Vec<db::LinhaDeLog<'_>> = bloco
+                .iter()
+                .map(|(s, t)| db::LinhaDeLog {
+                    stream: s.as_str(),
+                    text: t.as_str(),
+                })
+                .collect();
+            db::append_step_logs(&conn, self.run_id, position, self.attempt, &linhas)
+        };
+        if let Err(e) = gravacao() {
+            let _ = self.app.emit(
+                "deploy-log",
+                LogEvent {
+                    run_id: self.run_id,
+                    position,
+                    stream: "err".to_string(),
+                    text: format!("falha ao gravar o log da etapa: {e}"),
                 },
             );
         }
@@ -1619,6 +1712,7 @@ enum Fim {
 fn executar_no(ctx: &mut Ctx, index: usize, no: &PipelineNode) -> Result<Fim, Fail> {
     let row = NodeRow::of(index, no);
     ctx.node_row = Some(row.clone());
+    ctx.attempt = 1;
     ctx.node_timeout = if no.timeout_secs > 0 {
         Some(Duration::from_secs(no.timeout_secs as u64))
     } else {
@@ -1724,6 +1818,10 @@ fn executar_conteudo(ctx: &mut Ctx, no: &PipelineNode, row: &NodeRow) -> Result<
     }
     let mut tentativa = 0;
     loop {
+        // O número da tentativa é do bloco de log, não do laço: cada repetição
+        // escreve o seu, e o aviso de "repetindo o nó" fica no bloco da tentativa
+        // que falhou, que é onde ele faz sentido.
+        ctx.attempt = tentativa + 1;
         let resultado: Result<Option<String>, Fail> = match no.kind.as_str() {
             "motor" => {
                 let Some(number) = no.engine_step else {
@@ -3846,6 +3944,11 @@ fn run(
     let label = format!("{operacao} {} → {destino} (#{run_id})", profile.name);
     state.register(run_id, label.clone(), Arc::clone(&cancel))?;
 
+    // Os valores fornecidos já entram na máscara desde aqui. Na fila de quinze etapas
+    // a etapa 1 refaz `Secrets` com os mesmos dados, mas um nó rodado sozinho nunca
+    // passa por aquela etapa: sem isto o valor da variável chegaria cru ao log
+    // gravado, e é justamente o log gravado que sobrevive à janela.
+    let secrets = Secrets::new(&profile.secret_keys, &secret_values);
     let ctx = Ctx {
         app: app.clone(),
         db: db.clone(),
@@ -3853,7 +3956,7 @@ fn run(
         cancel: Arc::clone(&cancel),
         touched: AtomicU16::new(0),
         provided: secret_values,
-        secrets: Secrets::new(&profile.secret_keys, &HashMap::new()),
+        secrets,
         askpass: None,
         shell: "sh".to_string(),
         files: Vec::new(),
@@ -3880,6 +3983,7 @@ fn run(
         node_row: None,
         node_timeout: None,
         reversao: matches!(&percurso, Percurso::Reversao),
+        attempt: 1,
     };
     let linhas = match &percurso {
         // todas as etapas aparecem como "aguardando" assim que o clique acontece
@@ -4724,5 +4828,55 @@ mod tests {
         // e um nó que só informa, com a leitura feita, conclui dizendo que nada barra
         let informativo = veredito_do_no(&corrida(false, "concluida", "", None)).unwrap();
         assert!(informativo.contains("nada barra"), "{informativo}");
+    }
+
+    #[test]
+    fn o_teto_de_linhas_declara_o_corte_uma_só_vez() {
+        // Saída maior que o teto: o bloco fecha no teto e a última linha declara o
+        // corte — nunca um log que mente sobre o tamanho do que houve.
+        let saida: String = (0..2_500)
+            .map(|i| format!("linha {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let bloco = bloco_de_log("out", &saida, 0);
+        assert_eq!(
+            bloco.len(),
+            TETO_LINHAS_POR_TENTATIVA as usize + 1,
+            "as 2.000 linhas graváveis mais o aviso de corte"
+        );
+        assert_eq!(bloco[0], ("stdout".to_string(), "linha 0".to_string()));
+        assert_eq!(
+            bloco[TETO_LINHAS_POR_TENTATIVA as usize - 1].1,
+            format!("linha {}", TETO_LINHAS_POR_TENTATIVA - 1)
+        );
+        let aviso = &bloco.last().unwrap();
+        assert_eq!(aviso.0, "system");
+        assert!(aviso.1.contains("truncado em 2000"), "{}", aviso.1);
+        assert!(aviso.1.contains("500 linha(s) além do teto"), "{}", aviso.1);
+
+        // Bloco que já estourou o teto não escreve mais nada, nem repete o aviso.
+        assert!(bloco_de_log("out", "uma linha qualquer", TETO_LINHAS_POR_TENTATIVA).is_empty());
+
+        // O corte é do que faltou, não do que já estava lá: 1999 gravadas e 3 novas
+        // deixam 1 linha e avisam das 2 que não couberam.
+        let apertado = bloco_de_log("err", "a\nb\nc", TETO_LINHAS_POR_TENTATIVA - 1);
+        assert_eq!(apertado.len(), 2);
+        assert_eq!(apertado[0], ("stderr".to_string(), "a".to_string()));
+        assert!(apertado[1].1.contains("2 linha(s) além do teto"), "{}", apertado[1].1);
+
+        // E o nome do fluxo do esquema vem do do motor, com as em branco fora:
+        // linha vazia não é saída de ninguém.
+        let nomeado = bloco_de_log("err", "caiu\n\n  \naqui dentro", 0);
+        assert_eq!(
+            nomeado,
+            vec![
+                ("stderr".to_string(), "caiu".to_string()),
+                ("stderr".to_string(), "aqui dentro".to_string()),
+            ]
+        );
+        assert_eq!(
+            bloco_de_log("sistema", "etapa pulada", 0),
+            vec![("system".to_string(), "etapa pulada".to_string())]
+        );
     }
 }

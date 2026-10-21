@@ -7,14 +7,16 @@ CI/CD** — o contrato central de pipeline (`4f005ee`) e a licença de contribui
 construtor visual do grafo (`23beec2`), a **etapa 4**, os executores de runtime (Docker, Docker Compose, PM2) com o
 git como passo do pipeline, e a **etapa 5**, a análise de código-fonte — na tela e como nó do mesmo grafo —, registrada
 aqui em 2026-10-15. Fecha a lista a rodada de **2026-10-15 à noite**: as duas verificações da tela Análise passaram a
-deixar linha no Histórico (`a63bf00`, com o texto lido e medido na janela), §1.1 é o estado em um parágrafo.
+deixar linha no Histórico (`a63bf00`, com o texto lido e medido na janela), §1.1 é o estado em um parágrafo. A
+**etapa 6** do plano CI/CD é a desta sessão: cada linha de saída de etapa **sobrevive no banco**, por tentativa, já
+mascarada, e é relida depois de fechar e reabrir o aplicativo — medida nas corridas **#49 a #53**, no §2.
 
 ## 1. Retomar em três passos
 
 ```bash
 node ./node_modules/typescript/bin/tsc --noEmit     # tipos do frontend
 npm run build                                        # tsc + bundle
-(cd src-tauri && cargo test)                         # 303 testes de backend
+(cd src-tauri && cargo test)                         # 308 testes de backend
 (cd src-tauri && cargo clippy --all-targets -- -D warnings)
 node scripts/confira-repo.ts                         # o comparador remoto↔pasta, 9 formas reais de URL
 
@@ -37,36 +39,42 @@ Armadilhas já conhecidas nesta máquina:
   anterior acabou.
 - `cargo fmt` **não** é usado neste projeto — o formato é o do próprio autor, e `cargo fmt` reorganiza tudo.
 
-### 1.1 Estado em um parágrafo (2026-10-15, 22:25)
+### 1.1 Estado em um parágrafo (2026-10-21, 15:12)
 
-Tela e backend: **147** `#[tauri::command]`, 24 arquivos Rust (`analysis.rs` é o mais novo), 11 telas (`AnalysisView`),
-**303** testes de backend, SQLite em `user_version` **10** com 13 tabelas, 44.458 linhas TS/TSX/Rust (77 arquivos, sem
-contar `node_modules`, `target`, `dist` nem `Python/`, que é um venv **não rastreado** — nunca `git add` nele). Lido com
-`git ls-remote origin refs/heads/main`, o remoto está em `7a0d865c21b09f09ff6777a812c6caa1fa24319b`, o mesmo
-`git rev-parse HEAD` local: `a63bf00` é o código da rodada, `fa425fa`, `00b8c81` e `50e4832` são as docs das medições, e
-`56e7721` + `7a0d865` são os dois acertos de linha que vieram depois — cada um empurrado com a autorização pedida na
-frase, nunca por extensão de um "sim" anterior. O binário mais novo é
-`src-tauri/target/release/devops-desktop.exe` das 22:25, posterior à última edição de fonte.
+Tela e backend: **148** `#[tauri::command]`, 24 arquivos Rust, 11 telas, **308** testes de backend, SQLite em
+`user_version` **11** com **14** tabelas (a nova é `deploy_step_logs`), 45.245 linhas TS/TSX/Rust em **78** arquivos
+(`git ls-files '*.ts' '*.tsx' '*.rs' | xargs wc -l`, com o componente novo contando junto — `src/components/deploy/StepLogs.tsx`,
+106 linhas), sem contar `node_modules`, `target`, `dist` nem `Python/`, que é um venv **não rastreado** — nunca `git add`
+nele). Lido com `git ls-remote origin refs/heads/main`, o remoto está em `1985c391dd9b71a11b5f3a570abf0c0dfc7c3172`, o
+mesmo `git rev-parse HEAD` local no instante desta linha; nada da etapa 6 foi empurrado ainda — o commit é fechado
+depois do texto e a autorização do push é pedida na frase, nunca por extensão de um "sim" anterior. O binário mais novo
+é `src-tauri/target/release/devops-desktop.exe` das **15:05**, `Finished release profile [optimized] target(s) in 5m 27s`
+lido no log da compilação, posterior à última edição de fonte; a janela aberta por ele serve
+`/assets/index-C287853D.js`, o mesmo hash que o `vite` gravou em `dist/assets/` nesta rodada.
 
-A rodada que fecha aqui é a correção do defeito apontado por ele — *"os logs do verificar nao salva nada quando vcc
-aponta"*. `analysis_detectar` (Sondar ferramenta) e `analysis_conferir` (Conferir regras) respondiam à tela e
-descartavam a resposta; agora os dois gravam uma linha de auditoria pela mesma porta (`commands::registrar_verificacao`
-→ `audit::log`, categoria `análise`, com o rótulo que a torna encontrável no **Histórico**), e o **texto da linha é
-produzido no módulo da análise**, porque é lá que cada estado tem significado: `encontrado`/`validadas` = `info`,
-`ausente`/`sem-ferramenta` = `warning`, `sem-resposta`/`inválidas` = `error`. Nada é registrado como "ok" presumido. O
-que foi lido na janela real está no §2; a razão de cada escolha, nos §5 itens 28 e 29.
+A rodada que fecha aqui é a **etapa 6 do plano CI/CD: o log de etapa persistido e pesquisável.** Antes, a saída de uma
+etapa existia só enquanto a janela estava aberta: o motor emitia até 200 linhas no evento `deploy-log`, a tela mostrava,
+e fechar o aplicativo jogava aquilo fora — sem prova do que uma tentativa falha imprime, não há como conferir um deploy
+depois. Agora a mesma linha que sai no evento é **gravada** (`Ctx::log` → `db::append_step_logs`), na mesma ordem,
+depois de passar por `Secrets::mask` + `audit::scrub_secrets`, em blocos por tentativa `(run_id, position, attempt, seq)`
+— a repetição de um nó **não sobrescreve** o bloco da tentativa anterior. A leitura é uma porta só
+(`pipeline::step_logs` → `pipeline_step_logs`) e serve as duas janelas: o painel **Saída da etapa** no cartão do deploy e
+qualquer consulta depois. O teto é do motor: **2.000 linhas por tentativa**, e quem passa disso ganha uma última linha
+`system` dizendo o corte — nunca um silêncio. A busca é `LIKE` **com parâmetro ligado** (nada de concatenação), e o tope
+é **por bloco de tentativa**, porque um bloco cheio não pode esconder o bloco seguinte nem a linha que declara o corte.
 
 O que não pode ser revertido ao mexer aqui (lista completa no §5): **não existe segundo motor de deploy** — a tela e o
 nó do grafo chamam a mesma `analysis::executar` / `deploy::start`, e o veredito é contagem contra `severity_gate`,
 **nunca** o código de saída da ferramenta; o que é desenhado na tela é o que o backend executa; a fila linear de 15
 etapas continua compatível com o grafo; o frontend não foi substituído; UI tem **controles e estado**, sem prosa
 explicativa (caminhos e passo a passo vivem neste documento e no README); segredos são mascarados em toda saída e
-**valores de variáveis nunca vão para disco, log ou Histórico** — retratos de versão carregam só nomes; sonda nomeia
-"sem resposta" separadamente de "não encontrado" e tem prazo próprio; nada é simulado, nenhum botão é enfeite; uma
-mecânica por módulo — e uma mecânica servida por **duas portas** (a tela e o nó do grafo), não por duas implementações;
-ferramentas funcionam **sem servidor e sem conta de serviço**; `working_dir` local fica contido na raiz do projeto;
-aprovação manual nunca é presumida; senha SSH via `SSH_ASKPASS` por operação, jamais persistida; aviso de compilador é
-corrigido na causa, sem `#[allow(...)]`.
+**valores de variáveis nunca vão para disco, log ou Histórico** — retratos de versão carregam só nomes; **a gravação do
+log vem depois da máscara, nunca antes** (§5, item 31); cada tentativa é um bloco separado, e nada é apagado quando o
+nó repete (§5, item 30); o corte é declarado, não escondido (§5, item 32); sonda nomeia "sem resposta" separadamente de
+"não encontrado" e tem prazo próprio; nada é simulado, nenhum botão é enfeite; uma mecânica por módulo — e uma mecânica
+servida por **duas portas** (a tela e o nó do grafo), não por duas implementações; ferramentas funcionam **sem servidor
+e sem conta de serviço**; `working_dir` local fica contido na raiz do projeto; aprovação manual nunca é presumida; senha
+SSH via `SSH_ASKPASS` por operação, jamais persistida; aviso de compilador é corrigido na causa, sem `#[allow(...)]`.
 
 Como se trabalha neste repositório: o loop da etapa é `cargo test --lib` → `cargo clippy --all-targets` (zero avisos) →
 `tsc --noEmit` → `npm run build` → `npm run tauri build`, lendo **cada** log antes de dizer que passou — nenhuma
@@ -77,9 +85,10 @@ máquina: `git commit && git push` na mesma linha é bloqueado (são chamadas se
 reunem-se com `git reset --soft`. A janela é pilotada por `scripts/ponte-cdp.mjs` (§4.1); `npm run tauri dev` não roda
 (porta 1420 presa por um Vite de sessão anterior).
 
-O que falta, no curto prazo: o aceite visual do Douglas em **Análise → Sondar ferramenta / Conferir regras → Histórico
-com o filtro** *Análise*, a corrida **#6**, os cartões de Deploy **#45/#46** e a corrida travada pelo gate **#47/#48**;
-e as pendências do plano (triggers, ambientes com aprovação registrada, logs por etapa persistidos, retry configurável,
+O que falta, no curto prazo: o aceite visual desta etapa — abrir **Deploy → um execução do histórico → Saída da etapa** e
+julgar se os blocos por tentativa e a busca servem — e o aceite das entregas anteriores em **Análise → Sondar ferramenta /
+Conferir regras → Histórico com o filtro** *Análise*, a corrida **#6**, os cartões de Deploy **#45/#46** e a corrida
+travada pelo gate **#47/#48**; e as pendências do plano (triggers, ambientes com aprovação registrada, retry configurável,
 revalidação SSH e os executores Docker/Compose/PM2 contra um daemon/host real) em §6. As lacunas honestas do "canivete"
 estão em §7.
 
@@ -87,11 +96,11 @@ estão em §7.
 
 | Checagem | Resultado real |
 | --- | --- |
-| `tsc --noEmit` | saída vazia, código 0 — relido nesta rodada **duas vezes**: uma antes do rebuild e outra depois de `ui.tsx` ganhar o rótulo da categoria *Análise*, e ainda dentro do `npm run build` que antecede o binário das 22:25 |
-| `npm run build` | `✓ 85 modules transformed`; `dist/assets/index-DZ1dExmJ.js` **882.41 kB** e `index-nrYLLjTt.css` **61.92 kB**; `✓ built in 7.72s`; único aviso é o de chunk > 500 kB, que é de tamanho de bundle, não de código. Lido **dentro da janela** das 22:25: `document.querySelectorAll("script[src]")` devolve exatamente `["/assets/index-DZ1dExmJ.js"]` — o frontend embutido no binário é o do disco, e é a primeira vez que o hash muda desde a etapa 5, porque o rótulo novo é de tela |
-| `cargo test` (todos os alvos) | **`303 passed; 0 failed; 0 ignored; 0 measured; finished in 19,31 s`** em `devops_desktop_lib` (relido duas vezes nesta rodada: `17,72 s` antes da última correção de texto e `19,31 s` depois, sempre sem nenhuma linha de `warning`); `main.rs` e doc-tests com 0 testes. Os dois testes novos são os que travam o texto gravado na auditoria (`a_sonda_grava_o_valor_apontado_quando_a_ferramenta_nao_esta_aqui`, `a_conferencia_gravada_diz_o_estado_e_nunca_presume_ok`), e cada um foi lido pelo nome antes de entrar na contagem. Histórico: `301 passed` (fechamento do gate), `300 passed` (fim da etapa 5), `261 passed` (etapa 4), `229 passed` (etapa 3), `208 passed` (antes da etapa 3) |
-| `cargo clippy --all-targets` | **execução forçada**, depois de `cargo clean -p devops-desktop` (369 arquivos / 569.7 MiB removidos nesta rodada) para o clippy não responder do cache: **zero linhas `warning`/`error`**, código 0 — e relido com `cargo clippy --all-targets -- -D warnings`, que transforma aviso em falha, também `Finished` sem nada; refeito com `-D warnings` depois da última mudança, outra vez sem nada. Nenhum `#[allow]` foi acrescentado para chegar aí |
-| `node scripts/confira-repo.ts` | `todas as 9 formas conferem`, código 0 (relido nesta rodada, antes do rebuild) |
+| `tsc --noEmit` | saída vazia, código 0 — relido nesta rodada (etapa 6) com o componente novo na árvore, e outra vez dentro do `npm run build` que antecede o binário das 15:05 |
+| `npm run build` | `✓ built in 5.27s`; `dist/assets/index-C287853D.js` **884.95 kB** (gzip 240.18 kB) e `index-DjAxcwFb.css` **62.10 kB**; o único aviso é o de chunk > 500 kB, de tamanho de bundle, não de código. Conferido **dentro da janela**: `document.querySelectorAll("script[src]")` devolve exatamente `["/assets/index-C287853D.js"]` — o frontend dentro do `.exe` das 15:05 é o do disco |
+| `cargo test` (todos os alvos) | **`308 passed; 0 failed; 0 ignored; 0 measured; finished in 17,16 s`** em `devops_desktop_lib`, relido **duas vezes** nesta rodada: uma com a suíte em 307 e a leitura ainda com tope global (aí o teste novo **falhou** — `left: 1999, right: 2001`), e outra depois de corrigir o tope por bloco. Os cinco testes novos são `cada_tentativa_de_uma_etapa_e_um_bloco_que_nao_se_sobrescreve` e `o_valor_da_variavel_nao_chega_ao_log_gravado` (db.rs), `a_mascara_nao_achata_as_linhas_da_saida` (audit.rs), `o_teto_de_linhas_declara_o_corte_uma_só_vez` (deploy.rs) e `a_porta_de_leitura_do_log_ve_as_tentativas_em_ordem` (pipeline.rs), cada um lido pelo nome antes de entrar na contagem. Histórico: `303 passed` (rodada das verificações), `301 passed` (fechamento do gate), `300 passed` (fim da etapa 5), `261 passed` (etapa 4), `229 passed` (etapa 3) |
+| `cargo clippy --all-targets` | `Finished \`dev\` profile … in 4.15s` com **zero linhas `warning`/`error`** sob `-D warnings`, que transforma aviso em falha. Foi assim que os dois achados desta etapa apareceram: o `explicit_auto_deref` do `*t` e, sobretudo, o teste que não passava com o tope global — nenhum `#[allow]` foi acrescentado para chegar ao verde |
+| `node scripts/confira-repo.ts` | `todas as 9 formas conferem`, código 0 — relido nesta rodada antes do rebuild |
 | Migração `user_version` **9** no banco real | o banco de `AppData/Roaming/com.douglasgdev.devopsdesktop/devops-desktop.db` abriu em `user_version 7` e **foi lido de novo em 9** pela janela real desta sessão. Colunas novas conferidas no arquivo: em `deploy_profiles` — `runtime image_name dockerfile compose_file service_name publish_ports`; em `deploy_runs` — `previous_image`; em `pipeline_nodes` — `git_op git_ref`. Os **oito nós da etapa 3 sobreviveram** ao rebuild da tabela `pipeline_nodes` da migração 8 (lido de volta: `validar, git, coleta, preparo, publicar, gate, copia, historico`) |
 | **Fluxo sem servidor na janela real** (CDP, §4.1) | modelo `serverId: null` salvo · pré-vistoria `2 arquivo(s), 72.1 KB` · publicar #1 `success` com as 15 etapas · guarda `.devops-backups/1` com o README antigo **e** o excedente movido · reverter #2 `2 arquivo(s) reposto(s)` (conferido no disco) · publicar #3 `1 copiado · 1 já igual` (CRC32) · destino dentro do projeto **recusado na etapa 1** sem tocar no disco · caminho duplicado recusado (`o projeto já tem um modelo de deploy chamado "…"`) · remover o modelo → `deploy_runs` 5 → 0 e `audit_log` 57 → 58 (o histórico fica na auditoria, como a confirmação diz) · UI do modo local conferida no exe: destino "Nesta máquina (sem SSH)", estratégias só **C**/**D**, rótulo "Guardar o que já está no destino antes de sobrescrever", sem o checkbox de releases, e os quatro diálogos (pré-vistoria → publicar → reverter → remover) lidos na tela |
 | As quatro portas do "o deploy gera o próprio artefato" (exe das 11:01) | **W1** artefatos sem seleção + build gerando `saindo-do-build.txt`: 61 copiados, arquivo conferido no destino · **W2** artefatos declarando `gerado-pela-preparacao.txt` que **ainda não existe**: etapa 4 anuncia, preparação gera, 1 copiado, `success` · **W3** caminho que nenhum comando gera: `failed` na etapa 8 com "depois da preparação não sobrou nenhum arquivo para enviar — confira os caminhos" · **W4** `script`: `success` sem copiar nada (destino ficou vazio, como projetado) |
@@ -104,6 +113,12 @@ estão em §7.
 bloqueados sem autorização, execução em andamento, pronto). **Na janela só a variante "pré-vistoria pendente" foi lida de
 fato** — as outras quatro são o que o código devolve, e continuam pedindo o aceite visual dele (§6, item 5) |
 | Migração `user_version` **10** no banco real | o que prova as tabelas novas **não** é um `PRAGMA` lido agora, e sim o round-trip pelos comandos, na janela aberta hoje: `analysis_corridas` devolve **8** corridas gravadas (ids 1–8, com `project`, `root`, `rules`, `counts`, `blocked`) e `analysis_achados` devolve os achados de uma delas (`runId 6` → 12 linhas com `arquivo`, `linha`, `regra`, `severidade`, `cwe`, `trechoMascarado`); `pipeline_nodes` devolve para cada nó os campos `analyzer` e `severityGate`, que só existem porque a migração 10 os acrescentou em `pipeline_nodes`. O piloto da etapa 5 é o projeto **4** (`%TEMP%\piloto-etapa5`) e o do motor continua o **3** |
+| Migração `user_version` **11** no banco real (etapa 6) | lida **nos dois sentidos**: o banco de `AppData/Roaming/com.douglasgdev.devopsdesktop/devops-desktop.db` abriu em `user_version 10` (lido antes do binário novo, com `deploy_step_logs` **inexistente** e a última corrida sendo a **#48**) e, aberto pelo binário das 15:05, foi relido em `user_version 11` com a tabela `deploy_step_logs` criada — 8 colunas (`run_id, position, attempt, seq, stream, ts, text, id`), `CHECK (stream IN ('stdout','stderr','system'))`, índice único `(run_id, position, attempt, seq)` e índice de leitura `(run_id, position, seq)`, com `ON DELETE CASCADE` para `deploy_runs`. Na janela, lida de novo no fim da rodada, a tabela tem **2.012 linhas** em **6** blocos: `(49,10,1,2) (50,10,1,2) (51,9,1,3) (51,9,2,2) (52,11,1,2001) (53,4,1,2)` — o bloco novo é o da **#53**, escrita depois do reopen. O `DELETE FROM deploy_runs` que apaga a corrida de teste leva o log junto no mesmo `id` (testes `cada_tentativa…` e `o_valor_da_variavel…` conferem a cascata e o índice único) |
+| **O valor da variável não chega ao banco** (CDP + leitura crua do arquivo, etapa 6) | corrida **#49** (binário das 14:52, antes da correção): o nó de comando `echo envio %CHAVE_PILOTO%` deixou **`envio %CHAVE_PILOTO%` literal** nas duas linhas gravadas — o `Secrets` do `Ctx` era montado só com as chaves, sem os valores fornecidos, e um nó rodado sozinho nunca passava pela etapa que os injeta. Corrigido na causa (`Secrets::new(&profile.secret_keys, &secret_values)` na construção do `Ctx`), a corrida **#50** grava **`envio ***`** — lido pela porta `pipeline_step_logs`. E a prova negativa, feita no **arquivo**, não pela tela: `valor-de-teste-7h4d` (o valor que eu mesmo forneci) está **ausente** de `devops-desktop.db` (2.150.400 B), do `-wal` (4.136.512 B) e do `-shm` (32.768 B) — varridos byte a byte com o banco já migrado e escrito pelo binário novo. O nome da variável continua aparecendo (`%CHAVE_PILOTO%` é o comando, não o valor), e é assim que o `secret_keys` funciona: retrato carrega nomes, nunca valores |
+| **Tentativa é bloco, não sobrescrita** (CDP, etapa 6) | nó `repete` com `retry_limit` 1 e `echo aqui & exit /b 3`: corrida **#51**, `failed`, saída 3, e **cinco linhas em dois blocos** lidas pela porta — `a1#0000 stdout: + echo aqui & exit /b 3`, `a1#0001 stdout: aqui`, `a1#0002 stderr: aqui — repetindo o nó (tentativa 1/1)`, `a2#0000 stdout: + echo aqui & exit /b 3`, `a2#0001 stdout: aqui`. O `seq` **recomeça em 0** na tentativa 2, o aviso de repetição fica no bloco da tentativa que falhou (porque `ctx.attempt` só sobe na primeira instrução do laço), e nada da tentativa 1 foi reescrito. Na tela, lido no DOM, a mesma divisão: **`tentativa 1 · 3 linha(s)`** e **`tentativa 2 · 2 linha(s)`**, com a linha de `stderr` no tom vermelho e a de `stdout` no tom neutro |
+| **O teto declara o próprio corte** (CDP, etapa 6) | nó `muito` com `for /L %i in (1,1,2500) do @echo linha %i`: corrida **#52**, **2.001 linhas** no bloco da tentativa 1 — 2.000 de `stdout` e a última, `a1#2000 system: … truncado em 2000 linha(s) por tentativa — 501 linha(s) além do teto não foram gravadas`. Lida de duas formas: tope pedido 9.999 devolve as 2.001 e **termina na linha do corte** (é para isso que o teto de leitura é `TETO + 1`, não `TETO`), e a leitura padrão devolve **500** — um tope, não uma promessa. Na tela, o painel mostra `tentativa 1 · 500 linha(s)` (de `0000+ for /L …` até `0499linha 499`) e, digitando **`truncado`** no campo de busca, **uma** linha volta: exatamente a que declara o corte, `2000… truncado em 2000 linha(s) por tentativa — 501 linha(s)…` |
+| **Fechar e reabrir é o teste** (CDP, pedido dele: *"corrida #49 no Piloto → fechar → reabrir → ler linhas do banco"*) | o aplicativo das 14:52 foi **fechado** (`taskkill /IM devops-desktop.exe`, "sinal de encerramento enviado ao processo … PID 11140") e o binário das 15:05 reaberto (`Id 29016`, `Responding True`, título `DevOps Desktop — Central de SSH, Git e Deploy`). Na janela nova, `pipeline_step_logs` devolve **#49 com as suas 2 linhas**, **#50 com `envio ***`**, **#51 com os 5/2 blocos** e **#52 com o corte** — a mesma linha que a janela mostrou na hora, relida do banco depois de o processo ter morrido e outro nascido. E a escrita continua depois do reopen: `preparo` rodado sozinho virou a corrida **#53** (`04 preparo done · 1 comando(s) nesta máquina`) e as duas linhas dela (`a1#0000 stdout: + echo preparo`, `a1#0001 stdout: preparo`) foram lidas pela mesma porta |
+| **Corrida anterior à migração não inventa linha** (CDP, etapa 6) | a **#48** (15/10, antes da `user_version 11`) abre o cartão, os dois passos aparecem com **Saída da etapa**, e o painel diz **`nenhuma linha gravada nesta etapa`** com **0** linhas numeradas. Não há log retroativo fingido: o que não foi gravado na hora simplesmente não existe, e a tela diz isso em vez de imprimir vazio silencioso |
 | **Análise de código na janela real** (CDP, etapa 5 do plano CI/CD) | sonda da ferramenta lida agora: `analysis_detectar` → `estado "encontrado"`, `caminho C:\Users\dougl\AppData\Local\Temp\semgrep-probe\Scripts\semgrep.exe`, `versao "1.181.0"`, `duracaoMs 2609`, `regras 19`, `origem "configuração"` — ou seja, o semgrep **não está no `PATH`** desta máquina e é exatamente para isso que existe `analise.semgrep.caminho`, lido de `get_settings` com esse mesmo valor · `analysis_regras` → **19** regras embarcadas (`dd-101-shell-true`, `dd-102-sql-montado`, …) · `analysis_conferir` → `estado "validadas"`, `regras 19`, `codigo 0`, com a frase do próprio semgrep `Configuration is valid - found 0 configuration error(s), and 19 rule(s).` · **corrida #6** na tela, com o semgrep real: `status "concluida"`, `filesScanned 3`, `exitCode 0`, `toolErrors 0`, `counts {error 8, warning 4, info 0}`, `severityGate "ERROR"`, **`blocked: true`** — veredito da contagem contra o corte · os **12** achados lidos um a um, cada um com o trecho **relido do disco e mascarado**: `subprocess.call("curl -H 'Authorization: Bearer «valor mascarado»' https://api.example", shell=True)` e, filtrando o JSON inteiro dos 12 por `ghp_|sk-|token=|secret=`, **0** campos batem · a mesma #6 exportada como pacote: `esquema "devops-desktop/analise@1"`, `veredito {classificacao: "barra", bloqueia: true, corte: "ERROR", contagem: {error 8, warning 4, total 12}}`, `decisoes [{acao: "parar-a-publicacao", motivo: "12 achado(s) no corte ERROR ou acima"}]`, `cobertura {arquivosLidos 3, arquivosPulados 0, achadosGuardados 12}`, `execucao.codigoDeSaidaEProva: false` (e `codigoDeSaidaDaFerramenta: 0` escrito ao lado, para ficar claro que ele **não** é a prova), `truncado: false`, `nota: null`, `observacao "nenhum valor de credencial está aqui: os trechos passam pela mascaráção de security.rs antes de serem gravados"`, e um achado com `cwe "CWE-78: OS Command Injection"` |
 | **Nó `analise` rodando no mesmo motor** (CDP, etapa 5) | três execuções do **`deploy::start`** com o nó de análise no grafo, lidas hoje em `deploy_run`: **#44** `failed` com a linha `Nó 9:failed` às `19:54:10Z` — e a corrida de análise **do mesmo segundo** (#5) diz `tool "semgrep ausente"`, `status "falhou"`, `filesScanned 0`: **sem leitura não é verde** · **#45** `success` (`20:19:59Z → 20:20:05Z`) com a corrida **#7** `instrumento semgrep`, `versao 1.181.0`, `exitCode 0`, `concluida` · **#46** `success` (`20:22:26Z`) com a corrida **#8** `instrumento embutido`, 2 arquivos lidos, 1 ms, `exitCode null` (o embutido não tem processo externo, e mesmo assim a corrida é `concluida`) — as duas portas, a mesma `analysis::executar` · o `../fora` no nó de análise é recusado pelo **mesmo** validador do nó de comando, lido agora com `pipeline_check_nodes`: `nó “preparo”: a pasta de trabalho deve ser um caminho relativo dentro do projeto`, sem salvar nada · o grafo do piloto voltou ao desenho de origem e está lido assim: `pipeline_nodes` → **8** nós (`validar, git, coleta, preparo, publicar, gate, copia, historico`), `kinds` = `motor 6 · comando 1 · aprovação 1`, e `pipeline_validate` imprimindo `definição “Piloto sem servidor” v18 · artifacts · destino C:\Users\dougl\AppData\Local\Temp\piloto-etapa2\publicado · nesta máquina · grafo de 8 nó(s) · 6 etapa(s) do motor, 1 de comando, 1 de aprovação, 0 de git, 0 de análise` |
 | **Binário e instaladores desta rodada (22:18 → 22:25)** | dois builds completos, ambos lidos do log, não do código de saída: o primeiro (log dizendo `Finished release profile [optimized] target(s) in 8m 51s`) gravou `devops-desktop.exe` **19.443.712 B** às **22:13**, `bundle/nsis/…-setup.exe` **5.143.893 B** às 22:12 e `bundle/msi/…_en-US.msi` **8.572.928 B** às 22:13; depois da correção do texto da linha, o rebuild de **7m 11s** regravou os três às **22:25** — exe **19.444.224 B**, nsis **5.144.116 B**, msi **8.572.928 B** (o `.msi` com o mesmo tamanho lido nas duas rodadas; o que mudou entre elas é o `.rs`, não o pacote). **Foi o binário das 22:25 que abriu a janela das medições acima**, e a janela serve `/assets/index-DZ1dExmJ.js`, o hash que o `vite` gravou em `dist/assets/` no mesmo minuto |
@@ -118,15 +133,17 @@ aconteceu no disco, nada foi copiado. E o `README.md` declarado em `includePaths
 `app.py`, `src/legado.php`, `src/servidor.js`) — o que é legítimo, porque a corrida parou no gate antes de qualquer
 etapa de cópia, e o caso "caminho declarado que nenhum comando gera" já tem a própria medição na linha das quatro
 portas acima. A corrida de análise do mesmo segundo (**#11**) diz `tool "embutido"`, `status "concluida"`, `filesScanned 3`, `counts {error 9, warning 4, info 1}`, `severityGate "ERROR"`, **`blocked: true`** — o veredito veio da **contagem contra o corte**, e o pacote dela (`analysis_pacote` 11) repete `classificacao "barra"`, `bloqueia: true` e a decisão `{acao: "parar-a-publicacao", evidencia: "veredito.contagem", motivo: "14 achado(s) no corte ERROR ou acima"}`, com `cobertura {arquivosLidos 3, arquivosPulados 0, achadosGuardados 14}` e `truncado: false`. Medido de novo no binário das **20:42**: execução **#48** (`startedAt 2026-10-16T00:43:07Z`, 20:43:07) com as **mesmas duas linhas** e a corrida **#12** `blocked: true` com os mesmos 9/4/1 — a única diferença lida é o caminho exibido, que saiu de `\\?\C:\Users\…` para `C:\Users\…` (§5, item 27) |
-| Frontend embutido no executável | conferido **dentro da janela**: o pacote das 09:37 servia `index-5zynmBe_.js` enquanto `dist/` já tinha `index-Cko7uGOK.js` (frontend velho dentro de um binário novo). O binário das **14:55** serve `/assets/index-BC07Lf6F.js` lido de `document.querySelectorAll("script[src]")`, o mesmo hash de `dist/assets/` da rodada das 14:48 — incluindo a tela sem o parágrafo de ajuda. **Etapa 5, binário das 16:11:** `document.querySelectorAll("script[src]")` devolve exatamente `["/assets/index-l9oCfRyf.js"]`, e `dist/assets/` tem `index-l9oCfRyf.js` (882.386 B) — o frontend dentro do instalador é o que está no disco. **Rebuild das 20:42** (só backend mudou): `document.querySelectorAll("script[src]")` devolve de novo exatamente `["/assets/index-l9oCfRyf.js"]`, o mesmo hash de `dist/assets/` — nada da tela foi reescrito nesta rodada |
+| Frontend embutido no executável | conferido **dentro da janela**: o pacote das 09:37 servia `index-5zynmBe_.js` enquanto `dist/` já tinha `index-Cko7uGOK.js` (frontend velho dentro de um binário novo). O binário das **14:55** serve `/assets/index-BC07Lf6F.js` lido de `document.querySelectorAll("script[src]")`, o mesmo hash de `dist/assets/` da rodada das 14:48 — incluindo a tela sem o parágrafo de ajuda. **Etapa 5, binário das 16:11:** `document.querySelectorAll("script[src]")` devolve exatamente `["/assets/index-l9oCfRyf.js"]`, e `dist/assets/` tem `index-l9oCfRyf.js` (882.386 B) — o frontend dentro do instalador é o que está no disco. **Rebuild das 20:42** (só backend mudou): `document.querySelectorAll("script[src]")` devolve de novo exatamente `["/assets/index-l9oCfRyf.js"]`, o mesmo hash de `dist/assets/` — nada da tela foi reescrito nesta rodada. **Etapa 6, binário das 15:05:** `["/assets/index-C287853D.js"]`, o hash que o `vite` gravou nesta rodada (884.95 kB, com o `StepLogs` dentro) — o `.exe` novo carrega a tela nova |
 | Instalador | `npm run tauri build` (14:55, saída 0) → `DevOps Desktop_0.1.0_x64-setup.exe` 5.002.154 B (4,77 MiB) e `DevOps Desktop_0.1.0_x64_en-US.msi` 7.200.768 B (6,87 MiB). **Etapa 5 (rodada das 16:11):** as duas linhas lidas **no arquivo de log da compilação**, não no código de saída de um pipe — `bundle/nsis/…-setup.exe` **4.90 MiB** e `bundle/msi/…_en-US.msi` **8.18 MiB**, com `devops-desktop.exe` gravado no mesmo minuto (foi justamente ignorar o pipe que me fez publicar um binário velho nesta sessão; §5, item 25) |
 | Instalador, rebuild das **20:42** (o da mediação do gate) | as duas linhas do log do `npm run tauri build`: `Finished 2 bundles at:` com `bundle/nsis/DevOps Desktop_0.1.0_x64-setup.exe` **4.90 MiB** (5.133.902 B contados no arquivo) e `bundle/msi/DevOps Desktop_0.1.0_x64_en-US.msi` **8.18 MiB** (8.572.928 B), `devops-desktop.exe` com mtime **20:42** — foi esse binário que abriu a janela em que a corrida **#48** foi lida |
+| **Rebuild das 15:05 (etapa 6, o das medições acima)** | lido do arquivo de log da compilação, não do código de saída de um pipe: `Finished \`release\` profile [optimized] target(s) in 5m 27s`, `Built application at: …\target\release\devops-desktop.exe`, `Finished 2 bundles at:` com `bundle/nsis/DevOps Desktop_0.1.0_x64-setup.exe` **4.92 MiB** (5.159.455 B contados no arquivo, mtime 15:05) e `bundle/msi/DevOps Desktop_0.1.0_x64_en-US.msi` **8.20 MiB** (8.597.504 B, mtime 15:06); `devops-desktop.exe` **19.505.664 B** com mtime **15:05**. A precaução de fechar a janela antes do link funcionou: o `cargo` não sobrescreve um `.exe` em uso, e eu fechei o processo 11140 com `taskkill /IM` enquanto o build ainda compilava — o link escreveu 15:05 sem reclamar, e foi esse binário que abriu a janela PID 29016 em que #49 a #53 foram lidas |
 | **Rebuild das 22:25** (o das verificações gravadas) | lido do arquivo de log da compilação, não do código de saída de um pipe: `Finished \`release\` profile [optimized] target(s) in 7m 11s`, `Built application at: …\target\release\devops-desktop.exe`, `Finished 2 bundles at:` com `bundle/nsis/DevOps Desktop_0.1.0_x64-setup.exe` **4.91 MiB** (5.144.116 B contados no arquivo) e `bundle/msi/DevOps Desktop_0.1.0_x64_en-US.msi` **8.18 MiB** (8.572.928 B); `devops-desktop.exe` com mtime **22:25** lido junto do `date`. A janela que estava aberta (das 22:14) foi **fechada antes do link**, porque o `cargo` não sobrescreve um `.exe` em uso — foi a precaução desta vez, não uma falha lida: o link escreveu 22:25 sem reclamar. Foi esse binário que abriu a janela em que as quatro linhas do §2 (ids 250/251/253/254) foram lidas |
 | **Cartão de progresso reconciliado** (CDP, etapa 5) | o **#46** começou e terminou no mesmo segundo (`16:22:26 → 16:22:26`), caso em que a leitura do detalhe chega **depois** do evento de fim — foi assim que ele ficou preso em "em andamento" com a corrida já `success` no banco (defeito #68, visto no print da janela das 16:12 com o **#45**). Lido de novo no binário das 16:11, às **16:33**: a linha do histórico `#46 Piloto Etapa 2 → nesta máquina … 16:22:26 · v17 · f40243ff · grafo · 1 de 1 nós` abre o cartão com `sucesso` e o botão **Repetir** presente, `em andamento` **ausente** do texto visível da tela. Causa e correção no §5, item 24 |
-| Executando | `devops-desktop.exe` aberto por `Start-Process`, `MainWindowTitle = "DevOps Desktop — Central de SSH, Git e Deploy"`, `Responding = True`, 10 telas navegáveis por clique. **Etapa 5 (o exe das 16:11, aberto às 16:12, lido no DOM agora):** **11** entradas na navegação — `Dashboard, Servidores, Terminal, Arquivos remotos, Git, GitHub, Projetos, Deploy, Análise, Histórico, Configurações` |
+| Executando | `devops-desktop.exe` aberto por `Start-Process`, `MainWindowTitle = "DevOps Desktop — Central de SSH, Git e Deploy"`, `Responding = True`, 10 telas navegáveis por clique. **Etapa 5 (o exe das 16:11, aberto às 16:12, lido no DOM agora):** **11** entradas na navegação — `Dashboard, Servidores, Terminal, Arquivos remotos, Git, GitHub, Projetos, Deploy, Análise, Histórico, Configurações`. **Etapa 6 (o exe das 15:05, reaberto para a medição):** `Get-Process devops-desktop` → `Id 29016`, `Responding True`, e a navegação foi usada de verdade: clique real do mouse em **Deploy** (112, 357), na linha **#52** do histórico (662, 358) e em **Saída da etapa** (348, 522) — o painel abriu, leu e renderizou os blocos |
 | Git | `git push origin main` → `8e328c8..0308e84`, saída 0, e `git ls-remote origin refs/heads/main` devolve `0308e84c4b00f0c28c5c42e40dfbba0bb8e4d6b9`, o mesmo `git rev-parse HEAD` local — a **etapa 4 está pública** em <https://github.com/DouglasGDev/devops-desktop>. O push foi autorizado por ele nesta conversa, depois de eu registrar que a autorização anterior tinha coberto só a etapa 3. Etapa 3, medida na época: `efe551d..23beec2` |
 | **Git, verificações gravadas (esta rodada)** | `git push origin main` → **`4acfe75..00b8c81`**, saída 0, e `git ls-remote origin refs/heads/main` devolve `00b8c81325755dc89d48a22aece513d19aa7ce79`, igual ao `git rev-parse HEAD` local — os três commits da rodada (`a63bf00` código, `fa425fa` + `00b8c81` docs) estão públicos em <https://github.com/DouglasGDev/devops-desktop>. O push foi autorizado por ele na pergunta desta conversa ("Empurrar agora"), depois de eu registrar que o sim da etapa 5 não se estendia. Um commit depois, o que escreve esta linha: `git push origin main` → `00b8c81..50e4832`, `ls-remote` devolvendo `50e483293db46b7ea457fc15e1ba055f6f335c89`, autorizado na mesma conversa. O terceiro: `git push origin main` → **`50e4832..7a0d865`**, saída 0, levando os dois commits de linha (`56e7721`, `7a0d865` = o §1.1), com `ls-remote` devolvendo `7a0d865c21b09f09ff6777a812c6caa1fa24319b` — igual ao `git rev-parse HEAD` local, e autorizado pela frase "empurre os dois". O commit que grava este parágrafo fica local até a próxima pergunta |
 | Git, etapa 5 (lido às 20:23) | o **primeiro push foi recusado** pelo GitHub: `! [remote rejected] main -> main (push declined due to repository rule violations)`, com `ls-remote` ainda em `df60996…` — o protetor de segredos do repositório viu num fixture de teste uma chave live de verdade (forma, não conteúdo; §5 item 26). Corrigido o fixture na causa, os commits locais reunidos em um só (`git reset --soft`, nenhum trabalho perdido) e então: `git push origin main` → **`df60996..5f4df6f`**, e `git ls-remote origin refs/heads/main` devolve `5f4df6fd882981a0c7c068fa7940f436d9e7ca14`, igual ao `git rev-parse HEAD` local. A **etapa 5 está pública**, autorizada por ele na pergunta desta conversa ("Empurrar agora") |
+| Git, etapa 6 (lido às 15:12, antes do commit desta rodada) | `git rev-parse HEAD` e `git ls-remote origin refs/heads/main` devolvem o mesmo `1985c391dd9b71a11b5f3a570abf0c0dfc7c3172` — o empurrão que ele autorizou na mensagem de aprovação da etapa chegou, e a conferência foi feita **depois** do push, como pedido. O commit que grava a etapa 6 (código + testes + estas linhas) **fica local** até a autorização ser pedida na frase; nada aqui foi empurrado por extensão de um "sim" anterior |
 | Git, fechamento do gate (lido às 20:53) | `git push origin main` → **`5f4df6f..94344ae`** (o commit de docs `5d62e1a` foi junto), e `git ls-remote origin refs/heads/main` devolve `94344ae0a661d94a9f1e7c8a67ddd70934a108b3`, o mesmo `git rev-parse HEAD` local — a medição do §6 item 7 e a correção do §5 item 27 estão em <https://github.com/DouglasGDev/devops-desktop>. Autorizada por ele na mesma frase: "terminando o teste, publique no github" |
 
 O que isso **não** cobre: as asserções automáticas continuam sendo de backend — o piloto de interface (§4.1) dirige a
@@ -336,16 +353,44 @@ node scripts/ponte-cdp.mjs --drag-node publicar 48 16   # arrasta e devolve o tr
   (falha por ausência de leitura), **#45** (semgrep real) e **#46** (embutido) — e, no fechamento da pendência do gate,
   **#47/#48**, a primeira corrida em que o motor **barra a publicação pelo corte**: `varredura failed` citando a
   contagem 9/4/1 contra `ERROR`, `depois-do-gate skipped`, e a pasta de destino que nunca chegou a existir.
+- **Log de etapa persistido e pesquisável** (etapa 6 do plano CI/CD — `src-tauri/src/db.rs`, `src-tauri/src/deploy.rs`,
+  `src-tauri/src/pipeline.rs`, `src-tauri/src/audit.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/models.rs`,
+  `src/components/deploy/StepLogs.tsx`, `src/components/deploy/StepPipeline.tsx`, `src/views/DeployView.tsx`): a saída de
+  uma etapa deixa de viver só na janela. A migração **11** cria `deploy_step_logs` `(run_id, position, attempt, seq,
+  stream, ts, text)` com `CHECK (stream IN ('stdout','stderr','system'))`, índice **único** em
+  `(run_id, position, attempt, seq)` — que é a forma da promessa: *uma linha, num lugar, uma vez* — e índice de leitura
+  `(run_id, position, seq)`, com `ON DELETE CASCADE` para `deploy_runs`. No motor, `Ctx::log` faz uma coisa só a mais:
+  mascara, **grava o lote** em `db::append_step_logs` e então emite no `deploy-log`; `deploy::bloco_de_log` é quem decide
+  o nome do fluxo (`out`→`stdout`, `err`→`stderr`, o resto →`system`), descarta linha em branco e aplica o teto de
+  **2.000 linhas por tentativa** com a última linha `system` declarando o corte. A tentativa vem do contador que o
+  escalonador **já tinha** (`ctx.attempt`), então o bloco da tentativa 1 fica intacto quando o nó repete. A leitura é
+  **uma porta só**: `pipeline::step_logs(db, run_id, position, query, limit)` com `LIKE` ligado por parâmetro (nada de
+  concatenar a busca no SQL) e tope **por bloco**, reexportada como o comando `pipeline_step_logs` (148) e usada pelo
+  painel **Saída da etapa** no cartão da execução — a mesma tela que mostra as quinze etapas, agora com o que cada uma
+  imprimiu, relido do banco. O que isto **não** toca, de caso pensado: `retry_limit`, aprovação e ambiente continuam
+  como estavam; o evento `deploy-log` continua o canal da execução ao vivo (persistir não é substituir); e o log de uma
+  corrida feita **antes** da migração não é reconstruído — a tela diz `nenhuma linha gravada nesta etapa`.
 
-Total da superfície: **147 comandos Tauri registrados** (contados por `#[tauri::command]` nos 24 arquivos de
-`src-tauri/src`), 24 arquivos Rust, 11 views, **44.458** linhas de TS/TSX/Rust (77 arquivos, `node_modules`, `target`,
-`dist` e a pasta `Python/` à parte) — contadas por `find` com essas exclusões + `wc -l`, relidas nesta rodada: as
-verificações gravadas no Histórico (§5, item 28) são `git diff --numstat` lido, não estimado — **171** linhas novas em
-`analysis.rs`, **30** em `commands.rs` (4 velhas substituídas) e **1** em `ui.tsx`, ou **198** líquidas.
+  Medido na janela real (§2): o `%CHAVE_PILOTO%` cru na **#49** e o `***` na **#50** com o valor ausente do `.db`, do
+  `-wal` e do `-shm`; os **dois blocos** da **#51** com `seq` recomeçando e o aviso de repetição no bloco que falhou; as
+  **2.001** linhas da **#52** terminando no aviso de corte, lidas inteiras com tope alto e em 500 no padrão, e o
+  `truncado` encontrado pela busca da tela; e o fechar-e-reabrir que é o ponto da etapa — janela das 14:52 encerrada,
+  binário das 15:05 aberto, `pipeline_step_logs` devolvendo as linhas de **#49** a **#52** sem sessão nenhuma no meio.
 
-Persistência (SQLite local, migrações em `src-tauri/src/db.rs`) — as treze tabelas que existem hoje:
+Total da superfície: **148 comandos Tauri registrados** (contados por `#[tauri::command]`, que vivem em `src-tauri/src/commands.rs`), 24 arquivos Rust, 11 views, **45.245** linhas de TS/TSX/Rust em **78** arquivos — contadas
+por `git ls-files '*.ts' '*.tsx' '*.rs' | xargs wc -l` com o componente novo já rastreado, e relidas nesta rodada:
+`node_modules`, `target`, `dist` e a pasta `Python/` (venv **não rastreado**, nunca `git add` nele) ficam fora da conta.
+O que a etapa 6 escreve, lido de `git diff --numstat` e não estimado: **+317** em `db.rs`, **+161** em `deploy.rs`,
+**+125** em `pipeline.rs`, **+35** em `audit.rs`, **+16** em `commands.rs`, **+13** em `models.rs`, **+23** em
+`StepPipeline.tsx`, **+106** em `StepLogs.tsx` (arquivo novo), **+16** entre `api.ts`/`types.ts`/`DeployView.tsx` —
+**812** linhas novas de código contra **25** substituídas. As verificações gravadas no Histórico (§5, item 28) continuam
+as da rodada da análise: **171** linhas novas em `analysis.rs`, **30** em `commands.rs` (4 velhas substituídas) e **1** em
+`ui.tsx`, ou **198** líquidas.
+
+Persistência (SQLite local, migrações em `src-tauri/src/db.rs`) — as **quatorze** tabelas que existem hoje, lidas de
+`sqlite_master` no banco real desta máquina (§1.1, `user_version 11`):
 `settings`, `servers`, `projects`, `audit_log`, `routines`, `terminal_history`, `deploy_profiles`, `deploy_runs`,
-`deploy_run_steps`, `pipeline_revisions`, `pipeline_nodes`, `analysis_runs`, `analysis_findings`. Não há tabela de série
+`deploy_run_steps`, `deploy_step_logs`, `pipeline_revisions`, `pipeline_nodes`, `analysis_runs`, `analysis_findings`. Não há tabela de série
 histórica de métrica: o painel lê do servidor na hora
 pedida.
 
@@ -523,19 +568,66 @@ Estas vieram do SPEC e de correções explícitas do Douglas; reverter qualquer 
     `select` do Histórico não a conhecia: a linha aparecia em "Todas" com o texto cru e não dava para filtrar por ela.
     `CATEGORY_LABELS` recebeu a chave `análise` — medida na tela: filtro *Análise* devolve **13 linhas**, todas com o
     rótulo `Análise`, e as quatro primeiras são as quatro verificações desta rodada.
+30. **Tentativa é bloco, não sobrescrita — e quem grava é o motor, no instante em que emite.** `deploy_step_logs` é
+    chaveada por `(run_id, position, attempt, seq)` com índice **único**: a repetição de um nó abre `attempt + 1` e o
+    `seq` recomeça do zero, então a falha que motivou a repetição continua lá para ser comparada com o que a tentativa
+    nova imprimiu. O que não é gosto aqui: `ctx.attempt` sobe na **primeira instrução** do laço de retry, para
+    o aviso `… repetindo o nó (tentativa 1/1)` ficar no bloco da tentativa que falhou (medido na **#51**, linha 3 do
+    bloco 1), e a gravação acontece **antes** do `emit` no evento `deploy-log`, porque a tela pode fechar e o banco não.
+    Uma mecânica, duas portas: `pipeline::step_logs` é a única leitura, usada pelo painel **Saída da etapa** e por
+    qualquer consulta posterior — não existe um segundo caminho que "leia o log" montando texto de outra fonte. A
+    gravação é **em lote**: uma chamada de `log` escreve de uma vez as linhas que aquele trecho de saída trouxe, sob o
+    mesmo lock — foi assim que as 2.001 linhas da **#52** entraram numa só aquisição. E o `std::sync::Mutex` do
+    `DbHandle` **não é reentrante**: `Ctx::registra` chamava `self.log()` enquanto segurava o `db.lock()`, o que trava
+    a execução inteira no segundo `lock`; hoje o erro do `upsert_step` é colhido dentro do escopo e a linha é gravada
+    **fora** dele.
+31. **Máscara antes de gravar, e o contexto precisa carregar os valores.** A ordem não é negociável: `Ctx::log`
+    produz `Secrets::mask(text)` → `audit::scrub_secrets` e **só então** entrega ao banco; a tela recebe o mesmo texto
+    já mascarado. O que provou a necessidade da segunda metade foi a medição: a corrida **#49** gravou
+    `envio %CHAVE_PILOTO%` **literal**, porque o `Secrets` do `Ctx` era montado só com as chaves declaradas e os
+    valores fornecidos entravam por outro caminho — que a fila de quinze etapas refaz na etapa 1, mas um **nó rodado
+    sozinho** nunca passa por ela. Corrigido na causa (`Secrets::new(&profile.secret_keys, &secret_values)` na
+    construção do `Ctx`), a **#50** gravou `envio ***`. A prova de ausência foi feita **no arquivo** do banco, varrido
+    byte a byte com `.db`, `-wal` e `-shm`, e não pela tela: o valor `valor-de-teste-7h4d` não está em nenhum dos três.
+    Testes novos travam os dois lados: o que some (`o_valor_da_variavel_nao_chega_ao_log_gravado`) e o que fica
+    (`enviando a.html`, `cabeçalho TOKEN=***`, `Authorization: Bearer ghp_***`, `fim`).
+32. **O corte é declarado, nunca escondido.** Uma etapa pode imprimir mais do que o motor deve guardar; a regra é
+    **2.000 linhas por tentativa** e uma última linha `system` dizendo `… truncado em 2000 linha(s) por tentativa — N
+    linha(s) além do teto não foram gravadas`, escrita pelo `deploy::bloco_de_log` — quem lê a tela sabe que aquilo foi
+    cortado, em vez de ver um log que parece completo. O aviso é escrito **uma vez** por bloco: `gravadas >= teto`
+    devolve vazio, para o corte não fingir tamanho repetindo-se linha a linha (`o_teto_de_linhas_declara_o_corte_uma_só_vez`).
+    Na leitura, o teto é `TETO + 1`: uma porta limitada a 2.000 **não conseguiria devolver a linha 2.001**, que é
+    justamente o aviso — e o tope do pedido é **por bloco de tentativa** (`ROW_NUMBER() OVER (PARTITION BY attempt …)`),
+    porque um bloco cheio não pode engolir o bloco da tentativa seguinte. Medido na **#52**: com tope 9.999 a porta
+    devolve as 2.001 e termina no aviso; com o padrão devolve 500, que é um tope, não uma promessa; e na tela, buscar
+    `truncado` faz o aviso aparecer.
+33. **Mascarar não pode reescrever a saída.** O `audit::scrub_secrets` antigo tratava o texto inteiro como uma
+    palavra só: `split_whitespace` + `join(" ")` **dizia** "não achata", mas achatava — e como `Ctx::log` chama a
+    máscara em cada linha emitida pela porta, um valor que aparecesse em linha isolada perdia as quebras e os espaços
+    que o comando produziu. Isso não era cosmético: uma saída de `ssh -v`, um `docker compose up` ou uma diff de arquivo
+    perdem o sentido sem estrutura de linha, e o log gravado é justamente a coisa que se consulta depois. Corrigido na
+    **causa**, em `scrub_key_values`: a linha é a unidade (`text.lines()`), e dentro dela só a palavra sensível é
+    trocada, com `split_inclusive(char::is_whitespace)` e o resto do token preservado, para as quebras e os recuos
+    voltarem como saíram. Travado por `a_mascara_nao_achata_as_linhas_da_saida`, que compara a string mascarada com o
+    texto que `ssh -vvv` produziria — inclusive a linha em branco e o recuo de quatro espaços. Foi um teste desta etapa
+    que o encontrou: `o_valor_da_variavel_nao_chega_ao_log_gravado` esperava quatro linhas e recebeu uma.
 
 ## 6. Pendências assumidas (com o primeiro passo de cada)
 
 | # | Pendência | Primeiro passo concreto |
 | --- | --- | --- |
-| 0 | **Dados do piloto das etapas 2, 3, 4 e 5, ainda cadastrados de propósito** | O projeto **Piloto Etapa 2** (`%TEMP%\piloto-etapa2`) com a definição *Piloto sem servidor* **v18** e as execuções **#23–#46** continuam no cadastro para ele abrir a janela e ver as telas conferidas — a v18 é o grafo de oito nós lido hoje (`validar, git, coleta, preparo, publicar, gate, copia, historico` · `motor 6 · comando 1 · aprovação 1 · git 0 · análise 0`, com `preparo` de volta a `echo preparo`), a #34 é a corrida em que `preparo` falha e trava o resto, a #38/#39 são as duas execuções de nó sozinho lidas no binário final (`preparo` → "1 comando(s) nesta máquina", `gate` → "aprovado na janela"), a **#42/#43** são as duas execuções do nó git (uma `tag` que criou `v0.0.1-janela` de verdade no piloto e uma `checkout main` que respondeu "em main") e a **#44/#45/#46** são as três execuções do nó `analise` pelo mesmo motor (falha por ferramenta ausente, sucesso com o semgrep 1.181.0, sucesso com o embutido). O projeto **Piloto Etapa 5** (`%TEMP%\piloto-etapa5`, com `app.py`, `src/legado.php` e `src/servidor.js` — três arquivos,
+| 0 | **Dados do piloto das etapas 2, 3, 4, 5 e 6, ainda cadastrados de propósito** | O projeto **Piloto Etapa 2** (`%TEMP%\piloto-etapa2`) com a definição *Piloto sem servidor* **v22** e as execuções **#23–#53** continuam no cadastro para ele abrir a janela e ver as telas conferidas — a v22 é o grafo de oito nós lido hoje por `pipeline_nodes` e impresso por `pipeline_validate` (`validar, git, coleta, preparo, publicar, gate, copia, historico` · `motor 6 · comando 1 · aprovação 1 · git 0 · análise 0`, com `preparo` de volta a `echo preparo` e `secret_keys` **[]**), a #34 é a corrida em que `preparo` falha e trava o resto, a #38/#39 são as duas execuções de nó sozinho lidas no binário final (`preparo` → "1 comando(s) nesta máquina", `gate` → "aprovado na janela"), a **#42/#43** são as duas execuções do nó git (uma `tag` que criou `v0.0.1-janela` de verdade no piloto e uma `checkout main` que respondeu "em main"), a **#44/#45/#46** são as três execuções do nó `analise` pelo mesmo motor (falha por ferramenta ausente, sucesso com o semgrep 1.181.0, sucesso com o embutido) e a **#49 a #53** são as cinco da etapa 6: **#49** guarda o `%CHAVE_PILOTO%` **literal** (a evidência crua do defeito que a corrigiu), **#50** guarda `envio ***`, **#51** é o nó com `retry_limit` 1 que falhou duas vezes e deixou **dois blocos**, **#52** é o laço de 2.500 ecos com o corte declarado na última linha, e **#53** é o `preparo` rodado sozinho depois do reopen — as cinco continuam no banco porque é nelas que a tela **Saída da etapa** se confere. O projeto **Piloto Etapa 5** (`%TEMP%\piloto-etapa5`, com `app.py`, `src/legado.php` e `src/servidor.js` — três arquivos,
 que é o `filesScanned` lido das corridas dele) é o que tem código varrerável, e desde a medição do gate ele **tem**
 modelo de deploy: perfil 22 *Gate de análise*, destino `%TEMP%\piloto-etapa5-publicado` (que ficou inexistente de
 propósito — a publicação foi barrada antes de copiar), definição **v2** com o grafo de dois nós `varredura` →
 `depois-do-gate`, e as execuções **#47** e **#48**, as duas `failed` pelo corte `ERROR`. As corridas de análise do
 cadastro hoje vão até a **#12**: no projeto 4 existem **#2, #3, #4, #6, #11 e #12**, e a **#6** é a das 12 linhas
 achadas com o semgrep real e o token mascarado, enquanto **#11/#12** são as duas do nó `analise` que barrou a
-publicação (9 erros, 4 avisos, 1 info). O que a etapa 4 criou para medir **foi desfeito e conferido**: o servidor temporário foi apagado (`list_servers` → 0), o modelo *medição docker* 21 foi removido pela confirmação da tela, a etiqueta `v0.0.1-janela` saiu do repositório do piloto (`git tag -l` → 0) e o grafo voltou aos oito nós. Quando ele decidir, o primeiro passo é **Projetos → Piloto Etapa 2 → Remover do cadastro** (e o mesmo para o Piloto Etapa 5; a confirmação avisa quantos modelos saem junto; nenhum arquivo local é apagado) e depois apagar as duas pastas em `%TEMP%`. O `analise.semgrep.caminho` salvo hoje aponta para `%TEMP%\semgrep-probe\Scripts\semgrep.exe` — se a pasta cair, a sonda passa a dizer `ausente` e o instrumento embutido continua funcionando. O arquivo de teste de 1,5 GB já foi removido do projeto e do destino |
+publicação (9 erros, 4 avisos, 1 info). O que a etapa 4 criou para medir **foi desfeito e conferido**: o servidor temporário foi apagado (`list_servers` → 0), o modelo *medição docker* 21 foi removido pela confirmação da tela, a etiqueta `v0.0.1-janela` saiu do repositório do piloto (`git tag -l` → 0) e o grafo voltou aos oito nós — **e o mesmo
+foi feito na etapa 6**: os três nós que serviram de andaime para medir (`repete`, com `retry_limit` 1; `segredo`, com
+`echo envio %CHAVE_PILOTO%`; `muito`, com o laço de 2.500 ecos) foram removidos por `pipeline_save_nodes` e a leitura de
+volta dá as **oito** chaves de sempre, com `secret_keys` voltando a `[]` por `save_deploy_profile`. As corridas **#49 a
+#53 ficam** de propósito: são a única prova fora de teste unitário de que a linha mascarada sobrevive no banco. Quando ele decidir, o primeiro passo é **Projetos → Piloto Etapa 2 → Remover do cadastro** (e o mesmo para o Piloto Etapa 5; a confirmação avisa quantos modelos saem junto; nenhum arquivo local é apagado) e depois apagar as duas pastas em `%TEMP%`. O `analise.semgrep.caminho` salvo hoje aponta para `%TEMP%\semgrep-probe\Scripts\semgrep.exe` — se a pasta cair, a sonda passa a dizer `ausente` e o instrumento embutido continua funcionando. O arquivo de teste de 1,5 GB já foi removido do projeto e do destino |
 | 1 | **Client ID na máquina do Douglas** | Colar o **Client ID** da OAuth App (o campo está em **GitHub → Configuração**) e gerar um secret novo no GitHub — o valor hexadecimal que estava salvo no banco era o **secret**, não o ID. Sem isso a aba GitHub não conecta: é limite de conta, não do código |
 | 2 | **Passada de visual (prioridade quando ele chamar)** | Só depois das funções; começar pelo print da tela que incomoda. Não refazer estilo por conta própria junto de feature |
 | 3 | **Pacotes Linux** | Os alvos `deb`/`rpm`/`AppImage` nunca foram gerados aqui. Rodar `npm run tauri build` numa imagem Linux e ajustar `bundle.targets` + paths (o código já usa `dirs`/caminhos relativos, mas isso precisa ser provado, não suposto) |
@@ -553,7 +645,12 @@ força bruta: **Deploy → Piloto Etapa 5 → modelo "Gate de análise" → Publ
 `varredura` citando **9 erros contra o corte `ERROR`** e `depois-do-gate` em *pulada*, e o destino combinado
 (`%TEMP%\piloto-etapa5-publicado`) **não existe no disco** — nada foi copiado. Eu abri cada uma dessas telas e li o texto na janela real, mas **ele**
 ainda não viu nada disso nesta máquina — e o tooltip do botão desabilitado é justamente o tipo de coisa que só o olho
-confere |
+confere. **Acrescentado na etapa 6:** falta o olho dele em **Deploy → Deploys registrados → uma corrida do Piloto →
+Saída da etapa** — abrir a **#51** para ver os **dois blocos** (`tentativa 1 · 3 linha(s)` em cima, `tentativa 2 · 2
+linha(s)` embaixo, com o aviso de repetição no bloco que falhou), a **#52** para ver o painel cheio e buscar `truncado`
+até a linha do corte aparecer, e a **#48** para ver o que uma corrida anterior à migração diz: `nenhuma linha gravada
+nesta etapa`. Eu li os três estados na janela real (§2), mas "os blocos por tentativa são legíveis como duas passadas
+distintas" é julgamento dele, não meu |
 | 7 | **Ver o motor *bloquear* uma publicação pelo corte da análise, na janela — FECHADA em 2026-10-15** | Estava listada porque a regra só tinha prova de teste unitário. Foi medida na janela real: perfil 22 *Gate de análise* no `piloto-etapa5`, grafo `varredura` (nó `analise`, corte `ERROR`) → `depois-do-gate`, execuções **#47** e **#48** `failed` com a contagem 9/4/1 citada na linha do nó, o nó seguinte `skipped` e a pasta de destino **nunca criada** — tudo lido em `deploy_run`/`analysis_corridas`/`analysis_pacote`, linha por linha no §2. O que ela revelou de quebra (o prefixo `\\?\` na mensagem e no pacote) virou o §5, item 27, com teste novo |
 | 6 | **Revalidar o deploy por SSH num host real — e pela primeira vez com um executor de runtime** | Além de `build_step`/`identify_step`, a etapa 2 mexeu no caminho com servidor: `validate_remoto` agora chama `deploy::checar_definicao(..., Some(&servidor))` e `insert_run` passou a receber a procedência. As checagens remotas foram movidas verbatim e `server_ref()` continua sendo a primeira delas, então por construção o remoto não muda — mas "por construção" sem medir num host é presunção. **A etapa 4 amplia essa pendência em vez de criar outra:** Docker, Compose e PM2 só rodo no servidor, e o que foi conferido aqui é o roteiro gerado e a recusa da tela, nunca um container subindo de verdade. Primeiro passo: cadastrar um servidor, repetir C/D com `server_id` preenchido conferindo que a etapa 1 recusa o que recusava antes, e então publicar **uma** aplicação real com `docker` (o caminho completo: build da imagem no servidor, container novo no ar, `previous_image` gravada, reversão voltando a imagem anterior) e, se houver, uma com `pm2`. Nesta máquina isso não tem como: o `docker` 29.3.1 existe mas a daemon do Docker Desktop está parada, e `pm2` não está instalado |
 

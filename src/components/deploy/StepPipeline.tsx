@@ -1,5 +1,7 @@
+import { useState } from "react";
 import type { DeployRunStep, StepStatus } from "../../types";
-import { CheckIcon, LoaderIcon, XIcon } from "../Icons";
+import { StepLogs } from "./StepLogs";
+import { CheckIcon, ChevronDownIcon, ChevronRightIcon, LoaderIcon, XIcon } from "../Icons";
 
 const TONE: Record<StepStatus, { icon: string; ring: string; text: string }> = {
   waiting: { icon: "border-zinc-300 dark:border-zinc-700", ring: "", text: "text-zinc-400 dark:text-zinc-500" },
@@ -25,11 +27,13 @@ function StepMark({ status }: { status: StepStatus }) {
 }
 
 /** As quinze etapas do capítulo 10, na ordem, com o estado real de cada uma. */
-export function StepPipeline({ steps }: { steps: DeployRunStep[] }) {
+export function StepPipeline({ steps, runId }: { steps: DeployRunStep[]; runId: number | null }) {
+  const [aberta, setAberta] = useState<number | null>(null);
   return (
     <ol className="space-y-1">
       {steps.map((step) => {
         const tone = TONE[step.status] ?? TONE.waiting;
+        const abrindo = aberta === step.position;
         return (
           <li
             key={step.position}
@@ -65,6 +69,23 @@ export function StepPipeline({ steps }: { steps: DeployRunStep[] }) {
                 ) : null}
                 {step.message ? (
                   <p className="whitespace-pre-line text-[11px] text-zinc-500 dark:text-zinc-400">{step.message}</p>
+                ) : null}
+                {runId !== null ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setAberta(abrindo ? null : step.position)}
+                      className="mt-1 inline-flex items-center gap-1 text-[11px] text-zinc-500 hover:text-teal-700 dark:text-zinc-400 dark:hover:text-teal-300"
+                    >
+                      {abrindo ? (
+                        <ChevronDownIcon className="size-3" />
+                      ) : (
+                        <ChevronRightIcon className="size-3" />
+                      )}
+                      Saída da etapa
+                    </button>
+                    {abrindo ? <StepLogs runId={runId} position={step.position} /> : null}
+                  </>
                 ) : null}
               </div>
             </div>

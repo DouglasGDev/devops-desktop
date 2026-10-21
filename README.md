@@ -427,6 +427,16 @@ pedidos de novo.
 **Execução interrompida**: se o aplicativo for fechado com um pipeline rodando, a abertura seguinte marca essa execução
 como interrompida, com o motivo, e nenhuma publicação é refeita por conta própria.
 
+**Saída da etapa.** Cada etapa do cartão de uma execução tem o painel **Saída da etapa**: as linhas que o comando imprimiu,
+lidas do banco, não da memória da janela. Elas são gravadas no instante em que saem, já pela máscara de segredos — o valor
+de uma variável declarada no modelo vira `***` antes de tocar o disco, e os formatos de credencial conhecidos perdem a
+cauda — e cada **tentativa** de um nó que repetiu fica num bloco separado, com a numeração própria, de modo que a falha
+que motivou a repetição continua legível ao lado do que a tentativa nova imprimiu. Há campo de busca (o texto é comparado
+no banco, com os caracteres `%` e `_` tratados como literais) e um teto por tentativa: passadas 2.000 linhas a última do
+bloco diz quantas ficaram fora, em vez de o log simplesmente acabar. Fechar e reabrir o aplicativo não perde nada; uma
+execução feita antes desta versão não tem linhas guardadas e o painel diz isso, em vez de mostrar uma tela vazia que
+pareceria "deu tudo certo".
+
 **Grafo do pipeline (aba Deploy → grafo).** Além da fila das quinze etapas, o modelo pode ter um grafo desenhado na tela:
 nós de três tipos — **etapa do motor**, **comando** (nesta máquina ou no servidor) e **aprovação** — ligados por arestas
 de dependência, arrastáveis com o mouse. O que é desenhado é o que o motor percorre: salvar passa pelo validador do
@@ -664,7 +674,7 @@ cd src-tauri
 cargo test --lib
 ```
 
-Cobertura atual do backend (303 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
+Cobertura atual do backend (308 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
 timeout e cancelamento, sessões PTY, ciclo completo de Git em repositório temporário (status, stage por hunk, commit,
 log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), trabalho guardado e
 reprodução de commit no git real (`stash push` tira a alteração da pasta e `stash list` mostra exatamente a entrada que o
@@ -777,6 +787,8 @@ o que barra primeiro, na classificação que diz o que os números dizem, no agr
 Nenhum desses testes chama o semgrep: ele é ferramenta externa e opcional, e a suíte continua pedindo só `git` e `ssh`.
 Nenhum teste de rede é feito: as rotas que falam com o GitHub são exercitadas só na máquina, com dados de
 resposta fixos dentro do próprio teste.
+
+**O log de etapa gravado** é testado nas três promessas que ele faz. *Tentativa é bloco*: `cada_tentativa_de_uma_etapa_e_um_bloco_que_nao_se_sobrescreve` grava duas tentativas na mesma etapa, lê as duas com os `seq` recomeçando, confere a contagem por bloco e mostra que inserir a mesma `(run_id, position, attempt, seq)` de novo **falha** no índice único — e que apagar a execução leva as linhas junto, pela cascata da migração. *Máscara antes do disco*: `o_valor_da_variavel_nao_chega_ao_log_gravado` passa a saída de um comando pelo `Secrets` declarado, grava o lote e lê o **texto cru da tabela**, sem passar por nada que pudesse esconder agora — o valor da variável e a cauda do token não estão lá, e as quatro linhas que o comando imprimiu continuam sendo quatro, com `TOKEN=***` e `Bearer ghp_***` no lugar. *Corte declarado*: `o_teto_de_linhas_declara_o_corte_uma_só_vez` imprime mais que o teto e recebe de volta exatamente 2.000 linhas mais **uma só** avisando do corte, e a leitura (`a_porta_de_leitura_do_log_ve_as_tentativas_em_ordem`) prova que um bloco cheio é devolvido inteiro, com o aviso por último, e que um bloco cheio não engole a tentativa anterior. A máscara que reescrevia a estrutura está travada por `a_mascara_nao_achata_as_linhas_da_saida`: recuo, linha em branco e quebras voltam como saíram, porque log sem forma de linha não serve para conferir nada.
 
 Esses testes usam os binários **reais** do sistema: é requisito da aplicação (e da suíte) ter `git` e `ssh` no `PATH`.
 Em uma máquina sem essas ferramentas, os testes que as exercitam falham — não são pulados silenciosamente.

@@ -23,7 +23,7 @@ use crate::{
         DefinitionRevision, DeployProfile, DeployProfileInput, DeployRun, EditorInstalado,
         ImportSshHost, Project, PipelineNode, PipelineNodeInput, RemoteEntry, Routine,
         RoutineInput, SearchProjectRow, SearchResults, SearchServerRow, Server, ServerInput,
-        SshDiscoveryReport, TerminalHistoryEntry, TerminalSessionInfo, ToolVersions,
+        SshDiscoveryReport, StepLogLine, TerminalHistoryEntry, TerminalSessionInfo, ToolVersions,
     },
     pipeline, security, ssh_config, ssh_test, sshexec,
     terminal::{self, TerminalState},
@@ -773,6 +773,20 @@ async fn pipeline_retry_policy(
     run_id: i64,
 ) -> Result<pipeline::RetryPolicy, String> {
     pipeline::retry_policy(&state.db, run_id)
+}
+
+/// As linhas de saída que uma etapa deixou na corrida. É a porta da tela para o que
+/// o motor gravou durante a execução — o mesmo texto que passou pela máscara antes
+/// de sair do motor, relido depois de a janela fechar e reabrir.
+#[tauri::command]
+async fn pipeline_step_logs(
+    state: State<'_, AppState>,
+    run_id: i64,
+    position: i64,
+    query: Option<String>,
+    limit: Option<u32>,
+) -> Result<Vec<StepLogLine>, String> {
+    pipeline::step_logs(&state.db, run_id, position, query, limit)
 }
 
 #[tauri::command]
@@ -3452,6 +3466,7 @@ pub fn register_all(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri
         pipeline_revisions,
         pipeline_validate,
         pipeline_retry_policy,
+        pipeline_step_logs,
         pipeline_retry,
         pipeline_nodes,
         pipeline_save_nodes,

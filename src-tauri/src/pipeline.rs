@@ -8,7 +8,10 @@
 //!
 //! Acompanhar logs e eventos continua pelos canais que o motor já emite
 //! (`deploy-step` e `deploy-log`); duplicar esse canal aqui seria criar uma segunda
-//! fonte de verdade sobre o que está acontecendo. Do mesmo jeito, *pedir uma
+//! fonte de verdade sobre o que está acontecendo. O que o motor escreve nesses
+//! canais **sobrevive** em `deploy_step_logs`, tentativa por tentativa, e a porta de
+//! leitura deste módulo é a única forma de reler aquilo depois — inclusive o bloco
+//! de uma tentativa que a repetição do nó não apagou. Do mesmo jeito, *pedir uma
 //! execução*, *interromper* e *consultar o estado* já têm dono no app —
 //! `deploy_start`, `deploy_cancel`, `deploy_run` — e o contrato não reemporta essas
 //! três portas. O que ele acrescenta é o que faltava para o pipeline ser uma coisa
@@ -30,8 +33,8 @@ use crate::{
     deploy,
     models::{
         DefinitionRevision, DeployProfile, DeployRun, DeployRunStep, PipelineNode,
-        PipelineNodeInput, MAX_NODES, NODE_ANALISADORES, NODE_EXECUTORS, NODE_GIT_OPS,
-        SEVERIDADES,
+        PipelineNodeInput, StepLogLine, MAX_NODES, NODE_ANALISADORES, NODE_EXECUTORS,
+        NODE_GIT_OPS, SEVERIDADES,
     },
 };
 
@@ -563,6 +566,41 @@ pub fn retry(
     Ok(novo)
 }
 
+/// Quantas linhas de uma etapa a leitura devolve quando ninguém pede um tope.
+const LOGS_POR_LEITURA: i64 = 500;
+
+/// As linhas de saída que uma etapa deixou, por ordem de tentativa. É a porta da
+/// tela e a do que for consultar depois — a gravação continua sendo do motor, no
+/// mesmo ponto em que ele emite o evento, então o que se lê aqui é o que a janela
+/// mostrou na hora. `query` filtra por trecho do texto e `limit` é um tope **por
+/// bloco de tentativa**: um bloco cheio não esconde o da tentativa seguinte, e quem
+/// pede o bloco inteiro recebe também a linha que declara o corte. Pedir menos do
+/// que o bloco tem continua sendo um tope, não uma promessa de que aquilo era o fim.
+pub fn step_logs(
+    db: &DbHandle,
+    run_id: i64,
+    position: i64,
+    query: Option<String>,
+    limit: Option<u32>,
+) -> Result<Vec<StepLogLine>, String> {
+    // O teto da gravação mais a linha única que declara o corte: um tope parado
+    // exatamente no teto cortaria justamente o aviso de que houve corte.
+    let teto = deploy::TETO_LINHAS_POR_TENTATIVA + 1;
+    let pedido = limit.unwrap_or(LOGS_POR_LEITURA as u32) as i64;
+    if pedido <= 0 {
+        return Err("a leitura do log de uma etapa precisa pedir ao menos uma linha".to_string());
+    }
+    let conn = db.lock().map_err(|_| "o banco local está indisponível".to_string())?;
+    db::read_step_logs(
+        &conn,
+        run_id,
+        position,
+        None,
+        query.as_deref(),
+        pedido.min(teto),
+    )
+}
+
 /// Execução órfã: o aplicativo foi fechado enquanto um pipeline rodava. O estado
 /// `'running'` não significa mais nada — não há processo nenhum — e deixá-lo assim
 /// faria a tela mostrar um deploy que nunca termina. É marcado como interrompido,
@@ -1016,5 +1054,89 @@ mod tests {
             no("validar", "motor", Some(1), &["varre"]),
         ]);
         assert!(standalone.is_ok(), "{:?}", standalone);
+    }
+
+    #[test]
+    fn a_porta_de_leitura_do_log_ve_as_tentativas_em_ordem() {
+        let conn = conn_com_execucao("failed");
+        db::append_step_logs(
+            &conn,
+            1,
+            10,
+            1,
+            &[db::LinhaDeLog {
+                stream: "stdout",
+                text: "tentativa um: permissão negada",
+            }],
+        )
+        .unwrap();
+        db::append_step_logs(
+            &conn,
+            1,
+            10,
+            2,
+            &[db::LinhaDeLog {
+                stream: "stderr",
+                text: "tentativa dois: publicada",
+            }],
+        )
+        .unwrap();
+        let alça: DbHandle = std::sync::Arc::new(std::sync::Mutex::new(conn));
+
+        // A tela lê pelo mesmo portão que qualquer outro consultor: as duas
+        // tentativas, na ordem, sem nada sobrescrito.
+        let todas = step_logs(&alça, 1, 10, None, None).unwrap();
+        assert_eq!(
+            todas
+                .iter()
+                .map(|l| (l.attempt, l.seq, l.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, 0, "tentativa um: permissão negada"),
+                (2, 0, "tentativa dois: publicada"),
+            ]
+        );
+
+        // A busca é o que foi digitado, ligado por parâmetro.
+        let buscas = step_logs(&alça, 1, 10, Some("publicada".to_string()), None).unwrap();
+        assert_eq!(buscas.len(), 1);
+        assert_eq!(buscas[0].attempt, 2);
+        assert!(step_logs(&alça, 1, 10, Some("  ".to_string()), None).is_ok());
+
+        // Pedir zero linha é um pedido que não se pode atender, não um vazio fingido.
+        let nada = step_logs(&alça, 1, 10, None, Some(0)).unwrap_err();
+        assert!(nada.contains("ao menos uma linha"), "{nada}");
+
+        // E o tope pedido acima do teto do motor é contido pelo teto, não ignorado:
+        // a leitura não promete mais do que a gravação pode ter deixado.
+        assert_eq!(step_logs(&alça, 1, 10, None, Some(9_999)).unwrap().len(), 2);
+
+        // Um bloco cheio — as 2.000 linhas do teto mais a única que declara o corte —
+        // é lido inteiro. Uma leitura que se limitasse ao teto esconderia justamente o
+        // aviso de que houve corte, que é a única pista de que falta saída ali.
+        let saida: String = (0..2_500)
+            .map(|i| format!("linha {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cheio = deploy::bloco_de_log("out", &saida, 0);
+        let linhas: Vec<db::LinhaDeLog<'_>> = cheio
+            .iter()
+            .map(|(s, t)| db::LinhaDeLog {
+                stream: s.as_str(),
+                text: t.as_str(),
+            })
+            .collect();
+        {
+            let conn = alça.lock().unwrap();
+            db::append_step_logs(&conn, 1, 10, 3, &linhas).unwrap();
+        }
+        let bloco = step_logs(&alça, 1, 10, None, Some(9_999)).unwrap();
+        // As duas linhas das tentativas anteriores continuam junto: o tope é por
+        // bloco, então o bloco cheio não engoliu quem veio antes dele.
+        assert_eq!(bloco.len(), 2 + cheio.len());
+        assert_eq!(bloco.iter().filter(|l| l.attempt == 3).count(), cheio.len());
+        let ultima = bloco.last().unwrap();
+        assert_eq!((ultima.attempt, ultima.stream.as_str()), (3, "system"));
+        assert!(ultima.text.contains("truncado"), "{}", ultima.text);
     }
 }

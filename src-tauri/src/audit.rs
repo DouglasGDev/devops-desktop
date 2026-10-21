@@ -43,21 +43,34 @@ pub fn scrub_secrets(text: &str) -> String {
 }
 
 fn scrub_key_values(text: &str) -> String {
+    // A linha é a unidade, e dentro dela só a palavra sensível é trocada: uma saída
+    // de comando achatada em linha única perde as quebras que o comando produziu, e
+    // o log gravado do motor é justamente essa saída. O recuo e o espaçamento de
+    // quem executou ficam onde estavam.
+    text.lines()
+        .map(scrub_palavras)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn scrub_palavras(linha: &str) -> String {
     let sensitive = ["password", "passwd", "secret", "token", "apikey", "api_key", "privatekey", "private_key"];
-    let mut result = String::with_capacity(text.len());
-    for word in text.split_whitespace() {
-        let lower = word.to_lowercase();
-        let is_sensitive = sensitive.iter().any(|s| lower.starts_with(s) || lower.contains(&format!("_{s}=")) || lower.contains(&format!("{s}=")));
-        if is_sensitive && word.contains('=') {
-            let (key, _) = word.split_once('=').unwrap_or((word, ""));
+    let mut result = String::with_capacity(linha.len());
+    for chunk in linha.split_inclusive(char::is_whitespace) {
+        let palavra = chunk.trim_end_matches(char::is_whitespace);
+        let lower = palavra.to_lowercase();
+        let is_sensitive =
+            palavra.contains('=') && sensitive.iter().any(|s| lower.starts_with(s) || lower.contains(&format!("_{s}=")) || lower.contains(&format!("{s}=")));
+        if is_sensitive {
+            let (key, _) = palavra.split_once('=').unwrap_or((palavra, ""));
             result.push_str(key);
-            result.push_str("=*** ");
+            result.push_str("=***");
         } else {
-            result.push_str(word);
-            result.push(' ');
+            result.push_str(palavra);
         }
+        result.push_str(&chunk[palavra.len()..]);
     }
-    result.trim_end().to_string()
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -109,5 +122,17 @@ mod tests {
     fn preserva_texto_comum() {
         let text = "conexao ok em 203.0.113.10:22 saida 0";
         assert_eq!(scrub_secrets(text), text);
+    }
+
+    #[test]
+    fn a_mascara_nao_achata_as_linhas_da_saida() {
+        // Saída de comando é multi-linha por natureza. Se a máscara dobrasse tudo em
+        // uma linha só, o log gravado do motor perderia exatamente a forma do que o
+        // comando mostrou — recuo, colunas e as linhas em branco.
+        let saida = "copiando a.html\n    copying b.html\n\n\tcabeçalho password=SuperSecret-9f3c e host ok\nfim";
+        assert_eq!(
+            scrub_secrets(saida),
+            "copiando a.html\n    copying b.html\n\n\tcabeçalho password=*** e host ok\nfim"
+        );
     }
 }

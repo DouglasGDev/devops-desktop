@@ -632,6 +632,18 @@ export interface LogEvent {
   text: string;
 }
 
+/**
+ * Uma linha do log de uma etapa, como ficou gravada na corrida. `attempt` é a
+ * tentativa do nó que a escreveu — a repetição não apaga a anterior.
+ */
+export interface StepLogLine {
+  attempt: number;
+  seq: number;
+  stream: "stdout" | "stderr" | "system";
+  ts: string;
+  text: string;
+}
+
 export interface DeployActive {
   runId: number;
   label: string;
