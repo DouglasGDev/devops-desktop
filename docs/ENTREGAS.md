@@ -6,7 +6,8 @@ cada parte e o que ainda não existe**. A base destas linhas é o modo sem servi
 CI/CD** — o contrato central de pipeline (`4f005ee`) e a licença de contribuição (`df51de1`) —, a **etapa 3**, o
 construtor visual do grafo (`23beec2`), a **etapa 4**, os executores de runtime (Docker, Docker Compose, PM2) com o
 git como passo do pipeline, e a **etapa 5**, a análise de código-fonte — na tela e como nó do mesmo grafo —, registrada
-aqui em 2026-10-15.
+aqui em 2026-10-15. Fecha a lista a rodada de **2026-10-15 à noite**: as duas verificações da tela Análise passaram a
+deixar linha no Histórico (`a63bf00`, com o texto lido e medido na janela), §1.1 é o estado em um parágrafo.
 
 ## 1. Retomar em três passos
 
@@ -35,6 +36,51 @@ Armadilhas já conhecidas nesta máquina:
 - **`TaskStop` não mata os filhos** (`cargo`, `rustc`, `node`): confira `Get-Process` antes de assumir que a compilação
   anterior acabou.
 - `cargo fmt` **não** é usado neste projeto — o formato é o do próprio autor, e `cargo fmt` reorganiza tudo.
+
+### 1.1 Estado em um parágrafo (2026-10-15, 22:25)
+
+Tela e backend: **147** `#[tauri::command]`, 24 arquivos Rust (`analysis.rs` é o mais novo), 11 telas (`AnalysisView`),
+**303** testes de backend, SQLite em `user_version` **10** com 13 tabelas, 44.458 linhas TS/TSX/Rust (77 arquivos, sem
+contar `node_modules`, `target`, `dist` nem `Python/`, que é um venv **não rastreado** — nunca `git add` nele). Lido com
+`git ls-remote origin refs/heads/main`, o remoto está em `50e4832` (`a63bf00` é o código da rodada; `fa425fa`, `00b8c81`
+e `50e4832` são docs). Depois dele há commits locais **não empurrados**: `56e7721`, que acerta a linha de Git do §2, e o
+que grava estas linhas. Cada um pede a própria autorização antes de ir. O binário mais novo é
+`src-tauri/target/release/devops-desktop.exe` das 22:25, posterior à última edição de fonte.
+
+A rodada que fecha aqui é a correção do defeito apontado por ele — *"os logs do verificar nao salva nada quando vcc
+aponta"*. `analysis_detectar` (Sondar ferramenta) e `analysis_conferir` (Conferir regras) respondiam à tela e
+descartavam a resposta; agora os dois gravam uma linha de auditoria pela mesma porta (`commands::registrar_verificacao`
+→ `audit::log`, categoria `análise`, com o rótulo que a torna encontrável no **Histórico**), e o **texto da linha é
+produzido no módulo da análise**, porque é lá que cada estado tem significado: `encontrado`/`validadas` = `info`,
+`ausente`/`sem-ferramenta` = `warning`, `sem-resposta`/`inválidas` = `error`. Nada é registrado como "ok" presumido. O
+que foi lido na janela real está no §2; a razão de cada escolha, nos §5 itens 28 e 29.
+
+O que não pode ser revertido ao mexer aqui (lista completa no §5): **não existe segundo motor de deploy** — a tela e o
+nó do grafo chamam a mesma `analysis::executar` / `deploy::start`, e o veredito é contagem contra `severity_gate`,
+**nunca** o código de saída da ferramenta; o que é desenhado na tela é o que o backend executa; a fila linear de 15
+etapas continua compatível com o grafo; o frontend não foi substituído; UI tem **controles e estado**, sem prosa
+explicativa (caminhos e passo a passo vivem neste documento e no README); segredos são mascarados em toda saída e
+**valores de variáveis nunca vão para disco, log ou Histórico** — retratos de versão carregam só nomes; sonda nomeia
+"sem resposta" separadamente de "não encontrado" e tem prazo próprio; nada é simulado, nenhum botão é enfeite; uma
+mecânica por módulo — e uma mecânica servida por **duas portas** (a tela e o nó do grafo), não por duas implementações;
+ferramentas funcionam **sem servidor e sem conta de serviço**; `working_dir` local fica contido na raiz do projeto;
+aprovação manual nunca é presumida; senha SSH via `SSH_ASKPASS` por operação, jamais persistida; aviso de compilador é
+corrigido na causa, sem `#[allow(...)]`.
+
+Como se trabalha neste repositório: o loop da etapa é `cargo test --lib` → `cargo clippy --all-targets` (zero avisos) →
+`tsc --noEmit` → `npm run build` → `npm run tauri build`, lendo **cada** log antes de dizer que passou — nenhuma
+varredura é chamada de verde por presunção. Fechar um `git commit` não autoriza o próximo `git push`: **push é ação
+compartilhada e a pergunta é refeita a cada commit**, porque um "sim" anterior não se estende. Dois fatos mecânicos desta
+máquina: `git commit && git push` na mesma linha é bloqueado (são chamadas separadas), e um diff com literal de
+**forma** de credencial faz o GitHub recusar o push inteiro — corrige-se o fixture, não o scanner, e os commits locais
+reunem-se com `git reset --soft`. A janela é pilotada por `scripts/ponte-cdp.mjs` (§4.1); `npm run tauri dev` não roda
+(porta 1420 presa por um Vite de sessão anterior).
+
+O que falta, no curto prazo: o aceite visual do Douglas em **Análise → Sondar ferramenta / Conferir regras → Histórico
+com o filtro** *Análise*, a corrida **#6**, os cartões de Deploy **#45/#46** e a corrida travada pelo gate **#47/#48**;
+e as pendências do plano (triggers, ambientes com aprovação registrada, logs por etapa persistidos, retry configurável,
+revalidação SSH e os executores Docker/Compose/PM2 contra um daemon/host real) em §6. As lacunas honestas do "canivete"
+estão em §7.
 
 ## 2. Estado verificado em 2026-10-10 … 15 (resultado lido, não presumido)
 
