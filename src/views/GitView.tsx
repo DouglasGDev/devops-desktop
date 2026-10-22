@@ -424,7 +424,13 @@ export function GitView({
           <span className="truncate font-mono" title={project?.localPath}>
             {project?.localPath}
           </span>
-          {dirty > 0 ? <Badge tone="warning">{dirty} alteração(ões)</Badge> : <Badge tone="success">limpo</Badge>}
+          {status ? (
+            dirty > 0 ? (
+              <Badge tone="warning">{dirty} alteração(ões)</Badge>
+            ) : (
+              <Badge tone="success">limpo</Badge>
+            )
+          ) : null}
           {status && status.conflictCount > 0 ? <Badge tone="error">{status.conflictCount} em conflito</Badge> : null}
           <Button size="sm" variant="ghost" disabled={git.busy !== null} onClick={() => openInEditor()}>
             <ExternalLinkIcon className="size-3.5" /> Abrir no editor

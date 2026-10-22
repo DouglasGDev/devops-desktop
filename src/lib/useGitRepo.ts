@@ -113,12 +113,15 @@ export function useGitRepo(projectId: number | null, notify: GitNotify): GitRepo
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const alive = useRef(true);
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // O StrictMode do modo de desenvolvimento desmonta e remonta: sem reafirmar
+    // aqui, o ref ficaria `false` para sempre e todo `guard` engoliria o próprio
+    // fim — o spinner não desliga e o erro não aparece.
+    alive.current = true;
+    return () => {
       alive.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
 
   /** Roda a operação com o seletor ocupado e o erro visível; `null` = falhou. */
   const guard = useCallback(
