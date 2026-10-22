@@ -1284,15 +1284,46 @@ impl Trechos {
 
 // ---------- a varredura ----------
 
+/// A pasta varrida no caminho canônico, que é a régua da contenção. As três
+/// respostas possíveis de uma leitura de caminho são coisas diferentes: o canônico,
+/// a pasta que **não está lá** — e é isso que recusa o pedido — e a pasta que **não
+/// respondeu**, que devolve o motivo e jamais vira "não existe". `prazo` é parâmetro
+/// porque essa é a única forma de medir a espera abandonada sem ter um volume
+/// adormecido em mãos; a varredura chama com [`git_probe::PRAZO_SONDA`].
+fn alvo_da_varredura(raiz: &Path, pedido: &Path, prazo: Duration) -> Result<PathBuf, String> {
+    let raiz_real = match git_probe::canon(raiz, prazo) {
+        git_probe::Canon::Resolveu(caminho) => caminho,
+        git_probe::Canon::Ausente(e) => {
+            return Err(format!("não foi possível abrir a pasta do projeto: {e}"))
+        }
+        git_probe::Canon::SemResposta(motivo) => return Err(motivo),
+    };
+    let alvo = match git_probe::canon(pedido, prazo) {
+        git_probe::Canon::Resolveu(caminho) => caminho,
+        git_probe::Canon::Ausente(_) => {
+            return Err(format!(
+                "a pasta varrida “{}” não existe dentro do projeto",
+                pedido.display()
+            ))
+        }
+        git_probe::Canon::SemResposta(motivo) => return Err(motivo),
+    };
+    if !alvo.starts_with(&raiz_real) {
+        return Err("a varredura só roda dentro da pasta cadastrada do projeto".to_string());
+    }
+    Ok(alvo)
+}
+
 /// O resultado de uma varredura é a corrida como ela ficou gravada, lida de volta
 /// do banco: as duas portas (a tela e o nó do pipeline) leem esta mesma linha, e o
 /// que elas mostram é o que está guardado, não o que a memória do processo ainda
 /// tinha. `blocked` é o veredito — a contagem contra o corte — e nunca o código de
 /// saída da ferramenta.
 ///
-/// `raiz` é a pasta canônica do projeto; a subpasta opcional do pedido é conferida
-/// por [`AnalysisInput::conferir`] e contida por `canonicalize`, a mesma régua dos
-/// nós de comando locais.
+/// `raiz` é a pasta cadastrada do projeto; a subpasta opcional do pedido é conferida
+/// por [`AnalysisInput::conferir`] e contida pelo caminho canônico, a mesma régua dos
+/// nós de comando locais — e com o mesmo prazo, porque abrir a pasta é uma espera de
+/// disco.
 pub fn executar(
     conn: &Connection,
     dados: &Path,
@@ -1304,18 +1335,7 @@ pub fn executar(
     let inicio = Instant::now();
     let relativa = entrada.conferir()?;
     let pedido = raiz.join(relativa.as_deref().unwrap_or(""));
-    let raiz_real = raiz
-        .canonicalize()
-        .map_err(|e| format!("não foi possível abrir a pasta do projeto: {e}"))?;
-    let alvo = pedido
-        .canonicalize()
-        .map_err(|_| format!("a pasta varrida “{}” não existe dentro do projeto", pedido.display()))?;
-    if !alvo.starts_with(&raiz_real) {
-        return Err("a varredura só roda dentro da pasta cadastrada do projeto".to_string());
-    }
-    // A contenção foi medida nos caminhos canônicos; o que vai para a tela e para o
-    // pacote é o caminho que outro programa reconhece.
-    let alvo = git_probe::simple(&alvo);
+    let alvo = alvo_da_varredura(raiz, &pedido, git_probe::PRAZO_SONDA)?;
     let instrumento = entrada.analyzer();
     let corte = entrada.severity_gate();
     let prazo = if entrada.timeout_secs.unwrap_or(0) > 0 {
@@ -2564,6 +2584,30 @@ mod tests {
         assert!(executar(&conn, &dados, &projeto, &raiz, &inexistente, &AtomicBool::new(false)).is_err());
         let _ = std::fs::remove_dir_all(&casa);
         let _ = std::fs::remove_dir_all(&dados);
+    }
+
+    #[test]
+    fn a_varredura_para_na_porta_quando_a_pasta_nao_acorda() {
+        let casa = pasta_de_teste("porta");
+        std::fs::create_dir_all(casa.join("src")).expect("criar a subpasta");
+
+        // Pasta que está lá: a régua canônica responde, e vem sem o prefixo verbatim.
+        let alvo = alvo_da_varredura(&casa, &casa.join("src"), git_probe::PRAZO_SONDA).expect("a pasta respondeu");
+        assert!(!alvo.to_string_lossy().starts_with(r"\\?\"), "{alvo:?}");
+
+        // Prazo menor que qualquer resposta de disco: o que a porta devolve é o
+        // motivo da espera abandonada — e nunca a frase de "não existe", que
+        // culparia o pedido quando quem não acordou foi o volume.
+        let sem_resposta = alvo_da_varredura(&casa, &casa.join("src"), Duration::ZERO)
+            .expect_err("0 ms é prazo, não resposta");
+        assert!(sem_resposta.contains("não respondeu em 0 ms"), "{sem_resposta}");
+        assert!(!sem_resposta.contains("não existe"), "{sem_resposta}");
+
+        // Subpasta que não está lá, com prazo de verdade: essa sim é ausência dita.
+        let falta = alvo_da_varredura(&casa, &casa.join("nao-existe"), git_probe::PRAZO_SONDA)
+            .expect_err("a subpasta não existe");
+        assert!(falta.contains("não existe dentro do projeto"), "{falta}");
+        let _ = std::fs::remove_dir_all(&casa);
     }
 
     #[test]

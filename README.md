@@ -618,7 +618,12 @@ Resumo do que é garantido pelo código, não só pela interface:
   credencial que o git não pode pedir porque `GIT_TERMINAL_PROMPT=0`). Uma pasta fora do ar espera o disco numa thread
   auxiliar e a espera é abandonada em 20 s com o motivo — `metadata()`, `canonicalize()` e o `git show` de um blob esperam
   o volume **dentro do kernel** e não podem ser interrompidos de fora, então quem é abandonado é o aguardo, nunca o
-  botão. E a resposta tem três estados: **o que existe**, **a ausência dita** ("não há branch", "não é repositório") e
+  botão. A mesma porta vale para os caminhos das outras telas — a raiz e o subdiretório de uma **varredura de análise**, a
+  **pasta de trabalho de um nó** e os dois lados da **contenção do destino** de um modelo sem servidor —, e uma comparação
+  de caminho resolve **os dois lados** pela mesma régua: um destino que ainda não existe (a primeira publicação) é
+  resolvido até a pasta mais funda que o disco consegue responder, porque comparar uma origem canônica com um destino
+  digitado é não comparar. E a resposta tem três estados: **o que existe**, **a ausência dita** ("não há branch", "não é
+  repositório", "a pasta varrida não existe dentro do projeto") e
   **"não respondeu"** — que nunca é lido como os dois anteriores, nem como varredura de segredos limpa. Um remoto lento
   nunca parece um botão quebrado, e um processo preso nunca deixa a tela girando para sempre.
 - **CSP ativa** no `tauri.conf.json`: `default-src 'self'` e `connect-src` só permitem o IPC local (`ipc:`,
@@ -818,6 +823,7 @@ git (casa por `dono/repo`, não por `github.com`).
 | Uma linha do painel diz "instalado, mas não respondeu dentro do prazo de 5 s" | O programa existe, mas trava quando é chamado (keyring pedindo interação, antivírus segurando o processo). | Rode o mesmo comando num terminal para ver o que ele pede. A janela continua mostrando o que as outras sondas trouxeram — nenhuma ferramenta lenta congela o painel. |
 | O editor não aparece na lista de Configurações | O executável não está no `PATH` nem nas pastas de instalação conhecidas (`%LOCALAPPDATA%\Programs\…`, `%ProgramFiles%\…`). | Use o editor padrão do sistema ou chame o instalador dele uma vez pelo terminal (que registra o comando `code`/`cursor`) e clique *Reverificar*. |
 | "o git não respondeu em 30 s e foi interrompido" | Um `git` local travado: índice com `index.lock` de outro git, hook parado ou antivírus segurando a pasta. | A mensagem diz o prazo e o motivo provável. Feche os outros `git` da pasta e tente de novo; nenhuma operação de git fica girando sem fim. |
+| "o ssh-add não respondeu em 5 s e a leitura do agente foi abandonada" | Um agente que não devolve nada: smartcard pedindo PIN, socket pendurado ou `SSH_AUTH_SOCK` apontando para algo morto. | Não é "não está no PATH" nem "nenhuma chave" — as três coisas são ditas separadamente. Rode `ssh-add -l` num terminal para ver o que ele pergunta; a descoberta de chaves continua mostrando o que as outras leituras trouxeram. |
 | "o git não respondeu em 10 min e foi interrompido" | Operação de rede lenta de verdade (clone grande) ou o remoto pedindo credencial que o git não pode perguntar (`GIT_TERMINAL_PROMPT=0`). | Rode o mesmo comando num terminal uma vez para liberar a credencial (chave no agente ou gerenciador de credenciais) e repita. |
 | A lista de arquivos remotos mostrava nomes com `//` no meio | O `ls` do cliente sftp devolve o caminho inteiro quando o argumento é absoluto, e o aplicativo juntava a pasta com o caminho todo. | Corrigido: a entrada volta a ser só o nome do arquivo/pasta. Se ainda vir algo estranho, diga o que aparece na coluna **Nome**. |
 | Linha vermelha no card **Conta GitHub** | A frase vermelha é a resposta do próprio GitHub, não uma falha genérica. **"o GitHub não reconhece o que foi enviado"** = o valor salvo não é um Client ID existente — o caso mais comum é o **Client secret** colado no lugar (ele é hexadecimal, o Client ID dos apps atuais não). As outras duas causas reais são código expirado e `api.github.com` bloqueado por proxy. | Compare com o campo **Client ID** no topo da página do app em `github.com/settings/developers` e cole de novo. Expirou → *Conectar conta* de novo (o código dura ~15 min). Proxy → "sem rede, proxy ou DNS", e a autorização em si fica guardada. Se você salvou o secret, gere um secret novo no GitHub. |

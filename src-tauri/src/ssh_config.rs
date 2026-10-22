@@ -2,6 +2,9 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
+    process::Stdio,
+    sync::atomic::AtomicBool,
+    time::Duration,
 };
 
 use crate::models::{AgentInfo, AgentKey, KeyFile, KnownHostsInfo, SshDiscoveryReport, SshHostCandidate};
@@ -357,36 +360,75 @@ fn read_known_hosts(ssh_dir: &Path) -> Option<KnownHostsInfo> {
     })
 }
 
+/// Prazo da leitura do agente. Um `ssh-add` esperando a confirmação de um token não
+/// volta nunca, e a descoberta de chaves deixaria a tela presa; como em toda sonda
+/// desta máquina, "não respondeu" é um estado próprio — nem "não está no PATH", nem
+/// "agente vivo sem chaves".
+const PRAZO_AGENTE: Duration = Duration::from_secs(5);
+
+enum Sonda {
+    /// Rodou e devolveu um código de saída.
+    Respondeu { code: Option<i32>, stdout: String },
+    /// Não deu para executar: o nome não está no PATH, ou o sistema recusou.
+    Ausente,
+    /// Rodou e não terminou dentro do prazo. Traz o motivo com a duração lida.
+    SemResposta { motivo: String },
+}
+
+fn sonda(programa: &str, args: &[&str], prazo: Duration) -> Sonda {
+    let mut child = match crate::proc::command(programa)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return Sonda::Ausente,
+    };
+    let feito = crate::sshexec::collect(&mut child, prazo, &AtomicBool::new(false));
+    if feito.timed_out || feito.cancelled {
+        return Sonda::SemResposta {
+            motivo: format!("não respondeu em {}", crate::sshexec::texto_duracao(prazo)),
+        };
+    }
+    Sonda::Respondeu { code: feito.exit_code, stdout: feito.stdout }
+}
+
 fn read_agent() -> AgentInfo {
-    let output = crate::proc::command("ssh-add").arg("-l").output();
-    match output {
-        Err(_) => AgentInfo {
+    veredito_agente(sonda("ssh-add", &["-l"], PRAZO_AGENTE))
+}
+
+/// O que a tela vê, a partir do que a sondagem respondeu. Nenhum ramo aqui afirma
+/// que o agente existe sem que ele tenha dito.
+fn veredito_agente(leitura: Sonda) -> AgentInfo {
+    match leitura {
+        Sonda::Ausente => AgentInfo {
             available: false,
             keys: Vec::new(),
             note: Some("ssh-add não encontrado no PATH.".into()),
         },
-        Ok(out) => match out.status.code() {
-            Some(0) => {
-                let text = String::from_utf8_lossy(&out.stdout);
-                AgentInfo {
-                    available: true,
-                    keys: text
-                        .lines()
-                        .filter_map(parse_agent_line)
-                        .collect(),
-                    note: None,
-                }
-            }
-            Some(1) => AgentInfo {
-                available: true,
-                keys: Vec::new(),
-                note: Some("Agente em execução, sem chaves carregadas.".into()),
-            },
-            _ => AgentInfo {
-                available: false,
-                keys: Vec::new(),
-                note: Some("SSH Agent não está em execução (ou não há socket disponível).".into()),
-            },
+        Sonda::SemResposta { motivo } => AgentInfo {
+            available: false,
+            keys: Vec::new(),
+            note: Some(format!(
+                "o ssh-add {motivo} e a leitura do agente foi abandonada."
+            )),
+        },
+        Sonda::Respondeu { code: Some(0), stdout } => AgentInfo {
+            available: true,
+            keys: stdout.lines().filter_map(parse_agent_line).collect(),
+            note: None,
+        },
+        Sonda::Respondeu { code: Some(1), .. } => AgentInfo {
+            available: true,
+            keys: Vec::new(),
+            note: Some("Agente em execução, sem chaves carregadas.".into()),
+        },
+        Sonda::Respondeu { .. } => AgentInfo {
+            available: false,
+            keys: Vec::new(),
+            note: Some("SSH Agent não está em execução (ou não há socket disponível).".into()),
         },
     }
 }
@@ -585,5 +627,73 @@ mod tests {
         assert_eq!(key.fingerprint, "SHA256:AbCdEf");
         assert_eq!(key.key_type, "RSA");
         assert_eq!(key.comment.as_deref(), Some("user@host"));
+    }
+
+    #[test]
+    fn os_quatro_vereditos_do_agente_sao_coisas_diferentes() {
+        // Quem não está no PATH, quem não respondeu, quem respondeu "sem chaves" e
+        // quem respondeu com chaves: quatro telas diferentes, e nenhuma é a outra.
+        let ausente = veredito_agente(Sonda::Ausente);
+        assert!(!ausente.available);
+        assert!(ausente.note.as_deref().unwrap_or("").contains("não encontrado no PATH"));
+
+        let mudo = veredito_agente(Sonda::SemResposta { motivo: "não respondeu em 5 s".into() });
+        assert!(!mudo.available);
+        let nota = mudo.note.expect("a tela precisa dizer por que parou");
+        assert!(nota.contains("não respondeu em 5 s"), "{nota}");
+        assert!(!nota.contains("não encontrado"), "{nota}");
+
+        let vazio = veredito_agente(Sonda::Respondeu { code: Some(1), stdout: String::new() });
+        assert!(vazio.available, "o agente respondeu que está vivo, sem chaves");
+        assert!(vazio.keys.is_empty());
+
+        let cheio = veredito_agente(Sonda::Respondeu {
+            code: Some(0),
+            stdout: "3072 SHA256:AbCdEf user@host (RSA)\n".into(),
+        });
+        assert!(cheio.available);
+        assert_eq!(cheio.keys.len(), 1);
+        assert!(cheio.note.is_none());
+
+        let recusa = veredito_agente(Sonda::Respondeu { code: Some(2), stdout: String::new() });
+        assert!(!recusa.available);
+        assert!(recusa.note.as_deref().unwrap_or("").contains("não está em execução"));
+    }
+
+    #[test]
+    fn uma_sonda_de_agente_que_nao_termina_e_abandonada_dentro_do_prazo() {
+        // O caso que prendia a descoberta de chaves: um processo vivo muito além do
+        // prazo. A técnica é a da sonda de ferramentas — um programa real que demora,
+        // não um prazo inventado.
+        let (programa, args): (&str, &[&str]) = if cfg!(windows) {
+            ("ping", &["-n", "40", "127.0.0.1"])
+        } else {
+            ("sleep", &["40"])
+        };
+        let inicio = std::time::Instant::now();
+        let info = veredito_agente(sonda(programa, args, Duration::from_secs(1)));
+        let decorrido = inicio.elapsed();
+        assert!(decorrido < Duration::from_secs(10), "esperou o programa inteiro: {decorrido:?}");
+        assert!(!info.available);
+        let nota = info.note.expect("sem resposta tem de dizer o motivo");
+        assert!(nota.contains("não respondeu em 1 s"), "{nota}");
+    }
+
+    #[test]
+    fn a_leitura_real_do_agente_volta_com_um_veredito() {
+        // Nesta máquina o ssh-add responde em dezenas de milissegundos com código 2
+        // (o serviço está parado): a chamada volta, e o que a tela mostra é o que ele
+        // respondeu — nunca uma espera aberta.
+        let inicio = std::time::Instant::now();
+        let info = read_agent();
+        let decorrido = inicio.elapsed();
+        assert!(decorrido < Duration::from_secs(20), "a leitura esperou sem prazo: {decorrido:?}");
+        if !info.available {
+            assert!(info.note.is_some(), "agente indisponível sem dizer o motivo");
+        }
+        assert!(
+            !info.note.as_deref().unwrap_or("").contains("não existe"),
+            "silêncio chamado de ausência"
+        );
     }
 }

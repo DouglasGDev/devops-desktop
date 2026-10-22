@@ -31,7 +31,7 @@ use tauri::{AppHandle, Emitter};
 use crate::{
     analysis, audit, auth,
     db::{self, DbHandle},
-    files, git,
+    files, git, git_probe,
     models::{
         strategy_needs_server, validate_strategy, AnalysisInput, AnalysisRun, DeployProfile,
         DeployRun, PipelineNode, Project, Server,
@@ -1408,26 +1408,40 @@ pub fn prequisitos(position: i64) -> &'static [i64] {
 
 /// O diretório de trabalho de um nó local, conferido dentro da raiz do projeto.
 /// Um caminho que dobra para fora da pasta cadastrada não é aceito — é a mesma
-/// contenção que o destino do pipeline faz com `canonicalize`.
+/// contenção que o destino do pipeline faz, na mesma régua canônica e sob o mesmo
+/// prazo: abrir a pasta é uma espera de disco, e um volume que não acorda devolve
+/// o motivo em vez de pendurar a corrida inteira.
 fn dir_do_no(ctx: &Ctx, no: &PipelineNode) -> Result<PathBuf, Fail> {
     let bruto = no.working_dir.as_deref().unwrap_or("").trim();
     if bruto.is_empty() {
         return Ok(ctx.root.clone());
     }
-    let candidato = ctx.root.join(bruto.replace('\\', "/"));
-    let raiz_real = ctx.root.canonicalize().map_err(|e| {
-        Fail::new(format!("não foi possível abrir a pasta do projeto: {e}"))
-    })?;
-    let real = candidato.canonicalize().map_err(|e| {
-        Fail::new(format!(
-            "a pasta de trabalho “{}” do nó “{}” não existe dentro do projeto: {e}",
-            bruto, no.title
-        ))
-    })?;
+    dir_local(&ctx.root, bruto, &no.title, git_probe::PRAZO_SONDA)
+}
+
+fn dir_local(raiz: &Path, bruto: &str, titulo: &str, prazo: Duration) -> Result<PathBuf, Fail> {
+    let candidato = raiz.join(bruto.replace('\\', "/"));
+    let raiz_real = match git_probe::canon(raiz, prazo) {
+        git_probe::Canon::Resolveu(caminho) => caminho,
+        git_probe::Canon::Ausente(e) => {
+            return Err(Fail::new(format!("não foi possível abrir a pasta do projeto: {e}")))
+        }
+        git_probe::Canon::SemResposta(motivo) => return Err(Fail::new(motivo)),
+    };
+    let real = match git_probe::canon(&candidato, prazo) {
+        git_probe::Canon::Resolveu(caminho) => caminho,
+        git_probe::Canon::Ausente(e) => {
+            return Err(Fail::new(format!(
+                "a pasta de trabalho “{}” do nó “{}” não existe dentro do projeto: {e}",
+                bruto, titulo
+            )))
+        }
+        git_probe::Canon::SemResposta(motivo) => return Err(Fail::new(motivo)),
+    };
     if !real.starts_with(&raiz_real) {
         return Err(Fail::new(format!(
             "a pasta de trabalho “{}” do nó “{}” sai do projeto — o motor só roda dentro da pasta cadastrada",
-            bruto, no.title
+            bruto, titulo
         )));
     }
     Ok(real)
@@ -2210,12 +2224,38 @@ fn checar_pasta_e_variaveis(ctx: &mut Ctx) -> Result<(), Fail> {
     Ok(())
 }
 
-/// As checagens da etapa 1 que dependem só do que está gravado na definição — nada
-/// de disco, rede ou segredo digitado. São as mesmas que o motor executa antes de
-/// qualquer trabalho, e é por isso que o contrato de pipeline (`pipeline_validate`)
-/// chama esta função em vez de ter uma lista própria de regras: dois lugares com
-/// regras diferentes é como uma tela passa a dizer "ok" para algo que o motor
-/// depois recusa.
+/// Os dois lados da régua que impede um modelo sem servidor de copiar o projeto
+/// para dentro dele mesmo. Cada lado vem na forma canônica que o disco respondeu,
+/// resolvido até a pasta mais funda que existe — o destino da primeira publicação
+/// ainda não foi criado por ninguém, e é justamente aí que a comparação precisa
+/// significar alguma coisa. O que não é opção é esperar sem prazo: abrir a pasta é
+/// uma espera de disco, e um volume adormecido devolve o motivo, parando a
+/// validação ali em vez de girar para sempre.
+fn origem_e_destino(raiz: &Path, destino: &Path, prazo: Duration) -> Result<(PathBuf, PathBuf), String> {
+    let origem = match git_probe::canon_ou_ancestral(raiz, prazo) {
+        git_probe::Canon::Resolveu(caminho) => caminho,
+        git_probe::Canon::Ausente(motivo) => {
+            return Err(format!("a pasta local do projeto não pôde ser lida: {motivo}"))
+        }
+        git_probe::Canon::SemResposta(motivo) => return Err(motivo),
+    };
+    let alvo = match git_probe::canon_ou_ancestral(destino, prazo) {
+        git_probe::Canon::Resolveu(caminho) => caminho,
+        git_probe::Canon::Ausente(motivo) => {
+            return Err(format!("a pasta de destino não pôde ser lida: {motivo}"))
+        }
+        git_probe::Canon::SemResposta(motivo) => return Err(motivo),
+    };
+    Ok((origem, alvo))
+}
+
+/// As checagens da etapa 1 que dependem só do que está gravado na definição — mais
+/// a leitura dos dois caminhos que a contenção do destino compara, cada uma com
+/// prazo. Nada de rede, nada de segredo digitado. São as mesmas que o motor executa
+/// antes de qualquer trabalho, e é por isso que o contrato de pipeline
+/// (`pipeline_validate`) chama esta função em vez de ter uma lista própria de regras:
+/// dois lugares com regras diferentes é como uma tela passa a dizer "ok" para algo
+/// que o motor depois recusa.
 pub fn checar_definicao(
     profile: &DeployProfile,
     raiz: &Path,
@@ -2267,8 +2307,7 @@ pub fn checar_definicao(
             }
             // Copiar o projeto para dentro dele mesmo (ou apagar o projeto ao "limpar o
             // destino") é o único jeito de perder trabalho com um modelo sem servidor.
-            let origem = raiz.canonicalize().unwrap_or_else(|_| raiz.to_path_buf());
-            let alvo = destino.canonicalize().unwrap_or_else(|_| destino.clone());
+            let (origem, alvo) = origem_e_destino(raiz, &destino, git_probe::PRAZO_SONDA)?;
             if alvo == origem || origem.starts_with(&alvo) {
                 return Err(format!(
                     "a pasta de destino ({}) é o projeto ou um lugar de onde ele estaria dentro — escolha uma pasta separada",
@@ -4878,5 +4917,61 @@ mod tests {
             bloco_de_log("sistema", "etapa pulada", 0),
             vec![("system".to_string(), "etapa pulada".to_string())]
         );
+    }
+
+    #[test]
+    fn a_pasta_de_trabalho_de_um_no_e_lida_com_prazo_e_a_falta_e_dita() {
+        let base = pasta_de_teste("dir-local");
+        let raiz = base.join("projeto");
+        fs::create_dir_all(raiz.join("sub")).expect("criar a pasta de trabalho");
+        fs::create_dir_all(base.join("fora")).expect("criar a pasta de fora");
+
+        let dentro = dir_local(&raiz, "sub", "coleta", git_probe::PRAZO_SONDA).expect("a pasta respondeu");
+        assert!(!dentro.to_string_lossy().starts_with(r"\\?\"), "{dentro:?}");
+
+        // Caminho que existe mas dobra para fora: é a contenção que recusa.
+        let dobrando = dir_local(&raiz, "../fora", "coleta", git_probe::PRAZO_SONDA)
+            .expect_err("sai da pasta cadastrada");
+        assert!(dobrando.message.contains("sai do projeto"), "{}", dobrando.message);
+
+        // Pasta que não está lá: ausência dita, com as palavras do nó.
+        let falta = dir_local(&raiz, "nao-existe", "coleta", git_probe::PRAZO_SONDA)
+            .expect_err("a pasta não existe");
+        assert!(falta.message.contains("não existe dentro do projeto"), "{}", falta.message);
+        assert!(!falta.message.contains("não respondeu"), "{}", falta.message);
+
+        // Prazo menor que qualquer resposta de disco: a corrida devolve o motivo da
+        // espera, e não um "não existe" que culparia o desenho do grafo.
+        let sem_resposta = dir_local(&raiz, "sub", "coleta", Duration::ZERO).expect_err("0 ms é prazo");
+        assert!(sem_resposta.message.contains("não respondeu em 0 ms"), "{}", sem_resposta.message);
+        assert!(sem_resposta.message.contains("projeto"), "{}", sem_resposta.message);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_regua_do_destino_compara_os_dois_lados_na_mesma_forma() {
+        let base = pasta_de_teste("regua-destino");
+        let raiz = base.join("projeto");
+        fs::create_dir_all(&raiz).expect("criar o projeto");
+
+        // O caso que perde trabalho: um destino *dentro* do projeto, ainda não
+        // criado — o da primeira publicação. Os dois lados saem da mesma forma,
+        // então a régua de `checar_definicao` dispara.
+        let dentro = raiz.join("publicado");
+        let (origem, alvo) = origem_e_destino(&raiz, &dentro, git_probe::PRAZO_SONDA).expect("os dois lados");
+        assert!(alvo.starts_with(&origem), "{alvo:?} deveria estar dentro de {origem:?}");
+        assert!(!origem.starts_with(&alvo), "e não o contrário");
+
+        // Destino de fora, também inexistente: a régua diz fora, e a publicação
+        // segue.
+        let fora = base.join("publicado-fora");
+        let (origem2, alvo2) = origem_e_destino(&raiz, &fora, git_probe::PRAZO_SONDA).expect("os dois lados");
+        assert!(!alvo2.starts_with(&origem2), "{alvo2:?} não está dentro de {origem2:?}");
+        assert!(!alvo2.to_string_lossy().starts_with(r"\\?\"), "{alvo2:?}");
+
+        // Volume que não acorda: a validação para com o motivo da espera.
+        let sem_resposta = origem_e_destino(&raiz, &fora, Duration::ZERO).expect_err("0 ms é prazo");
+        assert!(sem_resposta.contains("não respondeu em 0 ms"), "{sem_resposta}");
+        let _ = fs::remove_dir_all(&base);
     }
 }
