@@ -411,7 +411,7 @@ async fn add_project(state: State<'_, AppState>, path: String, name: Option<Stri
     let raw = path.trim().to_string();
     let (canonical, probe) = tauri::async_runtime::spawn_blocking(move || {
         let canonical = git_probe::canonical_dir(&raw)?;
-        let probe = git_probe::probe(&canonical);
+        let probe = git_probe::probe(&canonical)?;
         Ok::<_, String>((canonical, probe))
     })
     .await
@@ -463,9 +463,11 @@ async fn refresh_project(state: State<'_, AppState>, id: i64) -> Result<Project,
         db::get_project(&conn, id)?
     };
     let path = project.local_path.clone();
+    let nome = project.name.clone();
     let probe = tauri::async_runtime::spawn_blocking(move || git_probe::probe(Path::new(&path)))
         .await
-        .map_err(|e| format!("falha interna ao atualizar projeto: {e}"))?;
+        .map_err(|e| format!("falha interna ao atualizar projeto: {e}"))?
+        .map_err(|e| format!("{}: {e}", nome))?;
     let conn = lock_db(&db)?;
     let updated = db::update_project_git(
         &conn,
@@ -949,7 +951,7 @@ fn project_repo(db: &DbHandle, project_id: i64) -> Result<(String, PathBuf), Str
         (project.name, project.local_path)
     };
     let dir = git_probe::canonical_dir(&local_path)?;
-    if !git::is_repo(&dir) {
+    if !git::is_repo(&dir)? {
         return Err(format!(
             "{} não é um repositório Git — use a seção de projetos para abrir uma pasta com repositório",
             name
@@ -960,18 +962,26 @@ fn project_repo(db: &DbHandle, project_id: i64) -> Result<(String, PathBuf), Str
 
 /// Consulta Git em thread bloqueante. Não audita: o painel atualiza o estado a
 /// cada operação e logaria cada leitura inundaria o histórico.
+///
+/// A resolução da pasta (`project_repo`) vai **dentro** da thread bloqueante de
+/// propósito: ela faz `stat` do caminho e abre um `git` de sondagem, e numa pasta
+/// de disco externo isso espera o kernel. Na thread do runtime assíncrono, uma
+/// única pasta presa segurava também os outros comandos da aplicação.
 async fn git_read<T, F>(db: DbHandle, project_id: i64, op: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce(&Path) -> Result<T, String> + Send + 'static,
 {
-    let (name, dir) = project_repo(&db, project_id)?;
-    tauri::async_runtime::spawn_blocking(move || op(&dir).map_err(|e| format!("{name}: {e}")))
-        .await
-        .map_err(|e| format!("falha interna na leitura do Git: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        let (name, dir) = project_repo(&db, project_id)?;
+        op(&dir).map_err(|e| format!("{name}: {e}"))
+    })
+    .await
+    .map_err(|e| format!("falha interna na leitura do Git: {e}"))?
 }
 
-/// Mutação Git em thread bloqueante, com o desfecho auditado.
+/// Mutação Git em thread bloqueante, com o desfecho auditado. A pasta é resolvida
+/// na mesma thread da operação, pelo mesmo motivo de `git_read`.
 async fn git_write<T, F>(
     db: DbHandle,
     project_id: i64,
@@ -983,10 +993,14 @@ where
     T: Send + 'static,
     F: FnOnce(&Path) -> Result<T, String> + Send + 'static,
 {
-    let (name, dir) = project_repo(&db, project_id)?;
-    let result = tauri::async_runtime::spawn_blocking(move || op(&dir))
+    let bloqueio = db.clone();
+    let (name, result) =
+        tauri::async_runtime::spawn_blocking(move || -> Result<(String, Result<T, String>), String> {
+            let (name, dir) = project_repo(&bloqueio, project_id)?;
+            Ok((name, op(&dir)))
+        })
         .await
-        .map_err(|e| format!("falha interna na operação do Git: {e}"))?;
+        .map_err(|e| format!("falha interna na operação do Git: {e}"))??;
     let conn = lock_db(&db)?;
     let message = match &result {
         Ok(_) => detail,
@@ -1181,20 +1195,22 @@ async fn scan_project_secrets(
 ) -> Result<Vec<security::Finding>, String> {
     let db = state.db.clone();
     let extra = extra_secret_patterns(&db)?;
-    let (name, dir) = {
-        let conn = lock_db(&db)?;
-        let project = db::get_project(&conn, project_id)?;
-        (project.name, git_probe::canonical_dir(&project.local_path)?)
-    };
     tauri::async_runtime::spawn_blocking(move || {
+        // A pasta é resolvida aqui dentro: `canonical_dir` espera o disco, e o
+        // caminho já aparece na mensagem de quem recusa.
+        let dir = {
+            let conn = lock_db(&db)?;
+            let project = db::get_project(&conn, project_id)?;
+            git_probe::canonical_dir(&project.local_path)?
+        };
         let mut found = security::scan_tree(&dir, &extra, 20_000)?;
-        if git::is_repo(&dir) {
+        if git::is_repo(&dir)? {
             found.extend(security::tracked_sensitive(&dir, &extra)?);
         }
         Ok::<Vec<security::Finding>, String>(security::summarize(found))
     })
     .await
-    .map_err(|e| format!("falha interna na varredura de {name}: {e}"))?
+    .map_err(|e| format!("falha interna na varredura do projeto: {e}"))?
 }
 
 /// O que a operação publicaria, checado no conteúdo real do Git.
@@ -1211,7 +1227,7 @@ async fn git_secret_check(
     git_read(db, project_id, move |dir| match scope.as_deref() {
         Some("push") => {
             let rels = git::push_risk_paths(dir)?;
-            Ok(security::head_findings(dir, &rels, &extra))
+            security::head_findings(dir, &rels, &extra)
         }
         _ => security::index_findings(dir, &extra),
     })
@@ -1769,7 +1785,7 @@ async fn git_push(
         // então checamos o que ele levaria, lido no HEAD.
         if !allow_secrets {
             let rels = git::push_risk_paths(dir)?;
-            let found = security::head_findings(dir, &rels, &extra);
+            let found = security::head_findings(dir, &rels, &extra)?;
             if security::blocks(&found) {
                 return Err(secret_block_message("push", &found));
             }
@@ -1860,7 +1876,7 @@ async fn git_publish(
         // é lido no HEAD antes de qualquer comando.
         if !allow_secrets {
             let rels = git::push_risk_paths(dir)?;
-            let found = security::head_findings(dir, &rels, &extra);
+            let found = security::head_findings(dir, &rels, &extra)?;
             if security::blocks(&found) {
                 return Err(secret_block_message("publicação", &found));
             }
@@ -2119,11 +2135,14 @@ async fn git_clone(
     target_name: Option<String>,
     branch: Option<String>,
 ) -> Result<String, String> {
-    let dir_parent = git_probe::canonical_dir(&parent_path)?;
     let target_name = trim_opt(target_name);
     let branch = trim_opt(branch);
     let shown = redact_url(&url);
-    let result = tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        // A pasta destino é sondada aqui dentro: `canonical_dir` espera o disco,
+        // e um volume externo que não responde não pode segurar a thread do
+        // runtime assíncrono.
+        let dir_parent = git_probe::canonical_dir(&parent_path)?;
         git::clone(&dir_parent, &url, target_name.as_deref(), branch.as_deref())
     })
     .await
@@ -2157,11 +2176,18 @@ async fn open_in_editor(
         Some(rel) => {
             validate_file_path(&rel)?;
             let joined = dir.join(&rel);
-            let canon = git_probe::simple(
-                &joined
+            let alvo = joined.display().to_string();
+            // `canonicalize()` resolve o caminho abrindo a pasta, ou seja, espera
+            // o disco dentro do kernel. Num externo adormecido essa espera não
+            // termina, e o botão de abrir ficaria girando para sempre; pela
+            // sondagem com prazo o que volta é o motivo.
+            let canon = git_probe::com_prazo(&alvo, git_probe::PRAZO_SONDA, move || {
+                joined
                     .canonicalize()
-                    .map_err(|e| format!("o arquivo {rel} não pôde ser aberto: {e}"))?,
-            );
+                    .map(|p| git_probe::simple(&p))
+                    .map_err(|e| format!("o arquivo {rel} não pôde ser aberto: {e}"))
+            })
+            .and_then(|resultado| resultado)?;
             if !canon.starts_with(&dir) {
                 return Err("o caminho solicitado está fora do repositório".into());
             }
@@ -3224,12 +3250,13 @@ async fn analysis_executar(
         db::get_project(&conn, entrada.project_id)?
     };
     let nome = projeto.name.clone();
-    let raiz = analysis::raiz_do_projeto(&projeto)?;
     let dados = db::pasta_de_dados(&app)?;
     let db = state.db.clone();
     let id = projeto.id;
     let flag = varreduras.iniciar(id)?;
     let resultado = spawn("analysis_executar", move || {
+        // A raiz é sondada na thread bloqueante, junto com a varredura que a usa.
+        let raiz = analysis::raiz_do_projeto(&projeto)?;
         let conn = lock_db(&db)?;
         analysis::executar(&conn, &dados, &projeto, &raiz, &entrada, &flag)
     })

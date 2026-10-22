@@ -499,11 +499,12 @@ pub fn tracked_findings(tracked: &[String], extra: &[String]) -> Vec<Finding> {
 
 /// Segredos no conteúdo do índice. Um caminho que só existe como exclusão não
 /// tem blob no índice e é ignorado — remover um segredo do repositório é justo
-/// o que recomendamos, não um motivo para bloquear.
+/// o que recomendamos, não um motivo para bloquear. O que **não** é ignorado: a
+/// leitura que não respondeu, que devolve erro em vez de uma varredura limpa.
 pub fn index_findings(dir: &Path, extra: &[String]) -> Result<Vec<Finding>, String> {
     let mut out = Vec::new();
     for rel in git::staged_files(dir)? {
-        if let Some(blob) = git::index_blob(dir, &rel) {
+        if let Some(blob) = git::index_blob(dir, &rel)? {
             out.extend(inspect_bytes(&rel.replace('\\', "/"), &blob, extra));
         }
     }
@@ -511,15 +512,17 @@ pub fn index_findings(dir: &Path, extra: &[String]) -> Result<Vec<Finding>, Stri
 }
 
 /// Segredos no conteúdo que um push publicaria: os caminhos escolhidos lidos na
-/// revisão HEAD, que é a versão que seguiria para o remoto.
-pub fn head_findings(dir: &Path, rels: &[String], extra: &[String]) -> Vec<Finding> {
+/// revisão HEAD, que é a versão que seguiria para o remoto. Err aqui quer dizer
+/// que o git não respondeu — quem chama interrompe a operação em vez de assumir
+/// que não havia nada para checar.
+pub fn head_findings(dir: &Path, rels: &[String], extra: &[String]) -> Result<Vec<Finding>, String> {
     let mut out = Vec::new();
     for rel in rels {
-        if let Some(blob) = git::blob_at(dir, "HEAD", rel) {
+        if let Some(blob) = git::blob_at(dir, "HEAD", rel)? {
             out.extend(inspect_bytes(&rel.replace('\\', "/"), &blob, extra));
         }
     }
-    summarize(out)
+    Ok(summarize(out))
 }
 
 /// O que a etapa de verificação do pipeline e o commit precisam saber:
@@ -692,13 +695,39 @@ mod tests {
         assert!(!found.iter().any(|f| f.path == "src/app.rs"), "{found:?}");
 
         git::run(&dir, &["commit", "-q", "-m", "base"]).unwrap();
-        let no_push = head_findings(&dir, &["srv/.env".into(), "src/app.rs".into()], &extra);
+        let no_push = head_findings(&dir, &["srv/.env".into(), "src/app.rs".into()], &extra).unwrap();
         assert!(blocks(&no_push), "{no_push:?}");
 
         // um segredo que o commit apenas retira do índice não é motivo de bloqueio
         git::run(&dir, &["rm", "--cached", "-q", "--", "srv/.env"]).unwrap();
         let found = index_findings(&dir, &extra).unwrap();
         assert!(!found.iter().any(|f| f.path == "srv/.env"), "{found:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn uma_leitura_impossivel_para_a_varredura_em_vez_de_devolver_limpo() {
+        // O que está em jogo: quando a leitura de um caminho não pode ser feita
+        // (não respondeu a tempo, ou o git não aceita o caminho), a varredura
+        // **para** com o erro. Ela não devolve a lista do que conseguiu ler como
+        // se fosse o veredito "sem segredos" — foi assim que um disco externo
+        // silencioso viraria commit liberado.
+        let dir = tmp("leitura-impossivel");
+        git::run(&dir, &["-c", "init.defaultBranch=main", "init", "-q", "."]).unwrap();
+        git::run(&dir, &["config", "user.name", "Teste"]).unwrap();
+        git::run(&dir, &["config", "user.email", "teste@local"]).unwrap();
+        git::run(&dir, &["config", "commit.gpgsign", "false"]).unwrap();
+        fs::write(dir.join("app.rs"), "fn main() {}\n").unwrap();
+        git::run(&dir, &["add", "-A"]).unwrap();
+        git::run(&dir, &["commit", "-q", "-m", "base"]).unwrap();
+
+        let extra: Vec<String> = Vec::new();
+        let limpo = head_findings(&dir, &["app.rs".into()], &extra).unwrap();
+        assert!(!limpo.iter().any(|f| f.path == "app.rs"), "{limpo:?}");
+
+        let erro = head_findings(&dir, &["app.rs".into(), "../fora.env".into()], &extra)
+            .expect_err("a leitura que não pôde ser feita interrompe a varredura");
+        assert!(erro.contains(".."), "{erro}");
         let _ = fs::remove_dir_all(&dir);
     }
 

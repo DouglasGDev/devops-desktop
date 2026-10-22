@@ -54,10 +54,25 @@ fn drain(mut pipe: impl Read, tx: mpsc::Sender<Vec<u8>>) {
     let _ = tx.send(out);
 }
 
-fn take_string(rx: mpsc::Receiver<Vec<u8>>) -> String {
-    match rx.recv_timeout(DRAIN_GRACE) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-        Err(_) => String::new(),
+fn take_bytes(rx: mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
+    rx.recv_timeout(DRAIN_GRACE).unwrap_or_default()
+}
+
+/// A mesma colheita de canos, já como texto.
+fn take_text(rx: mpsc::Receiver<Vec<u8>>) -> String {
+    String::from_utf8_lossy(&take_bytes(rx)).to_string()
+}
+
+/// Quanto durou uma espera, na unidade que faz sentido para o valor. Um prazo de
+/// sondagem pode ser de milissegundos, e "0 s" não descreve nada.
+pub fn texto_duracao(prazo: Duration) -> String {
+    let ms = prazo.as_millis();
+    if ms < 1_000 {
+        format!("{ms} ms")
+    } else if ms < 60_000 {
+        format!("{} s", prazo.as_secs())
+    } else {
+        format!("{} min", prazo.as_secs() / 60)
     }
 }
 
@@ -180,8 +195,8 @@ pub fn run_script(
 
     let outcome = harvest(&mut child, timeout, cancel);
     let (exit_code, timed_out, cancelled) = outcome;
-    let stdout = take_string(rx_out);
-    let stderr = take_string(rx_err);
+    let stdout = take_text(rx_out);
+    let stderr = take_text(rx_err);
     if cancelled {
         let _ = child.kill();
         let _ = child.wait();
@@ -248,6 +263,29 @@ pub fn run_local_with_env(
 /// threads: um cano cheio nunca trava a coleta. No estouro de prazo ou
 /// cancelamento o filho é encerrado antes da função voltar.
 pub fn collect(child: &mut Child, timeout: Duration, cancel: &AtomicBool) -> ExecResult {
+    let bruto = collect_bytes(child, timeout, cancel);
+    ExecResult {
+        exit_code: bruto.exit_code,
+        stdout: String::from_utf8_lossy(&bruto.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&bruto.stderr).to_string(),
+        timed_out: bruto.timed_out,
+        cancelled: bruto.cancelled,
+    }
+}
+
+/// stdout e stderr guardados como bytes. É a porta de baixo de `collect`: um blob
+/// lido do Git pode ser binário, e convertê-lo para texto perderia byte e mentiria
+/// sobre o conteúdo que a checagem de segredos está olhando.
+pub struct ExecBruto {
+    pub exit_code: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub timed_out: bool,
+    pub cancelled: bool,
+}
+
+/// A mesma colheita com prazo, encerrando o filho no estouro, sem converter a saída.
+pub fn collect_bytes(child: &mut Child, timeout: Duration, cancel: &AtomicBool) -> ExecBruto {
     let (tx_out, rx_out) = mpsc::channel();
     let (tx_err, rx_err) = mpsc::channel();
     if let Some(pipe) = child.stdout.take() {
@@ -261,10 +299,10 @@ pub fn collect(child: &mut Child, timeout: Duration, cancel: &AtomicBool) -> Exe
         let _ = child.kill();
         let _ = child.wait();
     }
-    ExecResult {
+    ExecBruto {
         exit_code,
-        stdout: take_string(rx_out),
-        stderr: take_string(rx_err),
+        stdout: take_bytes(rx_out),
+        stderr: take_bytes(rx_err),
         timed_out,
         cancelled,
     }
@@ -272,7 +310,10 @@ pub fn collect(child: &mut Child, timeout: Duration, cancel: &AtomicBool) -> Exe
 
 /// Colhe o processo até o prazo ou até o cancelamento, devolvendo o código de
 /// saída e as duas flags. O cancelamento é cooperativo: a interface levanta a
-/// flag e esta espera termina em no máximo `POLL_MS`.
+/// flag e esta espera termina em no máximo `POLL_MS`. Dormir só o tempo que
+/// falta é o que faz um prazo curto ser um prazo de verdade — com o passo fixo
+/// de 200 ms, um prazo de 1 ms acordava depois dele e colhia o processo como se
+/// tivesse respondido a tempo.
 pub fn harvest(child: &mut Child, timeout: Duration, cancel: &AtomicBool) -> (Option<i32>, bool, bool) {
     let started = Instant::now();
     loop {
@@ -287,7 +328,8 @@ pub fn harvest(child: &mut Child, timeout: Duration, cancel: &AtomicBool) -> (Op
         if started.elapsed() >= timeout {
             return (None, true, false);
         }
-        thread::sleep(Duration::from_millis(POLL_MS));
+        let passo = Duration::from_millis(POLL_MS);
+        thread::sleep(timeout.saturating_sub(started.elapsed()).min(passo));
     }
 }
 
@@ -401,6 +443,16 @@ mod tests {
         assert!(!args.iter().any(|a| a == "-p"), "{args:?}");
         assert!(args.contains(&"BatchMode=yes".to_string()));
         assert!(args.contains(&"StrictHostKeyChecking=yes".to_string()));
+    }
+
+    #[test]
+    fn uma_espera_e_dita_na_unidade_que_faz_sentido() {
+        // Os avisos de prazo carregam este texto: "1 ms" não pode virar "0 s"
+        // nem dez minutos virarem "600 s" na tela.
+        assert_eq!(texto_duracao(Duration::from_millis(1)), "1 ms");
+        assert_eq!(texto_duracao(Duration::from_millis(900)), "900 ms");
+        assert_eq!(texto_duracao(Duration::from_secs(30)), "30 s");
+        assert_eq!(texto_duracao(Duration::from_secs(600)), "10 min");
     }
 
     #[test]

@@ -16,7 +16,7 @@ mascarada, e é relida depois de fechar e reabrir o aplicativo — medida nas co
 ```bash
 node ./node_modules/typescript/bin/tsc --noEmit     # tipos do frontend
 npm run build                                        # tsc + bundle
-(cd src-tauri && cargo test)                         # 308 testes de backend
+(cd src-tauri && cargo test)                         # 314 testes de backend
 (cd src-tauri && cargo clippy --all-targets -- -D warnings)
 node scripts/confira-repo.ts                         # o comparador remoto↔pasta, 9 formas reais de URL
 
@@ -33,35 +33,49 @@ Armadilhas já conhecidas nesta máquina:
 
 - **Não rode `npm run tauri dev`**: a porta 1420 está ocupada por um `node.exe` de Vite de sessão anterior. Para ver a
   interface, abra o executável compilado (`src-tauri/target/release/devops-desktop.exe`).
+- **`cargo build --release` sozinho não produz o aplicativo que se abre.** Compilado fora do `tauri` CLI, o `exe` serve a
+  `devUrl` do `tauri.conf.json` em vez do `dist` embutido: a janela abre e o CDP devolve
+  `chrome-error://chromewebdata/` com `ERR_CONNECTION_REFUSED` apontando para `http://localhost:1420`, e quem mede sem
+  olhar a URL conclui que "a leitura do Git travou" quando na verdade não há aplicativo nenhum ali. O instalador é
+  **`npm run tauri build`**, e a primeira linha da medição tem de ser `location.href` — que no binário certo devolve
+  `http://tauri.localhost/`. Lido assim nesta rodada, às custas de um `exe` de 19:33 que não servia para nada.
 - **Editar fonte depois de iniciar `npm run tauri build` deixa o `dist/` dentro do instalador defasado.** O bundle lê
   `dist` no fim; se mexeu em `src/` durante a compilação, refaça `npm run build` e compile de novo.
 - **`TaskStop` não mata os filhos** (`cargo`, `rustc`, `node`): confira `Get-Process` antes de assumir que a compilação
   anterior acabou.
 - `cargo fmt` **não** é usado neste projeto — o formato é o do próprio autor, e `cargo fmt` reorganiza tudo.
 
-### 1.1 Estado em um parágrafo (2026-10-21, 15:12)
+### 1.1 Estado em um parágrafo (2026-10-21, 20:05)
 
-Tela e backend: **148** `#[tauri::command]`, 24 arquivos Rust, 11 telas, **308** testes de backend, SQLite em
-`user_version` **11** com **14** tabelas (a nova é `deploy_step_logs`), 45.245 linhas TS/TSX/Rust em **78** arquivos
-(`git ls-files '*.ts' '*.tsx' '*.rs' | xargs wc -l`, com o componente novo contando junto — `src/components/deploy/StepLogs.tsx`,
-106 linhas), sem contar `node_modules`, `target`, `dist` nem `Python/`, que é um venv **não rastreado** — nunca `git add`
-nele). Lido com `git ls-remote origin refs/heads/main`, o remoto está em `1985c391dd9b71a11b5f3a570abf0c0dfc7c3172`, o
-mesmo `git rev-parse HEAD` local no instante desta linha; nada da etapa 6 foi empurrado ainda — o commit é fechado
-depois do texto e a autorização do push é pedida na frase, nunca por extensão de um "sim" anterior. O binário mais novo
-é `src-tauri/target/release/devops-desktop.exe` das **15:05**, `Finished release profile [optimized] target(s) in 5m 27s`
-lido no log da compilação, posterior à última edição de fonte; a janela aberta por ele serve
-`/assets/index-C287853D.js`, o mesmo hash que o `vite` gravou em `dist/assets/` nesta rodada.
+Tela e backend: **148** `#[tauri::command]`, 24 arquivos Rust, 11 telas, **314** testes de backend, SQLite em
+`user_version` **11** com **14** tabelas (a mais nova é `deploy_step_logs`), 45.550 linhas TS/TSX/Rust em **78** arquivos
+(`git ls-files '*.ts' '*.tsx' '*.rs' | xargs wc -l`), sem contar `node_modules`, `target`, `dist` nem `Python/`, que é um
+venv **não rastreado** — nunca `git add` nele. Lido com `git ls-remote origin refs/heads/main`, o remoto está em
+`1985c391dd9b71a11b5f3a570abf0c0dfc7c3172`; localmente a cabeça é `1bb0590827cdefaac838c8f4c2680001b30e5f1d` — a etapa 6,
+**um commit à frente e nada empurrado** —, e o commit desta correção é fechado depois do texto, com a autorização do push
+pedida na frase, nunca por extensão de um "sim" anterior. O binário mais novo é
+`src-tauri/target/release/devops-desktop.exe` das **19:47**, **19.543.040 bytes**, com
+`Finished release profile [optimized] target(s) in 5m 44s` e `CODIGO=0` lidos no log da compilação e as duas embalagens
+geradas (`DevOps Desktop_0.1.0_x64-setup.exe` 4.92 MiB, `…_en-US.msi` 8.21 MiB); ele é posterior à última edição de fonte,
+serve `http://tauri.localhost/` com `/assets/index-C287853D.js` (884.95 kB, gravado às 19:41) e foi essa janela que mediu
+o que está no §2. No banco real: **3** projetos (2 = `E:\ssh-master` em `main`, 3 = piloto com 1 commit, 4 = pasta sem
+Git), **32** corridas com a mais nova sendo a **#54** (`failed`: "o grafo parou: existe nó com dependência que não se
+completa") e `deploy_step_logs` com **2.014 linhas em 7 blocos** de tentativa.
 
-A rodada que fecha aqui é a **etapa 6 do plano CI/CD: o log de etapa persistido e pesquisável.** Antes, a saída de uma
-etapa existia só enquanto a janela estava aberta: o motor emitia até 200 linhas no evento `deploy-log`, a tela mostrava,
-e fechar o aplicativo jogava aquilo fora — sem prova do que uma tentativa falha imprime, não há como conferir um deploy
-depois. Agora a mesma linha que sai no evento é **gravada** (`Ctx::log` → `db::append_step_logs`), na mesma ordem,
-depois de passar por `Secrets::mask` + `audit::scrub_secrets`, em blocos por tentativa `(run_id, position, attempt, seq)`
-— a repetição de um nó **não sobrescreve** o bloco da tentativa anterior. A leitura é uma porta só
-(`pipeline::step_logs` → `pipeline_step_logs`) e serve as duas janelas: o painel **Saída da etapa** no cartão do deploy e
-qualquer consulta depois. O teto é do motor: **2.000 linhas por tentativa**, e quem passa disso ganha uma última linha
-`system` dizendo o corte — nunca um silêncio. A busca é `LIKE` **com parâmetro ligado** (nada de concatenação), e o tope
-é **por bloco de tentativa**, porque um bloco cheio não pode esconder o bloco seguinte nem a linha que declara o corte.
+A rodada que fecha aqui é a correção que a queixa dele pediu: **"o verificar do Git para ver o histórico fica
+verificando" num HD/SSD externo — gira para sempre, sem erro.** Três leituras rodavam sem prazo nenhum: o
+`git show <rev>:<caminho>` de cada blob (`.output()`, chamado uma vez por arquivo preparado na checagem de segredos), a
+sondagem da pasta (perguntava `.git` no disco e rodava `git` sem prazo) e a resolução do caminho, que fazia
+`metadata()` **e** `canonicalize()` — as duas chamadas que esperam o volume **dentro do kernel** — na thread do runtime
+assíncrono. Hoje: todo `git` sai de uma porta só (`git::abrir`) e é colhido com prazo (`sshexec::collect_bytes`);
+`sonde`, `blob_at`, `index_blob` e `is_repo` têm **três estados** — respondeu um valor, respondeu que não tem, **não
+respondeu** — e o `Err` é propagado, nunca convertido em "sem branch", "não é repositório" ou varredura de segredos limpa;
+a espera pelo disco (`git_probe::com_prazo`, 20 s) roda em thread auxiliar e é abandonada com o motivo; normaliza-se com
+`std::path::absolute`, que é léxica, em vez de `canonicalize()`; e o trabalho de disco saiu da thread assíncrona
+(`git_read`/`git_write`, `scan_project_secrets`, `git_clone`, `analysis_executar`, `open_in_editor` resolvem a pasta
+**dentro** do `spawn_blocking`). Detalhe que era o defeito escondido: a colheita dormia um passo fixo de 200 ms, e um
+prazo de 1 ms acordava depois dele e colhia o processo como se tivesse respondido a tempo — agora dorme **só o que
+falta** para o prazo. §5, item 34; texto e medições no §2.
 
 O que não pode ser revertido ao mexer aqui (lista completa no §5): **não existe segundo motor de deploy** — a tela e o
 nó do grafo chamam a mesma `analysis::executar` / `deploy::start`, e o veredito é contagem contra `severity_gate`,
@@ -71,7 +85,8 @@ explicativa (caminhos e passo a passo vivem neste documento e no README); segred
 **valores de variáveis nunca vão para disco, log ou Histórico** — retratos de versão carregam só nomes; **a gravação do
 log vem depois da máscara, nunca antes** (§5, item 31); cada tentativa é um bloco separado, e nada é apagado quando o
 nó repete (§5, item 30); o corte é declarado, não escondido (§5, item 32); sonda nomeia "sem resposta" separadamente de
-"não encontrado" e tem prazo próprio; nada é simulado, nenhum botão é enfeite; uma mecânica por módulo — e uma mecânica
+"não encontrado" e tem prazo próprio, e **nenhuma leitura de Git ou de caminho roda sem prazo** — o "não respondeu" é
+propagado como erro, jamais lido como "não existe", "sem branch" ou varredura limpa (§5, item 34); nada é simulado, nenhum botão é enfeite; uma mecânica por módulo — e uma mecânica
 servida por **duas portas** (a tela e o nó do grafo), não por duas implementações; ferramentas funcionam **sem servidor
 e sem conta de serviço**; `working_dir` local fica contido na raiz do projeto; aprovação manual nunca é presumida; senha
 SSH via `SSH_ASKPASS` por operação, jamais persistida; aviso de compilador é corrigido na causa, sem `#[allow(...)]`.
@@ -85,12 +100,19 @@ máquina: `git commit && git push` na mesma linha é bloqueado (são chamadas se
 reunem-se com `git reset --soft`. A janela é pilotada por `scripts/ponte-cdp.mjs` (§4.1); `npm run tauri dev` não roda
 (porta 1420 presa por um Vite de sessão anterior).
 
-O que falta, no curto prazo: o aceite visual desta etapa — abrir **Deploy → um execução do histórico → Saída da etapa** e
-julgar se os blocos por tentativa e a busca servem — e o aceite das entregas anteriores em **Análise → Sondar ferramenta /
-Conferir regras → Histórico com o filtro** *Análise*, a corrida **#6**, os cartões de Deploy **#45/#46** e a corrida
-travada pelo gate **#47/#48**; e as pendências do plano (triggers, ambientes com aprovação registrada, retry configurável,
-revalidação SSH e os executores Docker/Compose/PM2 contra um daemon/host real) em §6. As lacunas honestas do "canivete"
-estão em §7.
+O que falta, no curto prazo: **repetir esta medição no disco externo de verdade** — nesta máquina não há volume USB
+(`Get-PhysicalDisk` devolve três SSDs internos: `KINGSTON SNV3S1000G` de 1 TB, `SA400S37240G` de 240 GB e
+`SA400S37120G` de 120 GB), então o que se mediu na janela foi "toda leitura responde, e responde com motivo"; a frase do
+abandono (`não respondeu em 20 s`) só existe provada por teste de unidade
+(`uma_sondagem_lenta_e_abandonada_com_o_motivo`) e precisa ser lida na tela dele, no HD que ele usa para testar (§6,
+linha 8). Faltam também os três `canonicalize()` nus que sobraram em `analysis.rs` e `deploy.rs` (§6, linha 9) e o
+`ssh-add -l` sem prazo da descoberta de chaves (`ssh_config::read_agent`, §6 linha 10) — fora do escopo pedido, que era
+das três leituras de Git —, e o aceite visual da etapa 6: abrir **Deploy → uma execução do
+histórico → Saída da etapa** e julgar se os blocos por tentativa e a busca servem, além dos aceites anteriores em
+**Análise → Sondar ferramenta / Conferir regras → Histórico com o filtro** *Análise*, a corrida **#6**, os cartões de
+Deploy **#45/#46** e a corrida travada pelo gate **#47/#48**. As pendências do plano (triggers, ambientes com aprovação
+registrada, retry configurável, revalidação SSH e os executores Docker/Compose/PM2 contra um daemon/host real) estão em
+§6; as lacunas honestas do "canivete", em §7.
 
 ## 2. Estado verificado em 2026-10-10 … 15 (resultado lido, não presumido)
 
@@ -145,6 +167,8 @@ portas acima. A corrida de análise do mesmo segundo (**#11**) diz `tool "embuti
 | Git, etapa 5 (lido às 20:23) | o **primeiro push foi recusado** pelo GitHub: `! [remote rejected] main -> main (push declined due to repository rule violations)`, com `ls-remote` ainda em `df60996…` — o protetor de segredos do repositório viu num fixture de teste uma chave live de verdade (forma, não conteúdo; §5 item 26). Corrigido o fixture na causa, os commits locais reunidos em um só (`git reset --soft`, nenhum trabalho perdido) e então: `git push origin main` → **`df60996..5f4df6f`**, e `git ls-remote origin refs/heads/main` devolve `5f4df6fd882981a0c7c068fa7940f436d9e7ca14`, igual ao `git rev-parse HEAD` local. A **etapa 5 está pública**, autorizada por ele na pergunta desta conversa ("Empurrar agora") |
 | Git, etapa 6 (lido às 15:12, antes do commit desta rodada) | `git rev-parse HEAD` e `git ls-remote origin refs/heads/main` devolvem o mesmo `1985c391dd9b71a11b5f3a570abf0c0dfc7c3172` — o empurrão que ele autorizou na mensagem de aprovação da etapa chegou, e a conferência foi feita **depois** do push, como pedido. O commit que grava a etapa 6 (código + testes + estas linhas) **fica local** até a autorização ser pedida na frase; nada aqui foi empurrado por extensão de um "sim" anterior |
 | Git, fechamento do gate (lido às 20:53) | `git push origin main` → **`5f4df6f..94344ae`** (o commit de docs `5d62e1a` foi junto), e `git ls-remote origin refs/heads/main` devolve `94344ae0a661d94a9f1e7c8a67ddd70934a108b3`, o mesmo `git rev-parse HEAD` local — a medição do §6 item 7 e a correção do §5 item 27 estão em <https://github.com/DouglasGDev/devops-desktop>. Autorizada por ele na mesma frase: "terminando o teste, publique no github" |
+| **Loop desta rodada** (lido 19:2x → 19:5x) | `cargo test --lib` → **`314 passed; 0 failed; 0 ignored; 0 measured; finished in 20.09s`** (relido depois de todas as edições, inclusive da mudança de três estados no `is_repo`; eram **308** antes da rodada). Os seis testes novos, cada um lido pelo nome antes de entrar na contagem: `a_leitura_de_blob_devolve_conteudo_ausencia_e_sem_resposta` e `a_sondagem_devolve_ausencia_e_nunca_confunde_com_sem_resposta` (`git.rs:1963`/`git.rs:2004`), `uma_sondagem_lenta_e_abandonada_com_o_motivo` e `sonda_distinge_pasta_sem_git_de_pasta_que_nao_respondeu` (`git_probe.rs:108`/`:130`), `uma_leitura_impossivel_para_a_varredura_em_vez_de_devolver_limpo` (`security.rs:709`) e `uma_espera_e_dita_na_unidade_que_faz_sentido` (`sshexec.rs:449`). `cargo clippy --all-targets -- -D warnings` → `Finished dev profile` **sem uma linha de `warning`**; foi assim que saíram os dois achados da rodada (o `iter().copied().collect()` do `sonde` e o `match`→`unwrap_or_default()` da colheita de bytes), nenhum com `#[allow]`. O frontend foi verificado **dentro** do `npm run tauri build`: `tsc --noEmit && vite build` → `✓ built in 5.36s`, `dist/assets/index-C287853D.js` **884.95 kB** (gzip 240.18 kB) às 19:41, com o único aviso sendo o de chunk > 500 kB. `node scripts/confira-repo.ts` → `todas as 9 formas conferem`. O binário: `Finished release profile [optimized] target(s) in 5m 44s`, `Built application at: …\release\devops-desktop.exe`, `Finished 2 bundles at:` (nsis **4.92 MiB**, msi **8.21 MiB**), `CODIGO=0`, arquivo de **19.543.040 bytes** às **19:47** — posterior à última edição de fonte. Diff desta rodada: **7 arquivos, +467/−133** (`git diff --cached --shortstat`): `git.rs` +171/−52, `git_probe.rs` +106/−28, `sshexec.rs` +63/−11, `commands.rs` +55/−28, `security.rs` +36/−7, `README.md` +11/−6, `docs/ENTREGAS.md` |
+| **Nenhuma leitura de Git ou de caminho sem prazo, na janela real** (CDP no exe das 19:47) | As nove chamadas do `reload()` da aba Git e as duas checagens de segredo **resolvem todas**, com o tempo lido dentro da própria janela: `git_status(2)` **1.031 ms** (14 arquivos, `ahead 1` sobre `origin/main`), `git_graph(2, 200, true)` **412 ms** com **43** linhas, `git_identity` 618 ms, `git_branches` 618 ms, `git_tags` 413 ms, `git_remotes` 822 ms, `git_stash_list` 411 ms, `git_secret_check(index)` **1.860 ms** lendo os **7 blobs preparados** (7 achados) e `git_secret_check(push)` **3.508 ms** (8 achados). A porta dos blobs, que era a que rodava sem prazo: `git_tree(2)` 413 ms com 154 entradas · `git_file_content(git.rs)` **411 ms**, `text` com **124.004** caracteres e `truncated: false` · `git_file_content(icon.png)` 409 ms devolvendo `text: null` com a nota `arquivo binário — não há texto para mostrar` · `git_file_content(nao-existe.txt)` 411 ms devolvendo **ausência respondida** — `ssh-master: o Git não tem nao-existe.txt no HEAD atual` — e não um conteúdo vazio · `git_commit_detail(2, HEAD)` 1.022 ms. A sondagem com prazo pelo caminho do projeto: `refresh_project(3)` **626 ms** → `is_git_repo true`, `git_branch "main"`, `git_remote null`. Pasta que não é repositório: `git_status(4)` → `Piloto Etapa 5 não é um repositório Git — use a seção de projetos para abrir uma pasta com repositório`, ou seja, o "não" que o git respondeu. Caminhos que não há o que consultar: `add_project("Z:\repo-externo")` → **3 ms** com `a pasta Z:\repo-externo não pôde ser acessada: O sistema não pode encontrar o caminho especificado. (os error 3)`; `add_project("\\nao-existe-devops\repo")` → **1.273 ms** com `O caminho da rede não foi encontrado. (os error 53)`; nenhuma das duas inseriu projeto (`list_projects` continua em **3**), porque a sondagem vem antes do `insert_project` — e é por isso que o caso "existe, mas não acorda" segue em §6 linha 8. **A tela que ele descreveu:** clique em **Atualizar** com o projeto 2 selecionado → o rótulo `Lendo o repositório…` está no DOM 250 ms depois do clique e **sumiu** quatro segundos depois; a seção **Histórico** renderiza as linhas com hash (`1bb0590`, `1985c39`, `7a0d865`) sem nenhum `Lendo o…`/`Atualizando as…` preso. O spinner nunca foi o defeito — o `finally` do `guard()` sempre limpou; o que não existia era a promessa resolver. Nota de leitura para a próxima vez que alguém rodar a checagem aqui: os 7 achados do índice são `sk_live_`, `ghp_`, `AKIA…`, bloco de chave privada e cabeçalho Bearer em `security.rs` (os **fixtures do próprio scanner**) mais `docs/ENTREGAS.md` (que cita essas formas) e `commands.rs` ("atribui um valor a `password`") — falsos positivos de forma, não desta rodada, e o commit desta correção foi fechado por `git` na linha de comando, onde o painel não atua |
 
 O que isso **não** cobre: as asserções automáticas continuam sendo de backend — o piloto de interface (§4.1) dirige a
 janela de verdade, mas quem decide o que está certo a cada leitura sou eu, não uma suíte de testes de UI. O caminho por
@@ -611,12 +635,34 @@ Estas vieram do SPEC e de correções explícitas do Douglas; reverter qualquer 
     voltarem como saíram. Travado por `a_mascara_nao_achata_as_linhas_da_saida`, que compara a string mascarada com o
     texto que `ssh -vvv` produziria — inclusive a linha em branco e o recuo de quatro espaços. Foi um teste desta etapa
     que o encontrou: `o_valor_da_variavel_nao_chega_ao_log_gravado` esperava quatro linhas e recebeu uma.
+34. **Nenhuma leitura de Git ou de caminho roda sem prazo — e "não respondeu" nunca é lido como "não existe".** A
+    regra já existia no texto (`git -C` sempre teve 30 s/10 min); o que esta rodada corrigiu é que **três leituras
+    passavam por fora dela** e giravam para sempre: `git show <rev>:<caminho>` nos blobs (`read_blob`, chamado **uma vez
+    por arquivo staged** na checagem de segredos), a sondagem de pasta (`git_probe::probe`, que ainda perguntava
+    `.git` no disco e rodava `git` com `.output()` sem prazo) e a resolução do caminho (`canonical_dir`, que fazia
+    `metadata()` **e** `canonicalize()` — as duas chamadas que esperam o volume dentro do kernel) **na thread do runtime
+    assíncrono**. Contra um disco externo adormecido nenhuma delas devolvia nada, e a tela, que limpa o próprio spinner
+    no `finally`, ficava girando sem erro. Hoje: todo processo de git sai de **uma única porta** (`git::abrir`) e é
+    colhido por `sshexec::collect_bytes` com prazo; `sonde`, `blob_at`, `index_blob` e `is_repo` têm **três estados** —
+    `Some`/`Ok(...)` = respondeu, `Ok(None)`/`false` = respondeu que não tem, `Err` = **não respondeu** — e o `Err` é
+    propagado, nunca convertido em "sem branch", "sem remoto", "não é repositório" ou, na checagem de segredos, em
+    varredura limpa (`head_findings`/`index_findings` agora devolvem `Result`). `canonical_dir` espera o disco numa thread
+    auxiliar e abandona a espera com o motivo (`git_probe::com_prazo`, 20 s), e normaliza com `std::path::absolute`, que
+    é **léxica** e não pergunta nada ao volume, em vez de `canonicalize()`. O trabalho de disco saiu da thread
+    assíncrona: `git_read`/`git_write` resolvem o projeto **dentro** do `spawn_blocking`, e o mesmo vale para
+    `scan_project_secrets`, `git_clone`, `analysis_executar` e o `open_in_editor` (que ainda resolve o caminho real para
+    conferir o contenimento, só que pela sondagem com prazo). A colheita dorme **só o tempo que falta** para o prazo, não
+    o passo fixo de 200 ms — com o passo fixo, um prazo de 1 ms acordava depois dele e colhia o processo como se tivesse
+    respondido a tempo. Isso está travado por `a_leitura_de_blob_devolve_conteudo_ausencia_e_sem_resposta`,
+    `a_sondagem_devolve_ausencia_e_nunca_confunde_com_sem_resposta`, `uma_sondagem_lenta_e_abandonada_com_o_motivo`,
+    `sonda_distinge_pasta_sem_git_de_pasta_que_nao_respondeu`, `uma_leitura_impossivel_para_a_varredura_em_vez_de_devolver_limpo`
+    e `uma_espera_e_dita_na_unidade_que_faz_sentido`.
 
 ## 6. Pendências assumidas (com o primeiro passo de cada)
 
 | # | Pendência | Primeiro passo concreto |
 | --- | --- | --- |
-| 0 | **Dados do piloto das etapas 2, 3, 4, 5 e 6, ainda cadastrados de propósito** | O projeto **Piloto Etapa 2** (`%TEMP%\piloto-etapa2`) com a definição *Piloto sem servidor* **v22** e as execuções **#23–#53** continuam no cadastro para ele abrir a janela e ver as telas conferidas — a v22 é o grafo de oito nós lido hoje por `pipeline_nodes` e impresso por `pipeline_validate` (`validar, git, coleta, preparo, publicar, gate, copia, historico` · `motor 6 · comando 1 · aprovação 1 · git 0 · análise 0`, com `preparo` de volta a `echo preparo` e `secret_keys` **[]**), a #34 é a corrida em que `preparo` falha e trava o resto, a #38/#39 são as duas execuções de nó sozinho lidas no binário final (`preparo` → "1 comando(s) nesta máquina", `gate` → "aprovado na janela"), a **#42/#43** são as duas execuções do nó git (uma `tag` que criou `v0.0.1-janela` de verdade no piloto e uma `checkout main` que respondeu "em main"), a **#44/#45/#46** são as três execuções do nó `analise` pelo mesmo motor (falha por ferramenta ausente, sucesso com o semgrep 1.181.0, sucesso com o embutido) e a **#49 a #53** são as cinco da etapa 6: **#49** guarda o `%CHAVE_PILOTO%` **literal** (a evidência crua do defeito que a corrigiu), **#50** guarda `envio ***`, **#51** é o nó com `retry_limit` 1 que falhou duas vezes e deixou **dois blocos**, **#52** é o laço de 2.500 ecos com o corte declarado na última linha, e **#53** é o `preparo` rodado sozinho depois do reopen — as cinco continuam no banco porque é nelas que a tela **Saída da etapa** se confere. O projeto **Piloto Etapa 5** (`%TEMP%\piloto-etapa5`, com `app.py`, `src/legado.php` e `src/servidor.js` — três arquivos,
+| 0 | **Dados do piloto das etapas 2, 3, 4, 5 e 6, ainda cadastrados de propósito** | O projeto **Piloto Etapa 2** (`%TEMP%\piloto-etapa2`) com a definição *Piloto sem servidor* **v22** e as execuções **#23–#54** (32 no total, lidas em `deploy_runs` nesta rodada) continuam no cadastro para ele abrir a janela e ver as telas conferidas — a mais nova, **#54**, é o perfil 22 em `failed` com `o grafo parou: existe nó com dependência que não se completa`, `definition_version 2`, `commit_sha` nulo e **duas** linhas gravadas no bloco `(run 54, posição 1, tentativa 1)`: `+ análise de código é embutido — corte ERROR` e `3 arquivo(s) lido(s) — 14 achado(s): 9 erro, 4 aviso, 1 info` — a prova de que o grafo para **e** o que a etapa imprimiu fica no banco; a v22 é o grafo de oito nós lido hoje por `pipeline_nodes` e impresso por `pipeline_validate` (`validar, git, coleta, preparo, publicar, gate, copia, historico` · `motor 6 · comando 1 · aprovação 1 · git 0 · análise 0`, com `preparo` de volta a `echo preparo` e `secret_keys` **[]**), a #34 é a corrida em que `preparo` falha e trava o resto, a #38/#39 são as duas execuções de nó sozinho lidas no binário final (`preparo` → "1 comando(s) nesta máquina", `gate` → "aprovado na janela"), a **#42/#43** são as duas execuções do nó git (uma `tag` que criou `v0.0.1-janela` de verdade no piloto e uma `checkout main` que respondeu "em main"), a **#44/#45/#46** são as três execuções do nó `analise` pelo mesmo motor (falha por ferramenta ausente, sucesso com o semgrep 1.181.0, sucesso com o embutido) e a **#49 a #53** são as cinco da etapa 6: **#49** guarda o `%CHAVE_PILOTO%` **literal** (a evidência crua do defeito que a corrigiu), **#50** guarda `envio ***`, **#51** é o nó com `retry_limit` 1 que falhou duas vezes e deixou **dois blocos**, **#52** é o laço de 2.500 ecos com o corte declarado na última linha, e **#53** é o `preparo` rodado sozinho depois do reopen — as cinco continuam no banco porque é nelas que a tela **Saída da etapa** se confere. O projeto **Piloto Etapa 5** (`%TEMP%\piloto-etapa5`, com `app.py`, `src/legado.php` e `src/servidor.js` — três arquivos,
 que é o `filesScanned` lido das corridas dele) é o que tem código varrerável, e desde a medição do gate ele **tem**
 modelo de deploy: perfil 22 *Gate de análise*, destino `%TEMP%\piloto-etapa5-publicado` (que ficou inexistente de
 propósito — a publicação foi barrada antes de copiar), definição **v2** com o grafo de dois nós `varredura` →
@@ -653,6 +699,9 @@ nesta etapa`. Eu li os três estados na janela real (§2), mas "os blocos por te
 distintas" é julgamento dele, não meu |
 | 7 | **Ver o motor *bloquear* uma publicação pelo corte da análise, na janela — FECHADA em 2026-10-15** | Estava listada porque a regra só tinha prova de teste unitário. Foi medida na janela real: perfil 22 *Gate de análise* no `piloto-etapa5`, grafo `varredura` (nó `analise`, corte `ERROR`) → `depois-do-gate`, execuções **#47** e **#48** `failed` com a contagem 9/4/1 citada na linha do nó, o nó seguinte `skipped` e a pasta de destino **nunca criada** — tudo lido em `deploy_run`/`analysis_corridas`/`analysis_pacote`, linha por linha no §2. O que ela revelou de quebra (o prefixo `\\?\` na mensagem e no pacote) virou o §5, item 27, com teste novo |
 | 6 | **Revalidar o deploy por SSH num host real — e pela primeira vez com um executor de runtime** | Além de `build_step`/`identify_step`, a etapa 2 mexeu no caminho com servidor: `validate_remoto` agora chama `deploy::checar_definicao(..., Some(&servidor))` e `insert_run` passou a receber a procedência. As checagens remotas foram movidas verbatim e `server_ref()` continua sendo a primeira delas, então por construção o remoto não muda — mas "por construção" sem medir num host é presunção. **A etapa 4 amplia essa pendência em vez de criar outra:** Docker, Compose e PM2 só rodo no servidor, e o que foi conferido aqui é o roteiro gerado e a recusa da tela, nunca um container subindo de verdade. Primeiro passo: cadastrar um servidor, repetir C/D com `server_id` preenchido conferindo que a etapa 1 recusa o que recusava antes, e então publicar **uma** aplicação real com `docker` (o caminho completo: build da imagem no servidor, container novo no ar, `previous_image` gravada, reversão voltando a imagem anterior) e, se houver, uma com `pm2`. Nesta máquina isso não tem como: o `docker` 29.3.1 existe mas a daemon do Docker Desktop está parada, e `pm2` não está instalado |
+| 8 | **Conferir o prazo contra o disco externo de verdade — na máquina dele** | A correção está medida por teste (a espera abandonada, os três estados de cada leitura) e por janela nesta máquina, mas **sem volume externo para consultar**: `Get-PhysicalDisk` devolve três SSDs internos (`KINGSTON SNV3S1000G` 1.000.204.886.016 B, `SA400S37240G` 240.057.409.536 B, `SA400S37120G` 120.033.041.920 B) e o campo `Bus` volta vazio, então o que a janela provou aqui foi "toda leitura responde, e responde com motivo" — inclusive as duas pastas mortas (`Z:\repo-externo` em 3 ms e `\\nao-existe-devops\repo` em 1.273 ms), que o Windows recusa antes de qualquer prazo. Falta o caso real: abrir a pasta num externo **adormecido** e ler a frase que volta — `a pasta F:\… não respondeu em 20 s — o disco pode estar adormecido, desconectado ou com a letra trocada` para o caminho, ou `o git não respondeu em 30 s e foi interrompido — … ou um disco externo que ainda não acordou` para a leitura do git. Primeiro passo: cadastrar o projeto no externo, abrir **Git**, e dizer qual das duas frases apareceu (isso diz se o que estava preso era o `stat` do caminho ou o `git show` do blob) |
+| 9 | **Três `canonicalize()` nus fora da aba Git** | Lidos no código desta rodada, **não corrigidos** porque o pedido foi consertar as três leituras do Git e estes ficam em outro módulo: `analysis::executar` (`analysis.rs:1307` e `:1310`, a raiz da varredura e o alvo, já dentro da thread bloqueante, mas sem prazo) e `deploy::publicar_local` (`deploy.rs:1418` e `:1421`, a contenção do destino). Contra um externo adormecido eles prendem a corrida/varredura em "em andamento" em vez de devolver o motivo — o `cancel` cooperativo não alcança uma chamada presa no kernel. Primeiro passo: passar cada um pela mesma `git_probe::com_prazo` (a porta já existe e é `pub(crate)`) e conferir que a varredura e a publicação devolvem o motivo |
+| 10 | **`ssh-add -l` também roda sem prazo — e um `Err` dele hoje é lido como "não está no PATH"** | Lido ao varrer o resto do código depois das três correções: `ssh_config::read_agent` (`ssh_config.rs:361`) faz `crate::proc::command("ssh-add").arg("-l").output()` — `.output()`, sem prazo — e chama de dentro da descoberta (`ssh_config.rs:459`). Um `agent` preso (smartcard pedindo pin, socket pendurado, `SSH_AUTH_SOCK` apontando para algo morto) segura a varredura inteira, e o `Err(_) =>` devolve `available: false` com a nota **"ssh-add não encontrado no PATH"**, que é exatamente a confusão que o §5, item 34 proíbe: "não respondeu" dito como "não existe". Não foi corrigido nesta rodada porque o pedido foi das três leituras do Git, e estas são de outro módulo, com outro dono. Primeiro passo: colher pelo mesmo `sshexec::collect` com um prazo curto (2 s basta para um agent vivo), e separar as três respostas — `Not found` (não está no PATH), `sem resposta` (o agent não falou) e a lista vazia com código 1 (agent vivo, nenhuma chave) |
 
 ## 7. Lacunas honestas do "canivete suíço" (ainda NÃO existe)
 

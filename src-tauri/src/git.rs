@@ -9,7 +9,7 @@
 use std::{
     io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::atomic::AtomicBool,
     time::Duration,
 };
@@ -225,41 +225,59 @@ fn prazo_dos(args: &[&str]) -> Duration {
 
 /// Texto do prazo que venceu, na unidade que faz sentido para o valor.
 fn prazo_expirado(args: &[&str], prazo: Duration) -> String {
-    let minutos = prazo.as_secs() / 60;
-    let duracao = if minutos >= 1 {
-        format!("{minutos} min")
-    } else {
-        format!("{} s", prazo.as_secs())
-    };
+    let duracao = crate::sshexec::texto_duracao(prazo);
     let motivo = if pela_rede(args) {
         "pode ser o remoto lento ou uma credencial que o git não pode pedir (GIT_TERMINAL_PROMPT=0)"
     } else {
-        "pode ser um índice travado por outro git, um hook parado ou o antivírus segurando a pasta"
+        "pode ser um índice travado por outro git, um hook parado, o antivírus segurando a pasta \
+         ou um disco externo que ainda não acordou"
     };
     format!("o git não respondeu em {duracao} e foi interrompido — {motivo}")
 }
 
-/// Roda o git com prazo. `entrada` alimenta a stdin (pathspecs e patches).
-///
-/// Toda execução de git do aplicativo passa por aqui: um processo que não
-/// termina é interrompido e devolvido como erro legível, nunca como tela
-/// girando para sempre.
-fn executar(dir: &Path, shown: &[&str], prazo: Duration, entrada: Option<&[u8]>) -> Result<String, String> {
+/// Abre o processo do git com os canos ligados, sem esperar por ele. A mensagem de
+/// "git ausente" é uma só porque toda leitura e toda mutação passam por aqui.
+fn abrir(dir: &Path, shown: &[&str], entrada: bool) -> Result<Child, String> {
     let mut cmd = base_cmd(dir);
-    if entrada.is_some() {
+    if entrada {
         cmd.stdin(Stdio::piped());
     }
-    let mut child = cmd
-        .args(shown)
+    cmd.args(shown)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => {
-                "o git não foi encontrado no PATH — instale o Git para usar esta seção".to_string()
-            }
-            _ => format!("não foi possível executar o git: {e}"),
-        })?;
+        .stderr(Stdio::piped());
+    cmd.spawn().map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => {
+            "o git não foi encontrado no PATH — instale o Git para usar esta seção".to_string()
+        }
+        _ => format!("não foi possível executar o git: {e}"),
+    })
+}
+
+/// Sondagem de leitura, com os três estados: `Some(texto)` quando o git respondeu
+/// e tinha a informação, `None` quando respondeu que não tem, `Err` quando
+/// **não respondeu** a tempo. "Não sei" não é "não existe": uma pasta em disco
+/// externo que acorda devagar devolve o motivo, e nunca um vazio que a tela leria
+/// como "sem branch", "sem remoto" ou "sem nada para checar".
+pub fn sonde(dir: &Path, args: &[&str], prazo: Duration) -> Result<Option<String>, String> {
+    let mut child = abrir(dir, args, false)?;
+    let feito = crate::sshexec::collect_bytes(&mut child, prazo, &AtomicBool::new(false));
+    if feito.timed_out || feito.cancelled {
+        return Err(prazo_expirado(args, prazo));
+    }
+    if feito.exit_code != Some(0) {
+        return Ok(None);
+    }
+    let texto = String::from_utf8_lossy(&feito.stdout).trim().to_string();
+    Ok(if texto.is_empty() { None } else { Some(texto) })
+}
+
+/// Roda o git com prazo. `entrada` alimenta a stdin (pathspecs e patches).
+///
+/// Toda execução de git do aplicativo sai de `abrir` e é colhida com prazo: um
+/// processo que não termina é interrompido e devolvido como erro legível, nunca
+/// como tela girando para sempre.
+fn executar(dir: &Path, shown: &[&str], prazo: Duration, entrada: Option<&[u8]>) -> Result<String, String> {
+    let mut child = abrir(dir, shown, entrada.is_some())?;
     if let Some(dados) = entrada {
         let stdin = child
             .stdin
@@ -377,7 +395,7 @@ pub const LIMITE_CONTEUDO: usize = 512 * 1024;
 /// caminho — por isso um arquivo modificado mostra o texto do commit, e a
 /// diferença aparece no diff.
 pub fn file_content(dir: &Path, path: &str) -> Result<FileContent, String> {
-    let bruto = blob_at(dir, "HEAD", path)
+    let bruto = blob_at(dir, "HEAD", path)?
         .ok_or_else(|| format!("o Git não tem {} no HEAD atual", path))?;
     if bruto.iter().take(8_000).any(|b| *b == 0) {
         return Ok(FileContent {
@@ -424,29 +442,41 @@ pub fn untrack(dir: &Path, path: &str) -> Result<(), String> {
 }
 
 /// Conteúdo de um caminho exatamente como uma revisão o guarda
-/// (`git show <rev>:<caminho>`). `None` quando a revisão não tem o arquivo —
-/// é isso que diz ao verificador de segredos que uma exclusão staged não
-/// publica conteúdo novo.
-pub fn blob_at(dir: &Path, rev: &str, path: &str) -> Option<Vec<u8>> {
-    validate_id(rev).ok()?;
-    validate_path(path).ok()?;
+/// (`git show <rev>:<caminho>`). `Ok(None)` quando a revisão não tem o arquivo —
+/// é isso que diz ao verificador de segredos que uma exclusão staged não publica
+/// conteúdo novo. `Err` é o git **não ter respondido** a tempo, que nunca é `None`.
+pub fn blob_at(dir: &Path, rev: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
+    validate_id(rev)?;
+    validate_path(path)?;
     read_blob(dir, &format!("{rev}:{path}"))
 }
 
 /// Conteúdo exatamente como está no índice (`git show :<caminho>`), ou seja, o
 /// que o próximo commit vai publicar.
-pub fn index_blob(dir: &Path, path: &str) -> Option<Vec<u8>> {
-    validate_path(path).ok()?;
+pub fn index_blob(dir: &Path, path: &str) -> Result<Option<Vec<u8>>, String> {
+    validate_path(path)?;
     read_blob(dir, &format!(":{path}"))
 }
 
-fn read_blob(dir: &Path, spec: &str) -> Option<Vec<u8>> {
-    let output = base_cmd(dir).args(["show", spec]).output().ok()?;
-    if output.status.success() {
-        Some(output.stdout)
-    } else {
-        None
+fn read_blob(dir: &Path, spec: &str) -> Result<Option<Vec<u8>>, String> {
+    ler_blob_com_prazo(dir, spec, PRAZO_LOCAL)
+}
+
+/// A leitura do blob com o prazo à vista. Um `git show` numa pasta de disco
+/// externo adormecido pode não voltar nunca; `.output()` sem prazo deixava a
+/// interface girando para sempre e, na checagem de segredos, o silêncio virava
+/// veredito limpo.
+fn ler_blob_com_prazo(dir: &Path, spec: &str, prazo: Duration) -> Result<Option<Vec<u8>>, String> {
+    let shown = ["show", spec];
+    let mut child = abrir(dir, &shown, false)?;
+    let feito = crate::sshexec::collect_bytes(&mut child, prazo, &AtomicBool::new(false));
+    if feito.timed_out || feito.cancelled {
+        return Err(prazo_expirado(&shown, prazo));
     }
+    if feito.exit_code == Some(0) {
+        return Ok(Some(feito.stdout));
+    }
+    Ok(None)
 }
 
 /// Caminhos que um push publicaria e o remoto ainda pode não ter: o que foi
@@ -1861,10 +1891,13 @@ pub fn commit_parent(dir: &Path, id: &str) -> Option<String> {
     if parent.is_empty() { None } else { Some(parent) }
 }
 
-pub fn is_repo(dir: &Path) -> bool {
-    run(dir, &["rev-parse", "--is-inside-work-tree"])
-        .map(|s| s.trim() == "true")
-        .unwrap_or(false)
+/// A pasta está dentro de um repositório Git? Os três estados de `sonde` valem
+/// aqui: `Ok(true)`/`Ok(false)` é o git tendo respondido, `Err` é ele **não ter
+/// respondido** — que jamais pode virar "não é repositório", mensagem que a tela
+/// mostraria sobre um disco externo ainda adormecido.
+pub fn is_repo(dir: &Path) -> Result<bool, String> {
+    let dentro = sonde(dir, &["rev-parse", "--is-inside-work-tree"], PRAZO_LOCAL)?;
+    Ok(dentro.as_deref() == Some("true"))
 }
 
 /// O commit que a pasta aponta agora. É o que uma execução de pipeline registra
@@ -1924,6 +1957,88 @@ mod tests {
         let decorrido = antes.elapsed();
         assert!(erro.contains("não respondeu em 3 s"), "mensagem: {erro}");
         assert!(decorrido < Duration::from_secs(20), "o prazo não valiu: {decorrido:?}");
+    }
+
+    #[test]
+    fn a_leitura_de_blob_devolve_conteudo_ausencia_e_sem_resposta() {
+        // As três respostas possíveis de uma leitura: o texto, "não tem este
+        // arquivo" e "não respondeu". A segunda e a terceira nunca podem ser a
+        // mesma coisa, porque o verificador de segredos lê `None` como "nada a
+        // checar" — e um disco externo adormecido não é "nada a checar".
+        let dir = temp_repo("blob-3estados");
+        write(&dir, "a.txt", "conteúdo do a\n");
+        stage(&dir, &["a.txt".into()]).unwrap();
+
+        // Antes do primeiro commit o git responde, com erro, que não há HEAD:
+        // isso é ausência dita, não silêncio.
+        assert!(blob_at(&dir, "HEAD", "a.txt")
+            .expect("o git respondeu")
+            .is_none());
+
+        commit(&dir, "base", false).unwrap();
+        let conteudo = blob_at(&dir, "HEAD", "a.txt")
+            .expect("o git respondeu")
+            .expect("o HEAD tem a.txt");
+        assert_eq!(String::from_utf8_lossy(&conteudo), "conteúdo do a\n");
+
+        let no_indice = index_blob(&dir, "a.txt").expect("o git respondeu").expect("staged");
+        assert_eq!(String::from_utf8_lossy(&no_indice), "conteúdo do a\n");
+
+        assert!(blob_at(&dir, "HEAD", "nao-existe.txt")
+            .expect("respondeu que não tem")
+            .is_none());
+        assert!(index_blob(&dir, "nao-existe.txt")
+            .expect("respondeu que não tem")
+            .is_none());
+
+        // Prazo menor que o tempo de o git acordar: a leitura devolve o motivo
+        // em vez de deixar a chamada pendurada para sempre.
+        let sem_resposta = ler_blob_com_prazo(&dir, "HEAD:a.txt", Duration::from_millis(1))
+            .expect_err("1 ms não é resposta, é prazo");
+        assert!(sem_resposta.contains("não respondeu em 1 ms"), "{sem_resposta}");
+        assert!(sem_resposta.contains("disco externo"), "{sem_resposta}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sondagem_devolve_ausencia_e_nunca_confunde_com_sem_resposta() {
+        let dir = temp_repo("sonde");
+
+        assert_eq!(
+            sonde(&dir, &["rev-parse", "--is-inside-work-tree"], PRAZO_LOCAL)
+                .expect("o git respondeu"),
+            Some("true".to_string())
+        );
+
+        // Branch num repositório sem commit: o git respondeu e disse que não tem.
+        assert_eq!(
+            sonde(&dir, &["rev-parse", "--abbrev-ref", "HEAD"], PRAZO_LOCAL)
+                .expect("o git respondeu"),
+            None
+        );
+
+        write(&dir, "a.txt", "conteúdo do a\n");
+        stage(&dir, &["a.txt".into()]).unwrap();
+        commit(&dir, "base", false).unwrap();
+        assert_eq!(
+            sonde(&dir, &["rev-parse", "--abbrev-ref", "HEAD"], PRAZO_LOCAL)
+                .expect("o git respondeu"),
+            Some("main".to_string())
+        );
+
+        // Saída vazia com sucesso é ausência respondida, não silêncio.
+        assert_eq!(
+            sonde(&dir, &["status", "--porcelain"], PRAZO_LOCAL).expect("o git respondeu"),
+            None
+        );
+
+        // Prazo menor que o tempo de o git responder: a sondagem devolve o
+        // motivo, e a tela nunca lê isso como "sem branch".
+        let sem_resposta = sonde(&dir, &["status", "--porcelain"], Duration::from_millis(1))
+            .expect_err("1 ms não é resposta, é prazo");
+        assert!(sem_resposta.contains("não respondeu em 1 ms"), "{sem_resposta}");
+        assert!(sem_resposta.contains("disco externo"), "{sem_resposta}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn temp_dir(tag: &str) -> PathBuf {
@@ -2180,9 +2295,13 @@ mod tests {
         stage(&dir, &["srv/.env".into()]).unwrap();
         commit(&dir, "base", false).unwrap();
 
-        let blob = blob_at(&dir, "HEAD", "srv/.env").expect("blob do HEAD");
+        let blob = blob_at(&dir, "HEAD", "srv/.env")
+            .expect("o git respondeu")
+            .expect("blob do HEAD");
         assert!(String::from_utf8_lossy(&blob).contains("TOKEN=abc123"));
-        assert!(blob_at(&dir, "HEAD", "nao-existe.txt").is_none());
+        assert!(blob_at(&dir, "HEAD", "nao-existe.txt")
+            .unwrap()
+            .is_none());
 
         assert!(ensure_ignored(&dir, "srv/.env").unwrap(), "primeira vez escreve");
         assert!(!ensure_ignored(&dir, "srv/.env").unwrap(), "segunda vez é no-op");
@@ -2426,7 +2545,7 @@ mod tests {
         // apply copia para a pasta e mantém a entrada.
         let aplicado = stash_apply(&dir, 0, false).unwrap();
         assert!(aplicado.contains("continua na lista"), "{aplicado}");
-        assert!(blob_at(&dir, "stash@{0}", "a.txt").is_some(), "o guardado tem o arquivo");
+        assert!(blob_at(&dir, "stash@{0}", "a.txt").unwrap().is_some(), "o guardado tem o arquivo");
 
         // para o `pop` valer, a pasta precisa estar limpa de novo.
         reset(&dir, "hard", "HEAD").unwrap();
@@ -2488,7 +2607,7 @@ mod tests {
         cherry_pick(&dir, &limpo, None).unwrap();
         assert!(tracked_files(&dir).unwrap().contains(&"b.txt".to_string()));
         assert_eq!(
-            String::from_utf8_lossy(&blob_at(&dir, "HEAD", "b.txt").unwrap()),
+            String::from_utf8_lossy(&blob_at(&dir, "HEAD", "b.txt").unwrap().unwrap()),
             "do feature\n"
         );
         // o ramo de origem não foi mexido: a cabeça dele continua a dele.
@@ -2517,7 +2636,7 @@ mod tests {
         assert_eq!(depois.operation, None);
         assert_eq!(depois.conflict_count, 0);
         assert_eq!(
-            String::from_utf8_lossy(&blob_at(&dir, "HEAD", "b.txt").unwrap()),
+            String::from_utf8_lossy(&blob_at(&dir, "HEAD", "b.txt").unwrap().unwrap()),
             "o que o main tem\n"
         );
 
@@ -2535,7 +2654,7 @@ mod tests {
         let fechado = read_status(&dir).unwrap();
         assert_eq!(fechado.operation, None, "continuar conclui o passo");
         assert_eq!(
-            String::from_utf8_lossy(&blob_at(&dir, "HEAD", "b.txt").unwrap()),
+            String::from_utf8_lossy(&blob_at(&dir, "HEAD", "b.txt").unwrap().unwrap()),
             "do feature, mudado\n"
         );
 
@@ -2677,7 +2796,7 @@ mod tests {
         let pais = temp_dir("clonede");
         let destino = pais.join("work");
         clone(&pais, &url(&origem), Some("work"), None).unwrap();
-        assert!(is_repo(&destino), "o clone produziu um repositório");
+        assert!(is_repo(&destino).unwrap(), "o clone produziu um repositório");
         let rows = graph(&destino, 10, false).unwrap();
         assert_eq!(rows[0].commit.subject, "primeiro");
 
@@ -3030,7 +3149,7 @@ mod tests {
         let dir = temp_dir("nao-repo");
         let err = read_status(&dir).unwrap_err();
         assert!(err.contains("não é um repositório"), "mensagem: {err}");
-        assert!(!is_repo(&dir));
+        assert!(!is_repo(&dir).unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -611,11 +611,16 @@ Resumo do que é garantido pelo código, não só pela interface:
   "Abrir no editor" chama o executável encontrado com o caminho como **argumento separado**, nunca por concatenação de
   string; se ele não abrir, ou se a detecção não achou nenhum (no Windows só conta `.exe` — os scripts sem extensão das
   pastas `bin` do VS Code e do Cursor não são prova de instalação), usa o atalho registrado do programa.
-- **Nenhum `git` sem prazo.** Toda execução do git sai de uma única função, com prazo: 30 s para operação local e 10 min
-  para as que falam com um remoto (`clone`, `fetch`, `pull`, `push`, `ls-remote`). O filho é encerrado ao estourar e a
-  janela recebe uma frase dizendo quanto tempo esperou e o que costuma causar isso (índice travado por outro git, hook
-  parado, antivírus, ou credencial que o git não pode pedir porque `GIT_TERMINAL_PROMPT=0`). Um remoto lento nunca
-  parece um botão quebrado, e um processo preso nunca deixa a tela girando para sempre.
+- **Nenhum `git` — e nenhum caminho — sem prazo.** Toda execução do git sai de uma única porta (`git::abrir`), com
+  prazo: 30 s para operação local e 10 min para as que falam com um remoto (`clone`, `fetch`, `pull`, `push`,
+  `ls-remote`). O filho é encerrado ao estourar e a janela recebe uma frase dizendo quanto tempo esperou e o que costuma
+  causar isso (índice travado por outro git, hook parado, antivírus, **disco externo que ainda não acordou**, ou
+  credencial que o git não pode pedir porque `GIT_TERMINAL_PROMPT=0`). Uma pasta fora do ar espera o disco numa thread
+  auxiliar e a espera é abandonada em 20 s com o motivo — `metadata()`, `canonicalize()` e o `git show` de um blob esperam
+  o volume **dentro do kernel** e não podem ser interrompidos de fora, então quem é abandonado é o aguardo, nunca o
+  botão. E a resposta tem três estados: **o que existe**, **a ausência dita** ("não há branch", "não é repositório") e
+  **"não respondeu"** — que nunca é lido como os dois anteriores, nem como varredura de segredos limpa. Um remoto lento
+  nunca parece um botão quebrado, e um processo preso nunca deixa a tela girando para sempre.
 - **CSP ativa** no `tauri.conf.json`: `default-src 'self'` e `connect-src` só permitem o IPC local (`ipc:`,
   `http://ipc.localhost`) e o servidor de desenvolvimento em `localhost:1420`. A interface não abre conexão de rede
   nenhuma; as chamadas ao GitHub saem do lado Rust, para o host fixo `api.github.com`, e a auditoria registra a operação
@@ -674,7 +679,7 @@ cd src-tauri
 cargo test --lib
 ```
 
-Cobertura atual do backend (308 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
+Cobertura atual do backend (314 testes): parsing de `ssh_config`, classificação de falha de conexão, execução remota com
 timeout e cancelamento, sessões PTY, ciclo completo de Git em repositório temporário (status, stage por hunk, commit,
 log, branches, tags, remotes, fetch, conflitos, push sem remoto, primeiro commit sem `HEAD`), trabalho guardado e
 reprodução de commit no git real (`stash push` tira a alteração da pasta e `stash list` mostra exatamente a entrada que o
