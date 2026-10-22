@@ -1783,12 +1783,25 @@ fn nivel_da_severidade(severidade: &str) -> &'static str {
     }
 }
 
-/// Grava o pacote ou o SARIF nos dados do aplicativo e devolve o caminho escrito.
-/// O arquivo existe para ser entregue a alguém — uma IA, uma revisão, outra
-/// ferramenta — sem que o aplicativo precise de um servidor para isso.
+/// As extensões que cada formato aceita. O nome é de quem exporta, o conteúdo é do
+/// formato: um `.html` escrito com JSON dentro seria aberto por alguém esperando
+/// outra coisa, e aí o arquivo entregue deixa de ser prova de nada.
+fn extensoes_do_formato(formato: &str) -> &'static [&'static str] {
+    match formato {
+        "pacote" => &["json"],
+        "sarif" => &["sarif", "json"],
+        _ => &[],
+    }
+}
+
+/// Grava o pacote ou o SARIF **no arquivo que a pessoa escolheu** e devolve o
+/// caminho escrito. O arquivo existe para ser entregue a alguém — uma IA, uma
+/// revisão, outra ferramenta — e entregar é um lugar que essa pessoa consiga abrir:
+/// o aplicativo não escolhe a pasta por ela, e um caminho que não serve não escreve
+/// arquivo nenhum.
 pub fn exportar(
     conn: &Connection,
-    dados: &Path,
+    destino: &Path,
     run_id: i64,
     formato: &str,
     limite: Option<usize>,
@@ -1798,15 +1811,33 @@ pub fn exportar(
         "sarif" => sarif(conn, run_id)?,
         outro => return Err(format!("a exportação escreve pacote ou sarif, não “{outro}”")),
     };
-    let pasta = dados.join("analises");
-    std::fs::create_dir_all(&pasta)
-        .map_err(|e| format!("não foi possível criar a pasta das exportações: {e}"))?;
-    let destino = pasta.join(format!("corrida-{run_id}.{}", if formato == "sarif" { "sarif" } else { "json" }));
+    if destino.as_os_str().is_empty() || !destino.is_absolute() {
+        return Err(format!(
+            "“{}” não é um arquivo com caminho completo — escolha a pasta onde a exportação vai ficar",
+            destino.display()
+        ));
+    }
+    let sufixo = destino
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let aceitas = extensoes_do_formato(formato);
+    if !aceitas.contains(&sufixo.as_str()) {
+        return Err(format!(
+            "um arquivo de {formato} termina em {}; “{}” não termina",
+            aceitas
+                .iter()
+                .map(|e| format!(".{e}"))
+                .collect::<Vec<_>>()
+                .join(" ou "),
+            destino.display()
+        ));
+    }
     let texto = serde_json::to_string_pretty(&valor)
         .map_err(|e| format!("falha ao escrever a exportação: {e}"))?;
-    std::fs::write(&destino, texto)
+    std::fs::write(destino, texto)
         .map_err(|e| format!("não foi possível gravar {}: {e}", destino.display()))?;
-    Ok(destino.display().to_string())
+    Ok(git_probe::simple(destino).display().to_string())
 }
 
 // ---------- cancelamento ----------
@@ -2626,8 +2657,12 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap();
-        let caminho = exportar(&conn, &dados, corrida.id, "pacote", None).unwrap();
-        assert!(caminho.ends_with(&format!("corrida-{}.json", corrida.id)), "{caminho}");
+        let arquivo = dados.join("analise-exportada.json");
+        let caminho = exportar(&conn, &arquivo, corrida.id, "pacote", None).unwrap();
+        assert!(caminho.ends_with("analise-exportada.json"), "{caminho}");
+        assert_eq!(Path::new(&caminho), arquivo.as_path());
+        // o lugar que o aplicativo decidia antes não é mais escrito por ninguém
+        assert!(!dados.join("analises").exists());
         let valor: Value =
             serde_json::from_str(&std::fs::read_to_string(&caminho).unwrap()).unwrap();
         assert_eq!(valor["esquema"], "devops-desktop/analise@1");
@@ -2653,7 +2688,10 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap();
-        let caminho = exportar(&conn, &dados, corrida.id, "sarif", None).unwrap();
+        // o nome escolhido é o nome escrito, e um sarif também aceita .json
+        let arquivo = dados.join("varredura.sarif");
+        let caminho = exportar(&conn, &arquivo, corrida.id, "sarif", None).unwrap();
+        assert!(caminho.ends_with("varredura.sarif"), "{caminho}");
         let valor: Value =
             serde_json::from_str(&std::fs::read_to_string(&caminho).unwrap()).unwrap();
         assert_eq!(valor["version"], "2.1.0");
@@ -2665,6 +2703,45 @@ mod tests {
         assert!(exportar(&conn, &dados, corrida.id, "html", None).is_err());
         let _ = std::fs::remove_dir_all(&casa);
         let _ = std::fs::remove_dir_all(&dados);
+    }
+
+    #[test]
+    fn um_caminho_que_nao_serve_nao_escreve_arquivo_nenhum() {
+        let casa = arvore_de_teste();
+        let conn = banco();
+        let projeto = projeto_de_teste(&conn, &casa);
+        let dados = pasta_de_teste("exporta-recusa");
+        let raiz = raiz_do_projeto(&projeto).unwrap();
+        let corrida = executar(
+            &conn,
+            &dados,
+            &projeto,
+            &raiz,
+            &pedido(projeto.id, "embutido", ""),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        // relativo: ninguém sabe em qual pasta cairia
+        let relativo = PathBuf::from("analise.json");
+        let erro = exportar(&conn, &relativo, corrida.id, "pacote", None).unwrap_err();
+        assert!(erro.contains("caminho completo"), "{erro}");
+        assert!(!relativo.exists());
+        // a extensão do formato ao lado do nome escolhido
+        let errado = dados.join("analise.html");
+        let erro = exportar(&conn, &errado, corrida.id, "pacote", None).unwrap_err();
+        assert!(erro.contains("termina em .json"), "{erro}");
+        assert!(!errado.exists());
+        // o nome é do pacote; o do sarif tem as duas faces
+        let sarif_json = dados.join("para-a-ci.json");
+        assert!(exportar(&conn, &sarif_json, corrida.id, "sarif", None).is_ok());
+        // um lugar que não existe devolve o motivo do disco, não um caminho bonito
+        const INEXISTENTE: &str = "dd-exporta-sem-pasta-9z4k";
+        let falta = std::env::temp_dir().join(INEXISTENTE).join("analise.json");
+        let erro = exportar(&conn, &falta, corrida.id, "pacote", None).unwrap_err();
+        assert!(erro.contains("não foi possível gravar"), "{erro}");
+        assert!(erro.len() > "não foi possível gravar ".len(), "{erro}");
+        let _ = std::fs::remove_dir_all(&dados);
+        let _ = std::fs::remove_dir_all(&casa);
     }
 
     #[test]

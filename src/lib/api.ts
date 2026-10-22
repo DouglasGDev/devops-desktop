@@ -225,8 +225,8 @@ export const api = {
     }),
   analysisPacote: (runId: number, limite?: number | null) =>
     invoke<AnalysisPackage>("analysis_pacote", { runId, limite: limite ?? null }),
-  analysisExportar: (runId: number, formato: "pacote" | "sarif", limite?: number | null) =>
-    invoke<string>("analysis_exportar", { runId, formato, limite: limite ?? null }),
+  analysisExportar: (runId: number, formato: "pacote" | "sarif", destino: string, limite?: number | null) =>
+    invoke<string>("analysis_exportar", { runId, formato, destino, limite: limite ?? null }),
   analysisRemover: (runId: number) => invoke<void>("analysis_remover", { runId }),
 
   queryAuditLog: (params: {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { api } from "../lib/api";
 import { CORTES, INSTRUMENTOS } from "../lib/analysis";
 import { formatDateTime, formatDuration } from "../lib/format";
@@ -226,8 +226,15 @@ export function AnalysisView() {
 
   const exportar = async (formato: "pacote" | "sarif") => {
     if (!selecionada) return;
+    const escolhas = formato === "sarif" ? ["sarif", "json"] : ["json"];
+    const escolha = await save({
+      title: formato === "sarif" ? "Exportar SARIF" : "Exportar pacote",
+      defaultPath: `analise-corrida-${selecionada}.${escolhas[0]}`,
+      filters: [{ name: formato === "sarif" ? "SARIF" : "JSON", extensions: escolhas }],
+    });
+    if (!escolha) return;
     try {
-      setDestino(await api.analysisExportar(selecionada, formato));
+      setDestino(await api.analysisExportar(selecionada, formato, escolha));
     } catch (e) {
       pushToast("error", String(e));
     }

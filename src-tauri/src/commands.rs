@@ -3345,17 +3345,17 @@ async fn analysis_pacote(
 
 #[tauri::command]
 async fn analysis_exportar(
-    app: AppHandle,
     state: State<'_, AppState>,
     run_id: i64,
     formato: String,
+    destino: String,
     limite: Option<usize>,
 ) -> Result<String, String> {
     let db = state.db.clone();
-    let dados = db::pasta_de_dados(&app)?;
+    let caminho = PathBuf::from(destino.trim());
     spawn("analysis_exportar", move || {
         let conn = lock_db(&db)?;
-        analysis::exportar(&conn, &dados, run_id, formato.trim(), limite)
+        analysis::exportar(&conn, &caminho, run_id, formato.trim(), limite)
     })
     .await
 }

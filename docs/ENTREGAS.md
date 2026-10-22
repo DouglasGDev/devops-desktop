@@ -14,14 +14,16 @@ rodada de **2026-10-21**: primeiro as três leituras de Git que rodavam sem praz
 de caminho que sobraram fora da aba Git e a sonda do `ssh-add` da descoberta de chaves — todas agora com prazo, com os
 três estados, e com a contenção do destino finalmente valendo para a pasta que **ainda não existe**. Medido na janela real
 no §2; as duas pendências que a rodada anterior deixou escritas (§6, linhas 9 e 10) estão fechadas ali com a contagem
-corrigida.
+corrigida. Fecha a lista a rodada seguinte, pedida pela queixa **"a análise de código não salva nada na pasta"**: as duas
+exportações da tela Análise escreviam sozinhas dentro dos dados do aplicativo e a tela só mostrava o caminho em texto
+miúdo; agora o aplicativo **pergunta onde** e um caminho que não serve não escreve arquivo nenhum (§5, item 36).
 
 ## 1. Retomar em três passos
 
 ```bash
 node ./node_modules/typescript/bin/tsc --noEmit     # tipos do frontend
 npm run build                                        # tsc + bundle
-(cd src-tauri && cargo test)                         # 322 testes de backend
+(cd src-tauri && cargo test)                         # 323 testes de backend
 (cd src-tauri && cargo clippy --all-targets -- -D warnings)
 node scripts/confira-repo.ts                         # o comparador remoto↔pasta, 9 formas reais de URL
 
@@ -50,23 +52,22 @@ Armadilhas já conhecidas nesta máquina:
   anterior acabou.
 - `cargo fmt` **não** é usado neste projeto — o formato é o do próprio autor, e `cargo fmt` reorganiza tudo.
 
-### 1.1 Estado em um parágrafo (2026-10-21, 21:40)
+### 1.1 Estado em um parágrafo (2026-10-21, 22:17)
 
-Tela e backend: **148** `#[tauri::command]`, 24 arquivos Rust, 11 telas, **322** testes de backend, SQLite em
-`user_version` **11** com **14** tabelas (a mais nova é `deploy_step_logs`), 45.967 linhas TS/TSX/Rust em **78** arquivos
-(`git ls-files '*.ts' '*.tsx' '*.rs' | xargs wc -l`, lido com as edições desta rodada já no árvore de trabalho), sem
-contar `node_modules`, `target`, `dist` nem `Python/`, que é um venv **não rastreado** — nunca `git add` nele. Lido com
-`git ls-remote origin refs/heads/main`, o remoto está em `1985c391dd9b71a11b5f3a570abf0c0dfc7c3172`; localmente a cabeça é
-`2738e41` (a documentação das medições da rodada anterior) sobre `6b7459e` (as três leituras de Git com prazo) sobre
-`1bb0590` (a etapa 6) — **três commits à frente e nada empurrado** —, e o commit que grava este texto é fechado depois
-deles, com a autorização do push pedida na frase, nunca por extensão de um "sim" anterior. O binário mais novo é
-`src-tauri/target/release/devops-desktop.exe` das **21:16:46**, **19.575.808 bytes**, com `Finished release profile
-[optimized] target(s) in 6m 01s`, `Built application at: …\release\devops-desktop.exe`, `Finished 2 bundles at:` e
-`CODIGO=0` lidos no arquivo de log da compilação e as duas embalagens conferidas no arquivo (`…_x64-setup.exe`
-**5.168.636 B** = 4,93 MiB às 21:16:35, `…_en-US.msi` **8.630.272 B** = 8,23 MiB às 21:16:40); ele é posterior à última
-edição de fonte (`ssh_config.rs` 21:08:36, a mais nova das quatro), serve `http://tauri.localhost/` com
-`/assets/index-C287853D.js` — **884.949 B**, o mesmo hash da rodada anterior, porque nada da tela foi reescrito aqui — e
-foi essa janela que mediu o que está no §2. No banco real, **relido pela janela desta vez**: **3** projetos (2 =
+Tela e backend: **148** `#[tauri::command]`, 24 arquivos Rust, 11 telas, **323** testes de backend, SQLite em
+`user_version` **11** com **14** tabelas (a mais nova é `deploy_step_logs`), 46.051 linhas TS/TSX/Rust em **78** arquivos
+(`find` com `node_modules`, `dist`, `src-tauri/target` e `Python/` de fora, lido com as edições desta rodada já na árvore
+de trabalho), sem contar `node_modules`, `target`, `dist` nem `Python/`, que é um venv **não rastreado** — nunca `git add`
+nele. Lido com `git ls-remote origin refs/heads/main`, o remoto está em `1985c391dd9b71a11b5f3a570abf0c0dfc7c3172`;
+localmente a cabeça é `e0c2753` (as seis leituras de caminho com prazo e a guarda que nunca disparava) sobre `2738e41`
+(a documentação das medições da rodada anterior) sobre `6b7459e` (as três leituras de Git com prazo) sobre `1bb0590`
+(a etapa 6) — **quatro commits à frente e nada empurrado** —, e o commit que grava este texto é fechado depois deles, com
+a autorização do push pedida na frase, nunca por extensão de um "sim" anterior. O binário mais novo é
+`src-tauri/target/release/devops-desktop.exe` das **22:12:08**, **19.576.320 bytes**, com `Finished 2 bundles at:` lido no
+log da compilação (código de saída 0) e as duas embalagens conferidas no arquivo (`…_x64-setup.exe` **5.169.366 B** =
+4,93 MiB às 22:11:57, `…_en-US.msi` **8.630.272 B** = 8,23 MiB às 22:12:02); ele é posterior à última edição de fonte e
+serve `http://tauri.localhost/` com `/assets/index-BLZoTx6l.js` — **885.308 B**, das 22:06:16, hash **novo**, porque
+nesta rodada a tela Análise mudou. No banco real, **relido pela janela desta vez**: **3** projetos (2 =
 `E:\ssh-master` em `main`, 3 = piloto com Git, 4 = `piloto-etapa5` **sem** Git), **32** corridas de deploy — exatamente
 **#23 a #54**, e as duas abertas pelas sondas desta rodada (**#55** e **#57**) saíram junto com os modelos temporários no
 `ON DELETE CASCADE`, que é por isso que a lista voltou ao tamanho de antes — e as corridas de análise do projeto 4 são
@@ -106,6 +107,20 @@ que a linha 10 propunha — 5 s é o prazo que a sonda de ferramentas já usa, e
 quatro vereditos agora se distinguem: não está no PATH, **não respondeu**, vivo com chaves, vivo sem chaves. §5, item 35;
 texto e medições no §2.
 
+A rodada seguinte fecha a queixa **"a análise de código não salva nada na pasta, aliás tudo que tem a ver com isso não
+salva"**. Lido antes de mexer: os dois arquivos da corrida 18 **existiam** —
+`%APPDATA%\com.douglasgdev.devopsdesktop\analises\corrida-18.json` (123.822 B, 20:53) e `corrida-18.sarif` (789.728 B,
+20:48) —, mas escritos por `analysis::exportar`, que criava a pasta dentro dos dados do aplicativo e escolhia o nome
+sozinha, com o caminho exibido em texto miúdo na tela. Visto de fora, nada ia para a pasta em que ele olha. Não havia
+**nenhum** ponto no aplicativo em que se pudesse escolher onde gravar: `save` do `@tauri-apps/plugin-dialog` não era
+importado em tela alguma (só `open`, para escolher pasta de entrada), e não havia download por `Blob` em lugar nenhum
+(lido com a varredura dos `src/`). Hoje `analysis_exportar` recebe o caminho escolhido, e `analysis::exportar` vale o que
+vale: caminho relativo é recusado, extensão que não é a do formato é recusada, a pasta que não existe devolve **o motivo
+do sistema operacional**, e nos três casos nenhum arquivo é escrito; o `create_dir_all` silencioso na pasta de dados saiu
+do caminho. A tela Análise pergunta antes de invocar o comando, com nome sugerido (`analise-corrida-{id}.json` /
+`.sarif`) e filtro por formato; cancelar não escreve nada e não deixa rótulo velho na tela. §5, item 36; texto e medições
+no §2.
+
 O que não pode ser revertido ao mexer aqui (lista completa no §5): **não existe segundo motor de deploy** — a tela e o
 nó do grafo chamam a mesma `analysis::executar` / `deploy::start`, e o veredito é contagem contra `severity_gate`,
 **nunca** o código de saída da ferramenta; o que é desenhado na tela é o que o backend executa; a fila linear de 15
@@ -117,7 +132,9 @@ nó repete (§5, item 30); o corte é declarado, não escondido (§5, item 32); 
 "não encontrado" e tem prazo próprio, e **nenhuma leitura de Git ou de caminho roda sem prazo** — o "não respondeu" é
 propagado como erro, jamais lido como "não existe", "sem branch" ou varredura limpa (§5, item 34); a contenção de caminho
 compara os **dois** lados na forma que o disco respondeu — nunca uma origem canônica contra um destino digitado, porque o
-destino da primeira publicação ainda não existe e a guarda passaria por cima dele (§5, item 35); nada é simulado, nenhum botão é enfeite; uma mecânica por módulo — e uma mecânica
+destino da primeira publicação ainda não existe e a guarda passaria por cima dele (§5, item 35); **exportar é escrever no
+arquivo que a pessoa escolheu** — o aplicativo não escolhe pasta por ela, e um caminho que não serve devolve o motivo e
+não escreve nada (§5, item 36); nada é simulado, nenhum botão é enfeite; uma mecânica por módulo — e uma mecânica
 servida por **duas portas** (a tela e o nó do grafo), não por duas implementações; ferramentas funcionam **sem servidor
 e sem conta de serviço**; `working_dir` local fica contido na raiz do projeto; aprovação manual nunca é presumida; senha
 SSH via `SSH_ASKPASS` por operação, jamais persistida; aviso de compilador é corrigido na causa, sem `#[allow(...)]`.
@@ -145,7 +162,16 @@ corrigidas e medidas nesta rodada**, e no lugar delas entraram três achados nov
 `pipeline_validate` rodando na thread assíncrona sem `spawn_blocking`, e o `percorrer` do analisador embutido sem prazo
 nem verificação de cancelamento dentro do laço. A quarta suspeita da lista anterior — um `starts_with` sensível a
 maiúsculas dobrando a contenção — foi **medida e não se confirma**: dois destinos digitados em maiúsculas foram recusados
-pelas duas frases certas, porque `canon_ou_ancestral` devolve o pedaço que existe na grafia do disco. Falta ainda o aceite
+pelas duas frases certas, porque `canon_ou_ancestral` devolve o pedaço que existe na grafia do disco. A queixa nova,
+**"a análise de código não salva nada na pasta"**, foi corrigida e medida na janela (o pacote e o SARIF da corrida 18
+escritos nos caminhos escolhidos em 7 ms, as três recusas lidas com motivo, a pasta de dados intocada) — o que falta dela
+é o olho dele em **Análise → Exportar pacote**: o diálogo nativo `Exportar pacote` abriu, e isso foi lido pela janela do
+processo, mas **o que o diálogo mostra por dentro ninguém mediu**, porque entrada sintética de sistema não é usada neste
+projeto; fica para ele conferir o nome sugerido, o filtro e o cancelamento. Ficou também achado novo, lido no pacote que
+ele exportou (§6, linha 14): a varredura do projeto `E:\ssh-master` leu **2.306** arquivos porque o `Python/` da raiz é
+uma distribuição CPython portável (**2.330** arquivos, 136 MB, 1.166 `.py`) que não está no Git e não está na lista de
+pastas puladas — as **cinco** corridas desse projeto (`#9, #10, #15, #17, #18`) fecham em `barra` com a mesma contagem
+**676/42/640** por código que não é dele, inclusive a **#17**, rodada com `ambos`. Falta ainda o aceite
 visual da etapa 6: abrir **Deploy → uma execução do
 histórico → Saída da etapa** e julgar se os blocos por tentativa e a busca servem, além dos aceites anteriores em
 **Análise → Sondar ferramenta / Conferir regras → Histórico com o filtro** *Análise*, a corrida **#6**, os cartões de
@@ -218,6 +244,9 @@ portas acima. A corrida de análise do mesmo segundo (**#11**) diz `tool "embuti
 `a_regua_do_destino_resolve_o_lado_ausente_pelo_ancestral` — foram relidos em loop antes desta linha entrar aqui: **10
 execuções de cada, 50 no total, 0 falhas**, porque um teste que às vezes passa não é prova de determinismo.
 `cargo clippy --all-targets -- -D warnings` → `Finished dev profile [unoptimized + debuginfo] target(s) in 0.76s` com **zero** linhas de `warning` — foi assim que saiu o `enum_variant_names` da sonda do agente, corrigido renomeando a enumeração para `Sonda`, sem `#[allow]`. `node ./node_modules/typescript/bin/tsc --noEmit` → saída vazia, `CODIGO=0`. `node scripts/confira-repo.ts` → `todas as 9 formas conferem`. Diff: **4 arquivos, +478/−61** (`analysis.rs` 59/15, `deploy.rs` 116/21, `git_probe.rs` 168/0, `ssh_config.rs` 135/25). Binário das **21:16:46**, **19.575.808 B**, posterior à última edição de fonte das 21:08:36, `Finished release profile [optimized] target(s) in 6m 01s` e `CODIGO=0` lidos no log do build |
+| **Exportar escreve no arquivo que a pessoa escolheu** (CDP no exe das 22:12, §4.1) | primeira linha da medição, `location.href` → `http://tauri.localhost/`. A tela **Análise** com o projeto 2 (`ssh-master`) selecionado lista as corridas `#18, #17, #15, #10, #9`, todas `concluida` + `barra` com **2.306 / 2.305 arquivos** e contagem **676/42/640** — a #17 com instrumento `ambos`, e mesmo assim a mesma contagem. Medido pelo comando, com caminho absoluto escolhido: `analysis_exportar(18, "pacote", …\Temp\analise-corrida-18.json)` devolve o próprio caminho em **7 ms**, lido de volta com 123.822 B, `esquema devops-desktop/analise@1`, `execucao.id 18`, `veredito.classificacao "barra"`, `truncado true`; `analysis_exportar(18, "sarif", …\Temp\para-a-ci.sarif)` escreve 789.728 B com `version 2.1.0` e **1.358** `results` (o total, não as 300 linhas do pacote truncado). As três recusas, cada uma sem deixar arquivo: caminho relativo → `“analise.json” não é um arquivo com caminho completo — escolha a pasta onde a exportação vai ficar`; extensão de outro formato → `um arquivo de pacote termina em .json; …\analise.html não termina`; pasta que não existe → `não foi possível gravar …\nao-existe-dd-9z4k\x.sarif: O sistema não pode encontrar o caminho especificado. (os error 3)` — o motivo do sistema operacional **junto**, a mesma regra da linha "A pasta de trabalho de um nó" acima. A pasta de dados **não recebeu nada novo**: `…\com.douglasgdev.devopsdesktop\analises` continua com os dois arquivos das 20:48/20:53, lidos antes e depois. O caminho devolvido não tem prefixo `\\?\` (`git_probe::simple`, a mesma régua da rodada anterior). **O que a janela prova e o que não prova:** depois do clique real no botão **Exportar pacote** da corrida #18, `EnumWindows` do PID 34600 lista `[Exportar pacote] · #32770` ao lado da `Tauri Window` — o diálogo nativo abriu, e a tela não mostrou caminho nenhum nem toast (a promessa está parada esperando a escolha, que é o estado certo). O que há **dentro** do diálogo — o nome sugerido, o filtro, o cancelamento — não foi medido: entrada sintética de sistema não é usada neste projeto, e isso fica para o olho dele. Os arquivos e a janela de medição foram meus e foram fechados: `TaskStop` na instância que eu abri e os dois arquivos de `%TEMP%` apagados; os `corrida-18.*` dele, não |
+| **Loop desta rodada** (lido 22:0x → 22:1x) | `cargo test --lib` → **`323 passed; 0 failed; 0 ignored; 0 measured; finished in 18.70s`** — um a mais que os 322 da rodada anterior; os três testes que tocam a exportação, lidos pelo nome: `exportar_escreve_o_mesmo_texto_que_a_tela_leu` (agora afirma o nome escolhido **e** que `dados/analises` não existe mais), `o_sarif_exportado_sai_das_linhas_gravadas` (escreve `varredura.sarif`) e o novo `um_caminho_que_nao_serve_nao_escreve_arquivo_nenhum` (`analysis.rs`), que pede relativo, extensão errada e pasta inexistente e confere `exists()` de cada um. `cargo clippy --all-targets -- -D warnings` → **zero** linhas de `warning`. `node ./node_modules/typescript/bin/tsc --noEmit` → **`CODIGO=2` na primeira vez**, com `src/views/AnalysisView.tsx(230,27): error TS2304: Cannot find name 'save'` — o import faltava, e é o tipo de coisa que o loop pega justamente porque não se presume nada; corrigido o import, `CODIGO=0`. `npm run build` → `✓ built in 5.66s` com o único aviso de chunk > 500 kB; `dist/assets/index-BLZoTx6l.js` **885.308 B** às 22:06:16, hash **novo** porque a tela mudou. `node scripts/confira-repo.ts` → `todas as 9 formas conferem`. `npm run tauri build` → `Finished 2 bundles at:` com código de saída 0, nsis **5.169.366 B** (4,93 MiB) às 22:11:57, msi **8.630.272 B** (8,23 MiB) às 22:12:02, `devops-desktop.exe` **19.576.320 B** às 22:12:08. Superfície lida depois: **148** comandos, **46.051** linhas em **78** arquivos. Diff desta rodada, lido de `git diff --numstat`: **6 arquivos, +183/−42** (`analysis.rs` 90/13, `commands.rs` 3/3, `api.ts` 2/2, `AnalysisView.tsx` 9/2, `README.md` 3/1, `ENTREGAS.md` 76/21) — **104** linhas novas de código contra **20** substituídas |
+| **Git desta rodada (lido antes do commit)** | `git log --oneline -1` → `e0c2753 fix(caminho): as seis leituras que ainda esperavam o disco, e a guarda que nunca disparava`; `git status --porcelain` → só `?? Python/` (a distribuição CPython portável de 136 MB na raiz, **não rastreada**, `git check-ignore` devolve código 1 — ela não é ignorada, só nunca foi adicionada); `git ls-remote origin refs/heads/main` → `1985c391dd9b71a11b5f3a570abf0c0dfc7c3172`, com **quatro** commits locais à frente (`1bb0590`, `6b7459e`, `2738e41`, `e0c2753`). **Nada foi empurrado**; o commit que grava estas linhas fica local até a autorização ser pedida na frase, como em toda rodada |
 | **Aba Git relida, de regresso** (CDP no mesmo exe das 21:16) | as leituras da rodada anterior, repetidas no projeto 2 para conferir que as portas novas não mudaram nada: `git_status(2)` **1.024 ms** com `branch main`, `upstream origin/main` e **ahead 3 / behind 0** (os três commits locais), `git_graph(2, 5, true)` **412 ms**, `git_branches` **614 ms** (2), `git_remotes` **820 ms** (`origin → https://github.com/DouglasGDev/devops-desktop.git`), `git_identity` **614 ms**, `git_stash_list` **410 ms** (0), `git_tree` **411 ms** (154 entradas), `git_commit_detail(2, 2738e41ddda49aa…)` **1.030 ms**, `git_diff(from: "HEAD")` **414 ms** devolvendo exatamente os **4** arquivos `M` desta rodada (`analysis.rs`, `deploy.rs`, `git_probe.rs`, `ssh_config.rs`) — a tela vendo o mesmo que `git status --porcelain`. `git_secret_check(2, "tracked")` **413 ms** devolve **0** achados, e isso **não** contradiz os 7 da linha anterior deste §2: aquela medição foi no escopo `index`, esta no escopo `tracked` — são checagens diferentes, com números diferentes, e a igualdade delas não foi presumida |
 
 O que isso **não** cobre: as asserções automáticas continuam sendo de backend — o piloto de interface (§4.1) dirige a
@@ -726,6 +755,31 @@ Estas vieram do SPEC e de correções explícitas do Douglas; reverter qualquer 
     `a_pasta_de_trabalho_de_um_no_e_lida_com_prazo_e_a_falta_e_dita`,
     `a_regua_do_destino_compara_os_dois_lados_na_mesma_forma` e `os_quatro_vereditos_do_agente_sao_coisas_diferentes`.
 
+36. **Exportar é escrever no arquivo que a pessoa escolheu — o aplicativo não escolhe a pasta por ela.** O defeito chegou
+    como queixa ("a análise de código não salva nada na pasta") e a leitura discordou da frase: os dois arquivos
+    **existiam** em `%APPDATA%\com.douglasgdev.devopsdesktop\analises` (123.822 B e 789.728 B, das 20:48/20:53). O que
+    não existia era qualquer superfície na aplicação capaz de dizer onde gravar — `exportar` fazia
+    `dados.join("analises")` + `create_dir_all` + nome fixo `corrida-{id}`, e `save` do `@tauri-apps/plugin-dialog` não
+    era importado em **nenhum** arquivo do `src/`. Ou seja: a exportação gravava sozinha num lugar que a tela nunca
+    mostrava, e gravar onde o aplicativo decidiu sem perguntar não é exportar. Hoje `exportar`
+    (`analysis.rs:1802`) recebe o destino, a porta `analysis_exportar` (`commands.rs:3347`) repassa o caminho escolhido
+    pela janela e a tela pergunta no diálogo nativo de salvar; as duas funções puras de conteúdo (`pacote`
+    `:1556`, `sarif` `:1728`) não mudaram uma linha. A regra que fica: **o nome e a pasta são de quem exporta, e um
+    caminho que não serve não deixa arquivo nenhum** — relativo ou vazio (`“x.json” não é um arquivo com caminho
+    completo — escolha a pasta onde a exportação vai ficar`), extensão de outro formato (`um arquivo de pacote termina em
+    .json; …\analise.html não termina`; `sarif` aceita `.sarif` **e** `.json`, porque o conteúdo é JSON e um revisor de
+    código espera esse nome), e a recusa carrega o motivo do sistema operacional junto quando o problema é o disco
+    (`não foi possível gravar …\nao-existe-dd-9z4k\x.sarif: O sistema não pode encontrar o caminho especificado. (os error 3)`),
+    que é a mesma régua dos três estados das linhas 34 e 35: um `Err` não vira sucesso nem ausência. O caminho devolvido
+    passa por `git_probe::simple`, então sai sem o prefixo `\\?\` — a linha 27 vale para a exportação como valia para o
+    gate. Travado por `exportar_escreve_o_mesmo_texto_que_a_tela_leu` (afirma o nome escolhido **e** que `dados/analises`
+    não existe mais), `o_sarif_exportado_sai_das_linhas_gravadas` e `um_caminho_que_nao_serve_nao_escreve_arquivo_nenhum`
+    (`analysis.rs:2709`), que pede relativo, extensão errada e pasta inexistente e confere `exists()` de cada um. O que
+    ainda **não** está travado: o conteúdo do diálogo. A janela provou o de fora — depois do clique em **Exportar pacote**
+    o `EnumWindows` do PID lista a janela `#32770` "Exportar pacote" ao lado da `Tauri Window`, e a tela não mostra caminho
+    nem toast enquanto a escolha não vem, que é o estado certo — mas nome sugerido, filtro e cancelamento ficam para o
+    olho dele, e o cancelamento hoje só tem a leitura do `if (!escolha) return;` da tela, não uma medição.
+
 ## 6. Pendências assumidas (com o primeiro passo de cada)
 
 | # | Pendência | Primeiro passo concreto |
@@ -773,6 +827,7 @@ distintas" é julgamento dele, não meu |
 | 11 | **34 chamadas `.is_dir()`/`.exists()` ainda sem prazo, em 8 arquivos** | Contagem lida agora, com o comando na mesa: `grep -c "\.is_dir()\|\.exists()" src-tauri/src/*.rs` → `deploy.rs` 12, `git.rs` 11, `ssh_config.rs` 3, `analysis.rs` 2, `auth.rs` 2, `security.rs` 2, `git_probe.rs` 1, `pipeline.rs` 1, **34** no total — número que **inclui** as linhas dentro de `#[cfg(test)]`, então é teto do trabalho, não piso. As duas que pesam são de produção: `pipeline.rs:445`, o `is_dir()` da raiz dentro de `pipeline_validate`, que roda **antes** das duas leituras com prazo da mesma função (um externo adormecido trava ali, sem prazo nenhum), e `analysis.rs:944`, o `read_dir` da varredura embutida, que é a linha 13 abaixo. Primeiro passo: essas duas irem pela `git_probe::com_prazo`/`canon` que já existem e então recomeçar a contagem separando teste de produção, arquivo por arquivo — sem chamar a lista inteira de verde antes de ler cada linha |
 | 12 | **`pipeline_validate` roda na thread assíncrona, sem `spawn_blocking`** | `commands.rs:768` é `async fn` e chama `pipeline::validate` direto. A validação agora abre dois caminhos por `com_prazo`, e a espera dela é um `recv_timeout` que **para um worker do runtime assíncrono** — 20 s presos ali não são 20 s só daquele comando. As leituras de Git saíram dessa armadilha na rodada anterior (`git_read`/`git_write` resolvem dentro do `spawn_blocking`); esta ficou. Primeiro passo: envolver o corpo de `pipeline_validate` em `spawn_blocking` como os vizinhos e conferir na janela que a chamada continua devolvendo os **3 ms / 2 ms** medidos no §2, desta vez com o `is_dir()` da linha 11 também contido |
 | 13 | **`percorrer`, a varredura do analisador embutido, não tem prazo nem cancelamento dentro do laço** | `analysis.rs:936`–`:960`: `std::fs::read_dir(pasta)` sem fim, a cada pasta, e o `cancel: &AtomicBool` que `analysis_interromper` levanta **não é consultado dentro do laço** (a assinatura de `percorrer` não o recebe); o único corte é `LIMITE_ARQUIVOS`. Um diretório que o volume não devolve segura a corrida em "em andamento" para sempre, porque o cancelamento cooperativo não alcança uma chamada presa no kernel — exatamente o motivo da linha 8. Primeiro passo: receber o `cancel` e conferi-lo a cada pasta, e envolver o `read_dir` pela espera com prazo, devolvendo veredito próprio ("a varredura parou: `…` não respondeu em N s") que **não** é lido como varredura limpa nem como cobertura zero |
+| 14 | **O escopo da varredura: nada na tela diz o que ela deve ignorar, e numa pasta com distribuição Python dentro ela varre a distribuição** | Achado lido nesta rodada, a partir do pacote que ele exportou da corrida **#18** e do disco: `filesScanned` **2.306** (e **2.305** na #17, que rodou com instrumento `ambos`) contra **154** entradas de `git_tree` no projeto 2 e **0** arquivos `.py` rastreados — a `Python\` da raiz, a distribuição CPython portável de **136 MB**, é o grosso da varredura, e é ela que empurra a contagem para **676 erros / 42 avisos / 640 infos**, igual nas cinco corridas lidas (`#9`, `#10`, `#15`, `#17`, `#18`), todas com veredito `barra`. Não é um defeito do motor: `security::pular_dir` (`security.rs:86`) é a dona única da regra de "não é código do projeto" e lista `.git` + 12 nomes (`node_modules`, `target`, `dist`, `build`, `vendor`, `__pycache__`, `.venv`, `venv`, `.next`, `.cache`, `coverage`, `.terraform`) — `Python` não está entre eles, e `git check-ignore Python/` devolve código **1**, então ela não é ignorada, só nunca foi rastreada. O que falta é **porta**, não regra: não há nenhum ajuste que chegue a `analysis::percorrer` para dizer o que ficar de fora, e a pessoa hoje só tem o campo **Pasta no projeto** (subpasta), que estreita por dentro em vez de excluir. Primeiro passo: um `analise.ignorar` por projeto (lista de pastas/arquivos) **alimentando a mesma `pular_dir`**, não uma segunda lista dentro da análise — a casa tem uma mecânica por responsabilidade, e as duas portas (tela + nó do grafo) têm de concordar com o que está fora. Duas coisas não foram presumidas e continuam em aberto: **não medi na porta do semgrep**, e a lista fixa **não** é compartilhada com ela como eu escrevi nesta linha na primeira versão — lida de novo, `security::pular_dir` é consultada pelo laço embutido (`analysis.rs:953`) e pela checagem de segredo (`security.rs:425`), enquanto `varredura_semgrep` (`analysis.rs:1072`–`:1080`) monta `scan --metrics=off --json-output … --config … .` e **não passa `--exclude` nenhum**, ficando o que for ignorado por conta dos padrões da própria ferramenta; se um `analise.ignorar` entrar, ele tem de virar as duas coisas (a lista da `pular_dir` **e** o `--exclude` do semgrep) porque é uma mecânica com duas portas, e o primeiro passo é conferir o que o semgrep 1.181 já pula sozinho antes de somar qualquer coisa. E **não há número de quantos de 2.306 eram código** — a cobertura guarda os arquivos lidos e pulados com motivo, então isso se lê da corrida #18 no banco antes de dimensionar o trabalho. Alternativa descartada de propósito: acrescentar `python` em `NOISE_DIRS`, porque ignoraria a pasta de quem tem Python **como** projeto |
 
 ## 7. Lacunas honestas do "canivete suíço" (ainda NÃO existe)
 

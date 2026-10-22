@@ -560,7 +560,9 @@ máscara que protege os logs do motor e a checagem de commit — `security::masc
 que sai para a tela não carrega segredo. **Exportar pacote** gera o JSON do contrato `devops-desktop/analise@1`
 (esquema, projeto, execução, cobertura, veredito, decisão, achados por regra, observação) e **Exportar SARIF** o
 formato que um editor ou um revisor de código já entende; os dois são o ponto de partida para apontar uma IA sobre a
-varredura, e o pacote diz quantos achados ficaram de fora quando truncou.
+varredura, e o pacote diz quantos achados ficaram de fora quando truncou. Cada exportação pergunta **onde** gravar — o
+aplicativo escolhe o nome sugerido, você escolhe a pasta, e um caminho que não serve (relativo, ou com extensão de
+outro formato) não deixa arquivo nenhum: devolve o motivo e pronto.
 
 **No pipeline.** O construtor do grafo tem um quinto tipo de nó, **análise de código**, com o instrumento, o corte, a
 **Pasta no projeto** (caminho relativo dentro da pasta cadastrada — `../fora` é barrada ao conferir) e o prazo. Ele
