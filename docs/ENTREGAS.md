@@ -17,15 +17,21 @@ no §2; as duas pendências que a rodada anterior deixou escritas (§6, linhas 9
 corrigida. Fecha a lista a rodada seguinte, pedida pela queixa **"a análise de código não salva nada na pasta"**: as duas
 exportações da tela Análise escreviam sozinhas dentro dos dados do aplicativo e a tela só mostrava o caminho em texto
 miúdo; agora o aplicativo **pergunta onde** e um caminho que não serve não escreve arquivo nenhum (§5, item 36).
+Fecha a lista a rodada seguinte, aberta pelo pedido **"revisar e validar a própria validação"**: a máscara de segredo
+deixou de poder escapar de uma linha e o veredito da análise deixou de poder inventar leitura — os dois defeitos
+reproduzidos antes de corrigir, com o texto cru da reprodução no §5, itens **38** e **39**. Nada desta rodada foi visto
+na janela; o que lá está é medido por teste, por sonda de linha de comando e pelo banco, e o que não foi medido continua
+dito como não medido.
 
 ## 1. Retomar em três passos
 
 ```bash
 node ./node_modules/typescript/bin/tsc --noEmit     # tipos do frontend
 npm run build                                        # tsc + bundle
-(cd src-tauri && cargo test)                         # 323 testes de backend
+(cd src-tauri && cargo test)                         # 336 testes de backend
 (cd src-tauri && cargo clippy --all-targets -- -D warnings)
 node scripts/confira-repo.ts                         # o comparador remoto↔pasta, 9 formas reais de URL
+node scripts/sonda-mascara.mjs                       # 24 linhas da máscara, reproduzidas fora do app (21×3 + 3 da cauda)
 
 # opcional, para mexer na interface: abrir o exe com porta de debug e pilotar a janela (§4.1)
 # WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223 → src-tauri/target/release/devops-desktop.exe
@@ -52,24 +58,30 @@ Armadilhas já conhecidas nesta máquina:
   anterior acabou.
 - `cargo fmt` **não** é usado neste projeto — o formato é o do próprio autor, e `cargo fmt` reorganiza tudo.
 
-### 1.1 Estado em um parágrafo (2026-10-21, 22:17; a posição do Git relida às 22:51, depois do push)
+### 1.1 Estado em um parágrafo (2026-10-21, 22:17; a posição do Git relida às 22:51, depois do push; a superfície e o Git relidos de novo às 00:0x de 2026-10-22, depois da rodada de revisão)
 
-Tela e backend: **148** `#[tauri::command]`, 24 arquivos Rust, 11 telas, **323** testes de backend, SQLite em
-`user_version` **11** com **14** tabelas (a mais nova é `deploy_step_logs`), 46.051 linhas TS/TSX/Rust em **78** arquivos
-(`find` com `node_modules`, `dist`, `src-tauri/target` e `Python/` de fora, lido com as edições desta rodada já na árvore
-de trabalho), sem contar `node_modules`, `target`, `dist` nem `Python/`, que é um venv **não rastreado** — nunca `git add`
-nele. Lido com `git ls-remote origin refs/heads/main` **depois** do push desta rodada, o remoto está em
-`32008f5bd85c92025e0c26bb0a48016cc16399fc` — os **cinco** commits que a frase dele nomeou (`1bb0590`, `6b7459e`,
-`2738e41`, `e0c2753`, `32008f5`) estão lá, com `1985c39..32008f5  32008f5 -> main` lido na saída do push. O push foi com
-o **refspec explícito** (`git push origin 32008f5:refs/heads/main`) e não `origin main`, porque o commit que grava a
-correção da tela (`26e6ea1`) é um **sexto** e não estava na lista da frase: empurrar `main` teria empurrado algo que ele
-não nomeou. Localmente a cabeça é `26e6ea1`, **um** commit à frente do remoto, e ele fica esperando a própria autorização
-na frase, como em toda rodada — nunca por extensão de um "sim" anterior. O binário mais novo é
+Tela e backend: **148** `#[tauri::command]`, 24 arquivos Rust, 11 telas, **336** testes de backend (relidos às 00:0x:
+`test result: ok. 336 passed; 0 failed; 0 ignored; 0 measured`), SQLite em
+`user_version` **11** com **14** tabelas (a mais nova é `deploy_step_logs`), **46.681** linhas TS/TSX/Rust em **76**
+arquivos (`find src src-tauri/src scripts` com `node_modules`, `dist`, `src-tauri/target` e `Python/` de fora, lido às
+00:0x; o par 46.051/78 da medição anterior diferia pelo escopo do `find`, não pelo código), sem contar `node_modules`,
+`target`, `dist` nem `Python/`, que é um venv **não rastreado** — nunca `git add`
+nele. **A posição do Git, relida às 00:0x:** `git rev-parse HEAD` →
+`c2c1877bc98dc548becad2eafa352e77637970da` (a correção da máscara e do veredito, **local**), `git ls-remote origin
+refs/heads/main` → `ed69148ca102b959aae670d6b680de39adf950e1` (o `docs(entregas)` do push dos cinco), `git status -sb` →
+`## main...origin/main [ahead 1]` — **um** commit local esperando a própria autorização na frase, como em toda rodada,
+nunca por extensão de um "sim" anterior. O registro da rodada do push continua valendo: os **cinco** hashes que a frase
+dele nomeou (`1bb0590`, `6b7459e`, `2738e41`, `e0c2753`, `32008f5`) estão no remoto, empurrados com **refspec explícito**
+(`git push origin 32008f5:refs/heads/main`) e não `origin main`, porque o commit que grava a correção da tela (`26e6ea1`)
+era um **sexto** fora da lista — empurrar `main` teria levado algo que ele não nomeou. O binário mais novo é
 `src-tauri/target/release/devops-desktop.exe` das **22:12:08**, **19.576.320 bytes**, com `Finished 2 bundles at:` lido no
 log da compilação (código de saída 0) e as duas embalagens conferidas no arquivo (`…_x64-setup.exe` **5.169.366 B** =
-4,93 MiB às 22:11:57, `…_en-US.msi` **8.630.272 B** = 8,23 MiB às 22:12:02); ele é posterior à última edição de fonte e
-serve `http://tauri.localhost/` com `/assets/index-BLZoTx6l.js` — **885.308 B**, das 22:06:16, hash **novo**, porque
-nesta rodada a tela Análise mudou. No banco real, **relido pela janela desta vez**: **3** projetos (2 =
+4,93 MiB às 22:11:57, `…_en-US.msi` **8.630.272 B** = 8,23 MiB às 22:12:02); ele era posterior às edições da rodada das
+exportações e serve `http://tauri.localhost/` com `/assets/index-BLZoTx6l.js` — **885.308 B**, das 22:06:16, hash **novo**,
+porque naquela rodada a tela Análise mudou. **Na desta revisão ele deixou de ser o retrato do fonte:** as edições que
+fecharam em `c2c1877` são das 23:4x–23:5x, posteriores ao binário das 22:12, que não foi recompilado — nada desta rodada
+foi visto na janela, e é por isso que o §2 e os itens 38 e 39 do §5 dizem o que foi medido por teste, por sonda e no
+banco, e não o que foi conferido em tela. No banco real, **relido pela janela desta vez**: **3** projetos (2 =
 `E:\ssh-master` em `main`, 3 = piloto com Git, 4 = `piloto-etapa5` **sem** Git), **32** corridas de deploy — exatamente
 **#23 a #54**, e as duas abertas pelas sondas desta rodada (**#55** e **#57**) saíram junto com os modelos temporários no
 `ON DELETE CASCADE`, que é por isso que a lista voltou ao tamanho de antes — e as corridas de análise do projeto 4 são
@@ -249,6 +261,7 @@ execuções de cada, 50 no total, 0 falhas**, porque um teste que às vezes pass
 | **Exportar escreve no arquivo que a pessoa escolheu** (CDP no exe das 22:12, §4.1) | primeira linha da medição, `location.href` → `http://tauri.localhost/`. A tela **Análise** com o projeto 2 (`ssh-master`) selecionado lista as corridas `#18, #17, #15, #10, #9`, todas `concluida` + `barra` com **2.306 / 2.305 arquivos** e contagem **676/42/640** — a #17 com instrumento `ambos`, e mesmo assim a mesma contagem. Medido pelo comando, com caminho absoluto escolhido: `analysis_exportar(18, "pacote", …\Temp\analise-corrida-18.json)` devolve o próprio caminho em **7 ms**, lido de volta com 123.822 B, `esquema devops-desktop/analise@1`, `execucao.id 18`, `veredito.classificacao "barra"`, `truncado true`; `analysis_exportar(18, "sarif", …\Temp\para-a-ci.sarif)` escreve 789.728 B com `version 2.1.0` e **1.358** `results` (o total, não as 300 linhas do pacote truncado). As três recusas, cada uma sem deixar arquivo: caminho relativo → `“analise.json” não é um arquivo com caminho completo — escolha a pasta onde a exportação vai ficar`; extensão de outro formato → `um arquivo de pacote termina em .json; …\analise.html não termina`; pasta que não existe → `não foi possível gravar …\nao-existe-dd-9z4k\x.sarif: O sistema não pode encontrar o caminho especificado. (os error 3)` — o motivo do sistema operacional **junto**, a mesma regra da linha "A pasta de trabalho de um nó" acima. A pasta de dados **não recebeu nada novo**: `…\com.douglasgdev.devopsdesktop\analises` continua com os dois arquivos das 20:48/20:53, lidos antes e depois. O caminho devolvido não tem prefixo `\\?\` (`git_probe::simple`, a mesma régua da rodada anterior). **O que a janela prova e o que não prova:** depois do clique real no botão **Exportar pacote** da corrida #18, `EnumWindows` do PID 34600 lista `[Exportar pacote] · #32770` ao lado da `Tauri Window` — o diálogo nativo abriu, e a tela não mostrou caminho nenhum nem toast (a promessa está parada esperando a escolha, que é o estado certo). O que há **dentro** do diálogo — o nome sugerido, o filtro, o cancelamento — não foi medido: entrada sintética de sistema não é usada neste projeto, e isso fica para o olho dele. Os arquivos e a janela de medição foram meus e foram fechados: `TaskStop` na instância que eu abri e os dois arquivos de `%TEMP%` apagados; os `corrida-18.*` dele, não. **Fechado por ele mesmo às 22:45, sem mim:** o arquivo `E:\ssh-master\dist\analise-corrida-21.json` **123.823 B** chegou anexado na conversa, e é a escolha da janela dele no diálogo — corrida **#21**, projeto 2, caminho dentro do projeto, `esquema devops-desktop/analise@1`, `execucao.id 21`, `duracaoMs 13850`. O que isso prova a mais do que a minha medição: o clique real produz o arquivo **no caminho que ele apontou**, com o nome que a tela sugeriu editado por ele (`analise-corrida-21.json`), e o conteúdo é o pacote lido campo a campo (`veredito.classificacao "barra"`, `truncado true`, `observacao` da mascaráção presente) |
 | **Loop desta rodada** (lido 22:0x → 22:1x) | `cargo test --lib` → **`323 passed; 0 failed; 0 ignored; 0 measured; finished in 18.70s`** — um a mais que os 322 da rodada anterior; os três testes que tocam a exportação, lidos pelo nome: `exportar_escreve_o_mesmo_texto_que_a_tela_leu` (agora afirma o nome escolhido **e** que `dados/analises` não existe mais), `o_sarif_exportado_sai_das_linhas_gravadas` (escreve `varredura.sarif`) e o novo `um_caminho_que_nao_serve_nao_escreve_arquivo_nenhum` (`analysis.rs`), que pede relativo, extensão errada e pasta inexistente e confere `exists()` de cada um. `cargo clippy --all-targets -- -D warnings` → **zero** linhas de `warning`. `node ./node_modules/typescript/bin/tsc --noEmit` → **`CODIGO=2` na primeira vez**, com `src/views/AnalysisView.tsx(230,27): error TS2304: Cannot find name 'save'` — o import faltava, e é o tipo de coisa que o loop pega justamente porque não se presume nada; corrigido o import, `CODIGO=0`. `npm run build` → `✓ built in 5.66s` com o único aviso de chunk > 500 kB; `dist/assets/index-BLZoTx6l.js` **885.308 B** às 22:06:16, hash **novo** porque a tela mudou. `node scripts/confira-repo.ts` → `todas as 9 formas conferem`. `npm run tauri build` → `Finished 2 bundles at:` com código de saída 0, nsis **5.169.366 B** (4,93 MiB) às 22:11:57, msi **8.630.272 B** (8,23 MiB) às 22:12:02, `devops-desktop.exe` **19.576.320 B** às 22:12:08. Superfície lida depois: **148** comandos, **46.051** linhas em **78** arquivos. Diff desta rodada, lido de `git diff --numstat`: **6 arquivos, +183/−42** (`analysis.rs` 90/13, `commands.rs` 3/3, `api.ts` 2/2, `AnalysisView.tsx` 9/2, `README.md` 3/1, `ENTREGAS.md` 76/21) — **104** linhas novas de código contra **20** substituídas |
 | **Aba Git presa em "Lendo o repositório…" — a causa está no ref, não no git** (print dele, 22:3x) | Lido do próprio print o par de estado que não tem como acontecer por leitura em andamento: o rótulo do cabeçalho **e** o placeholder da lista dizem `Lendo o repositório…`, que é `git.busy === "Lendo o repositório"` com `status === null` (`GitView.tsx:525`), e nenhum dos dois aparece sem o `Promise.all` das sete leituras ter **resolvido** — `reload()` só escreve estado depois dele, e o `finally` do `guard` limpa o rótulo sempre. Então o que estava preso não era o git: era a tela deitando a resposta fora. Confirmado por três leituras de fora: (1) `curl http://localhost:1420/` → **200**, ou seja, a janela dele é o **modo de desenvolvimento** (`tauri dev`, `devUrl` do `tauri.conf.json`), e `src/main.tsx:7` liga `React.StrictMode`, que nesse modo monta, desmonta e monta — com o `useEffect` de uma via só do `useGitRepo.ts:115` (`() => () => { alive.current = false }`), o ref fica `false` para sempre e os dois lados do `guard` (`setBusy(null)`, `setError`, o `notify` do toast e o `setStatus` do `reload`) passam a não executar; (2) as cinco operações de git do `reload()`, cronometradas na linha de comando **sobre o mesmo repositório e o mesmo estado de disco dele** (`Python/` de 136 MB sem rastrear na raiz, cinco commits locais à frente): `status --porcelain=v2 -z` **77 ms**, `stash list` **69 ms**, `tag -l` **76 ms**, `remote -v` **66 ms**, `log --graph -n 200` **79 ms** — o git respondeu, e respondeu rápido; (3) `grep` do `alive` em `src/` dá **uma** dona, então nenhuma outra tela engolia o próprio fim por esse caminho. Corrigidos os dois (o ref de duas vias e o **limpo** que a tela afirmava com `status === null`, `GitView.tsx:427`), loop relido: `tsc --noEmit` `CODIGO=0`, `npm run build` `✓ built in 6.03s`, `cargo test --lib` **323 passed; 0 failed** em 18.48s, clippy **zero** avisos, `todas as 9 formas conferem`. **O que esta linha NÃO mediu, e por isso a correção ainda não está conferida na janela:** eu não reproduzi o defeito numa janela minha — abrir uma segunda instância não dá porta de debug (o processo de navegador do WebView2 é da instância dele; `Get-Process` mostra **um** `devops-desktop.exe`, PID **39732** das **22:31:05**, e `curl 127.0.0.1:9223` recusa conexão), e fechar a janela dele para medir destruiria o espécime; a cópia do `.db` para ler o Histórico dele foi **recusada** pelo classificador de permissões, e não foi contornada. Fica assim: causa lida no código, estado lido no print, git descartado por medida, e a confirmação do conserto é o clique dele em **Atualizar** na mesma janela aberta (o vite serve o módulo corrigido), que é justamente o tipo de leitura que a §6 linha 4 diz que não tenho como fazer sozinho |
+| **Loop da revisão da validação** (relido 23:5x → 00:0x) | `cargo test` → `test result: ok. **336 passed; 0 failed; 0 ignored; 0 measured**; finished in 18.45s` no binário da lib, `0 passed` no do `main.rs` e **0** doc-tests (`src-tauri/target/final-tests.log`) — os 323 das rodadas anteriores mais os **13** desta. `cargo clippy --all-targets` **depois de `touch src/*.rs`** (com cache o "Finished" não reemite aviso nenhum, e isso não seria medição) → `Finished dev profile in 13.71s`, **0** linhas de `warning`/`error` (`final-clippy.log`). `npx tsc --noEmit` → saída **0**, nenhuma linha. `npm run build` → `✓ 86 modules transformed`, `✓ built in 5.66s`. **A sonda que reproduz a máscara** (`node scripts/sonda-mascara.mjs`, que lê as funções reais de `security.rs`/`analysis.rs`, compila com `rustc` e roda) → relida agora, sobre o código deste commit: **24 PASS** (21 linhas × escondido/à-vista/idempotente + 3 da cauda), `falhas_reproduzidas=0`. O estado **antes** da correção, na mesma sonda às 22:5x: `falhas_reproduzidas=10` com `passwd`, `secret`, `api_key`, `apikey`, `access_key`, `auth_token`, `password_com_espaco`, `duas_atribuicoes` e `unicode_bearer` em FAIL, e o panic `start byte index 1 is not a char boundary; it is inside 'é' (bytes 0..2 of string)`. **O instrumento real, duas medições** (`%TEMP%\semgrep-probe\Scripts\semgrep.exe`, 1.181.0): fora de qualquer repositório Git, sobre um `a.py` que as regras flagram → `{"results":[],"errors":[],"paths":{"scanned":[]}}`; depois de `git init` + `git add a.py` + commit, o mesmo comando → `codigo=0`, `results 2`, `errors 0`, `scanned ["a.py"]`, **sem** a chave `skipped`, `check_id` pontuado (`E.ssh-master.src-tauri.regras.dd-101-shell-true`) e `extra.lines` = `"requires login"` — por isso o trecho é lido por nós. No diretório do projeto a terceira medição (`review-validation-semgrep-real.log`) devolveu `status 0`, versão 1.181.0 e arquivos **sob `Python/`** na lista de lidos, com `git ls-files Python/` em **0** (154 rastreados no total): a régua que estava no envelope, o `check_id`, o `cwe` como texto e o `skipped` ausente, é a que o fixture guarda. **Banco lido numa cópia** (`%TEMP%\devops-rodada-leitura\rd.db`, o original intocado): corrida mais nova **#22** — `concluida`, `embutido`, 2.306 lidos / 167 pulados, counts `{"error":676,"warning":42,"info":640}`, `blocked 1`, corte `ERROR`, aberta `2026-10-22T03:22:08Z` — **1.358** linhas de achado nela e na #21, **0** snippets contendo `«valor mascarado»` e **0** contendo `password = FICT…`, `ghp_` ou `sk_live_` nas duas; `deploy_runs` parado na **#54**. **O que NÃO foi medido, e a linha diz para não presumir:** nada acima passou pela janela. O `target/release/devops-desktop.exe` em disco é das **22:12:08**, anterior às edições que fecharam em `c2c1877` (23:57:53) — não posso afirmar que ele contém a máscara nova, e por nenhuma linha desta rodada depende de janela ela continua por conferir. Primeiro passo quando ele quiser: `npm run tauri build`, varredura no **Piloto Etapa 5** (o do token plantado, corrida **#6**) e ler `analysis_findings.snippet` da corrida nova. **E uma correção de registro:** a mensagem do `c2c1877` escreveu "só varre o que o Git rastrea" — a medição do diretório do projeto acima **não** sustenta essa frase (ela sustenta `scanned: []` **fora** de um repositório); o commit está local e não foi empurrado, e a linha fica aqui em vez de reescrever a mensagem |
 | **Git desta rodada (lido antes do commit)** |`git log --oneline -1` → `e0c2753 fix(caminho): as seis leituras que ainda esperavam o disco, e a guarda que nunca disparava`; `git status --porcelain` → só `?? Python/` (a distribuição CPython portável de 136 MB na raiz, **não rastreada**, `git check-ignore` devolve código 1 — ela não é ignorada, só nunca foi adicionada); `git ls-remote origin refs/heads/main` → `1985c391dd9b71a11b5f3a570abf0c0dfc7c3172`, com **quatro** commits locais à frente (`1bb0590`, `6b7459e`, `2738e41`, `e0c2753`). **Nada foi empurrado**; o commit que grava estas linhas fica local até a autorização ser pedida na frase, como em toda rodada |
 | **Push dos cinco nomeados** (lido 22:5x) | a frase dele comitou a correção da tela e nomeou **cinco** hashes. O commit da tela saiu como `26e6ea1` às **22:50:50** — `3 files changed, 54 insertions(+), 10 deletions(-)` (`docs/ENTREGAS.md`, `src/lib/useGitRepo.ts`, `src/views/GitView.tsx`), com `?? Python/` ficando de fora como sempre. O empurrado foi **exatamente** a lista: `git push origin 32008f5:refs/heads/main` → `To https://github.com/DouglasGDev/devops-desktop.git` e `1985c39..32008f5  32008f5 -> main`, com o **refspec explícito** em vez de `origin main` justamente porque `git push origin main` levaria junto o sexto commit, que ele não nomeou. Relido depois: `git ls-remote origin refs/heads/main` → `32008f5bd85c92025e0c26bb0a48016cc16399fc` (o remoto bate com o nomeado, não presumido), `git rev-parse HEAD` → `26e6ea181979f2bbc6457ccbb37c1cce217c1cdb`, ou seja, **um** commit local ainda não empurrado, à espera da própria autorização na frase. Os cinco que chegaram ao remoto: `1bb0590` (saída de etapa no banco), `6b7459e` (leituras de Git com prazo), `2738e41` (docs das medições), `e0c2753` (as seis leituras de caminho com prazo) e `32008f5` (a exportação perguntando onde gravar) |
 | **Aba Git relida, de regresso** (CDP no mesmo exe das 21:16) | as leituras da rodada anterior, repetidas no projeto 2 para conferir que as portas novas não mudaram nada: `git_status(2)` **1.024 ms** com `branch main`, `upstream origin/main` e **ahead 3 / behind 0** (os três commits locais), `git_graph(2, 5, true)` **412 ms**, `git_branches` **614 ms** (2), `git_remotes` **820 ms** (`origin → https://github.com/DouglasGDev/devops-desktop.git`), `git_identity` **614 ms**, `git_stash_list` **410 ms** (0), `git_tree` **411 ms** (154 entradas), `git_commit_detail(2, 2738e41ddda49aa…)` **1.030 ms**, `git_diff(from: "HEAD")` **414 ms** devolvendo exatamente os **4** arquivos `M` desta rodada (`analysis.rs`, `deploy.rs`, `git_probe.rs`, `ssh_config.rs`) — a tela vendo o mesmo que `git status --porcelain`. `git_secret_check(2, "tracked")` **413 ms** devolve **0** achados, e isso **não** contradiz os 7 da linha anterior deste §2: aquela medição foi no escopo `index`, esta no escopo `tracked` — são checagens diferentes, com números diferentes, e a igualdade delas não foi presumida |
@@ -818,6 +831,78 @@ Estas vieram do SPEC e de correções explícitas do Douglas; reverter qualquer 
     nada (`GitView.tsx:427` agora só renderiza a etiqueta quando existe status). É a regra 1 da casa, "lista vazia
     aparece como vazia", aplicada ao estado desconhecido: **ausência de leitura não é veredito**.
 
+38. **A máscara corta o valor no texto que chegou — uma cópia em minúsculas não é o texto.** A rodada foi aberta pelo
+    pedido de **revisar e validar a própria validação**: em vez de confiar no relatório, olhar as funções que o produzem.
+    Lidas, `security::mascarar` tinha três causas, todas compartilhadas com o detetector que barra o commit, e
+    `analysis::cauda` tinha a sua: um panic no meio de um acento. Reproduzi as quatro **antes**
+    de tocar em qualquer arquivo, com uma sonda que extrai as funções reais de `security.rs`/`analysis.rs`, compila com
+    `rustc` e roda (`scripts/sonda-mascara.mjs`, que foi para o `scripts/` justamente para sobreviver a um `cargo clean`); a primeira
+leitura dela devolveu
+
+    ```
+    mascara passwd: FAIL … mascara unicode_bearer: FAIL      (9 nomes em FAIL, 1 em PASS)
+    falhas_reproduzidas=10
+    thread 'main' panicked at <anon>:138:26:
+    start byte index 1 is not a char boundary; it is inside 'é' (bytes 0..2 of string)
+    ```
+
+    As três causas, todas na mesma decisão de conveniência: **(a)** a linha era montada em minúsculas e cortada pelo
+    deslocamento **dessa cópia** — em Unicode a caixa muda o número de bytes, então um `İ` derrubava a máscara e a linha
+    inteira escapava ilesa; **(b)** `atribuicoes` devolvia **no máximo uma** chave e parava na primeira que não existia na
+    linha, então `password = …; secret = …` escondia uma e deixava a outra à vista — para a máscara **e** para o detetector
+    que barra o commit, que lê as mesmas funções; **(c)** o valor entre aspas parava no primeiro espaço, mostrando o resto
+    de uma frase-senha. E a `cauda` cortava por **byte**, o que matava a varredura antes de qualquer veredito. O que ficou:
+
+    ```rust
+    struct Atribuicao { chave: &'static str, inicio: usize, fim: usize }   // bytes do texto original
+    ```
+
+    `ocorrencia` compara com `eq_ignore_ascii_case` sem reescrever nada (`security.rs:179`), `atribuicoes` percorre a linha
+    sempre pela chave mais à esquerda e continua depois dela (`:296`), o valor entre aspas vai até a aspa que fecha — ou
+    até o fim da linha se ela não fecha, porque um valor cortado no meio do arquivo não é motivo para mostrá-lo (`:223`),
+    e `intervalos_a_esconder` (`:327`) funde atribuição + `Bearer` + prefixo de token numa passada só sobre o texto
+    original, deixando o **prefixo** de fora porque ele diz a espécie e não é segredo (`sk_live_«valor mascarado»`).
+    `esta_mascarado` (`:238`) é o que faz mascarar duas vezes escrever **uma** marca. `cauda` (`analysis.rs:1278`) passou a
+    cortar e mascarar por caractere. O que **não** é valor continua à vista, e isso é medido, não presumido: comparação
+    (`==`), referência de ambiente (`${DB_PASSWORD}`), nome sem valor e valor curto de seis caracteres ou menos.
+    Relida agora, sobre o código deste commit: **24 PASS** (21 linhas × escondido/à-vista/idempotente + 3 da cauda),
+    `falhas_reproduzidas=0`. As defesas que ficaram no arquivo são sete testes novos
+    (`toda_chave_de_segredo_tem_o_valor_escondido`, `uma_linha_pode_ter_mais_de_um_valor`,
+    `o_valor_entre_aspas_some_inteiro`, `a_mascara_nao_desiste_diante_de_unicode`,
+    `o_prefixo_de_token_continua_dizendo_a_especie`, `o_que_nao_e_valor_fica_a_vista`, `a_mascara_e_idempotente`), e a
+    sonda é uma reprodução **fora do app**: ela prova a mecânica, nunca a tela.
+
+39. **Campo ausente não é campo vazio — um veredito não pode inferir leitura.** A mesma revisão olhou o outro lado do
+    relatório: o que acontece quando o instrumento responde *qualquer coisa*. Estava assim: `results` que não vinha no
+    JSON era lido como "nenhum achado" — exatamente a conclusão que **libera** o pipeline. Hoje as três listas que
+    sustentam a prova são obrigatórias (`analysis.rs:1129`–`:1141`): sem `results`, sem `errors` ou sem `paths.scanned` a
+    resposta é dita ilegível; um achado sem regra, sem caminho ou sem linha conta como **leitura que não se leu**
+    (`sem_forma`, que marca `invalida`) e não como achado que não existia; e o fechamento passou a ter três motivos para
+    dizer `falhou` em vez de `concluida` — o instrumento pedido que não rodou (`externo_sem_prova`, `:1472`), a resposta
+    ilegível e a varredura que abriu zero arquivo (`sem_leitura`, `:1508`); neste último caso a nota é dita com todas as
+    letras: "a varredura não leu arquivo nenhum — não há o que afirmar sobre o código".
+    É a regra 1 da casa aplicada ao veredito de segurança, a mesma do item 37.
+
+    Dois números que antes se confundiam foram separados: **o que barra é a contagem do corte, não a total**
+    (`barra_o_corte`/`achados_no_corte`, `:1566`–`:1579`) — com corte `ERROR` e os counts lidos da corrida **#22**
+    (676/42/640) o número dito é **676**, e "barram 1.358" seria inventar o resto; e **cobertura parcial não é ausência de
+    prova**, é prova de menos: com corte declarado ela barra, sem corte o nó informa e a nota diz o que ficou de fora
+    (`:1520`). O cancelamento, por fim, voltou a ser cancelamento: `run.status == "interrompida"` devolve
+    `Fail::cancelled()` (`deploy.rs:1694`) em vez de um sucesso com metade da árvore lida, que era o que deixava os
+    dependentes publicarem; travado por `uma_varredura_interrompida_e_cancelamento_do_no`.
+
+    O formato do envelope não é presumido — é o que a ferramenta desta máquina (semgrep **1.181.0**) escreveu, medido duas
+    vezes: **fora** de qualquer repositório Git, sobre um `a.py` que as regras flagram, o comando devolve
+    `{"results":[],"errors":[],"paths":{"scanned":[]}}` (zero lidos — o caso que hoje fecha em `falhou`); **depois** de
+    `git init` + `git add` + commit, o mesmo comando devolve `codigo=0`, `results 2`, `errors 0`, `scanned ["a.py"]` e
+    **nenhuma** chave `skipped`, com `check_id` pontuado e `extra.lines` escrito `"requires login"` — por isso a linha é
+    relida por nós, e o teste `o_envelope_real_medido_e_lido_com_prova` guarda essa forma. Uma frase da mensagem do
+    `c2c1877` ("só varre o que o Git rastrea") **não** é sustentada pela terceira medição, feita no diretório do projeto:
+    lá a lista de lidos veio com arquivos sob `Python/`, que tem **0** arquivos rastreados (`git ls-files Python/`) contra
+    154 no total; o que as duas medições sustentam é que `scanned: []` é um estado real do instrumento fora de um
+    repositório, e o que ele varre dentro de um continua sendo a pendência 14 do §6. Commit local, não empurrado — a
+    correção fica registrada aqui em vez de reescrever a mensagem.
+
 ## 6. Pendências assumidas (com o primeiro passo de cada)
 
 | # | Pendência | Primeiro passo concreto |
@@ -827,9 +912,12 @@ que é o `filesScanned` lido das corridas dele) é o que tem código varrerável
 modelo de deploy: perfil 22 *Gate de análise*, destino `%TEMP%\piloto-etapa5-publicado` (que ficou inexistente de
 propósito — a publicação foi barrada antes de copiar), definição **v2** com o grafo de dois nós `varredura` →
 `depois-do-gate`, e as execuções **#47** e **#48**, as duas `failed` pelo corte `ERROR`. As corridas de análise do
-cadastro hoje vão até a **#12**: no projeto 4 existem **#2, #3, #4, #6, #11 e #12**, e a **#6** é a das 12 linhas
+cadastro, relidas às 00:0x numa **cópia** do banco (o original intocado), vão até a **#22**: no projeto 4 existem
+**#2, #3, #4, #6, #11, #12, #13, #16 e #19** (9, a mais nova a #19), e a **#6** é a das 12 linhas
 achadas com o semgrep real e o token mascarado, enquanto **#11/#12** são as duas do nó `analise` que barrou a
-publicação (9 erros, 4 avisos, 1 info). O que a etapa 4 criou para medir **foi desfeito e conferido**: o servidor temporário foi apagado (`list_servers` → 0), o modelo *medição docker* 21 foi removido pela confirmação da tela, a etiqueta `v0.0.1-janela` saiu do repositório do piloto (`git tag -l` → 0) e o grafo voltou aos oito nós — **e o mesmo
+publicação (9 erros, 4 avisos, 1 info). No projeto 2 (**`E:\ssh-master`**) há **8** corridas, e **#21** e **#22** — as
+duas últimas, `concluida` pelo embutido, 2.306 lidos / 167 pulados, counts 676/42/640, `blocked 1` com corte `ERROR` e
+**1.358** linhas de achado cada uma — são as que sustentam o número citado no item 39 do §5. O que a etapa 4 criou para medir **foi desfeito e conferido**: o servidor temporário foi apagado (`list_servers` → 0), o modelo *medição docker* 21 foi removido pela confirmação da tela, a etiqueta `v0.0.1-janela` saiu do repositório do piloto (`git tag -l` → 0) e o grafo voltou aos oito nós — **e o mesmo
 foi feito na etapa 6**: os três nós que serviram de andaime para medir (`repete`, com `retry_limit` 1; `segredo`, com
 `echo envio %CHAVE_PILOTO%`; `muito`, com o laço de 2.500 ecos) foram removidos por `pipeline_save_nodes` e a leitura de
 volta dá as **oito** chaves de sempre, com `secret_keys` voltando a `[]` por `save_deploy_profile`. As corridas **#49 a
