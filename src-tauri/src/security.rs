@@ -146,129 +146,259 @@ fn name_finding(rel: &str, extra: &[String]) -> Option<Finding> {
     None
 }
 
-/// Detecta um valor atribuindo a uma chave de credencial (`token = "abc"`).
-/// Feito à mão para não depender de regex: procuramos a chave, o `=`, e uma
-/// sequência seguinte que pareça valor real (sem espaços, com 6+ caracteres).
-fn looks_like_assignment(line: &str) -> Option<&'static str> {
-    const KEYS: [&str; 7] = ["password", "passwd", "secret", "api_key", "apikey", "access_key", "auth_token"];
-    let low = line.to_lowercase();
-    for key in KEYS {
-        let at = low.find(key)?;
-        let after = low[at + key.len()..].trim_start();
-        if !after.starts_with('=') && !after.starts_with(':') {
-            continue;
-        }
-        let value = after[1..].trim().trim_start_matches(['"', '\'']);
-        let meaningful: String = value
-            .chars()
-            .take_while(|c| !matches!(c, ' ' | '#' | ';' | ',' | '"' | '\''))
-            .collect();
-        let letters = meaningful.chars().filter(|c| !c.is_whitespace()).count();
-        if letters >= 6 && !meaningful.starts_with('$') && !meaningful.starts_with("${") {
-            return Some(key);
-        }
+/// As chaves cuja atribuição denuncia um segredo. A detecção e a máscara leem
+/// esta mesma lista e chegam aos mesmos intervalos: o que barra um commit é
+/// exatamente o que some antes de qualquer gravação.
+const CHAVES_DE_SEGREDO: [&str; 7] = [
+    "password",
+    "passwd",
+    "secret",
+    "api_key",
+    "apikey",
+    "access_key",
+    "auth_token",
+];
+
+/// O texto que toma o lugar de um valor.
+const MARCA_DE_MASCARA: &str = "«valor mascarado»";
+
+/// Uma atribuição de segredo: a chave que a denunciou e o intervalo [início, fim)
+/// do valor na linha que chegou. Os deslocamentos são bytes do texto original, e é
+/// por isso que nada aqui vira a linha em minúsculas: em Unicode a caixa pode mudar
+/// o número de bytes, e um deslocamento vindo da cópia cortaria o valor no meio de
+/// um caractere — ou faria a máscara desistir, como fazia diante de um `İ`.
+struct Atribuicao {
+    chave: &'static str,
+    inicio: usize,
+    fim: usize,
+}
+
+/// A próxima ocorrência de `chave` a partir do byte `de`, ignorando a caixa ASCII.
+/// Feito à mão porque o projeto não tem a dependency `regex` e porque a busca
+/// precisa devolver a posição no texto original.
+fn ocorrencia(bytes: &[u8], chave: &[u8], de: usize) -> Option<usize> {
+    if chave.is_empty() || bytes.len() < de + chave.len() {
         return None;
     }
-    None
+    (de..=bytes.len() - chave.len()).find(|i| bytes[*i..*i + chave.len()].eq_ignore_ascii_case(chave))
+}
+
+/// Todas as posições de `chave` na linha.
+fn ocorrencias(linha: &str, chave: &[u8]) -> Vec<usize> {
+    let bytes = linha.as_bytes();
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(i) = ocorrencia(bytes, chave, cursor) {
+        out.push(i);
+        cursor = i + chave.len();
+    }
+    out
+}
+
+/// Onde termina a cauda de um token conhecido: no primeiro byte que não é de token.
+fn fim_do_token(linha: &str, de: usize) -> usize {
+    linha[de..]
+        .char_indices()
+        .find(|(_, c)| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_')))
+        .map(|(i, _)| de + i)
+        .unwrap_or(linha.len())
+}
+
+/// Onde termina um valor solto — o que vem depois de `Bearer` ou de um `=` sem
+/// aspa. Caminhar por `char_indices` é o que garante o corte numa borda de
+/// caractere num texto com acento.
+fn fim_do_valor(linha: &str, de: usize) -> usize {
+    linha[de..]
+        .char_indices()
+        .find(|(_, c)| {
+            c.is_whitespace()
+                || matches!(c, '"' | '\'' | ',' | ';' | '#' | '(' | ')' | '[' | ']' | '{' | '}')
+        })
+        .map(|(i, _)| de + i)
+        .unwrap_or(linha.len())
+}
+
+/// O byte que fecha um valor entre aspas, ou o fim da linha quando a aspa não
+/// fecha: um valor cortado no meio do arquivo não é motivo para mostrá-lo.
+fn fim_do_valor_entre_aspas(linha: &str, de: usize, aspa: u8) -> usize {
+    let bytes = linha.as_bytes();
+    let mut i = de;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b if b == aspa => return i,
+            _ => i += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// O que já é a marca não é um valor. Sem isto, mascarar duas vezes escreveria
+/// um segundo marcador colado no fim do primeiro.
+fn esta_mascarado(linha: &str, de: usize) -> bool {
+    linha[de..].starts_with(MARCA_DE_MASCARA)
+}
+
+/// O intervalo do valor que uma chave de segredo está recebendo, olhando a partir
+/// do byte logo depois da chave. Não é valor quando:
+/// * o sinal é uma comparação (`==`) — o texto à direita é um teste, não um segredo;
+/// * o texto é uma referência (`$X`, `${X}`) — o valor mora no ambiente;
+/// * o texto está solto e é curto (`password = x`) — um nome de variável, não um
+///   literal.
+///
+/// Entre aspas o valor é tudo o que está entre aspas, **inclusive quando tem
+/// espaços**: é a forma de uma frase-senha, e a máscara antiga parava no primeiro
+/// espaço e deixava o resto à vista.
+fn valor_de_uma_atribuicao(linha: &str, apos_chave: usize) -> Option<(usize, usize)> {
+    let bytes = linha.as_bytes();
+    let mut i = apos_chave;
+    // a aspa que fecha o nome num JSON ou num array PHP: `"password": "…"`;
+    if matches!(bytes.get(i), Some(b'"') | Some(b'\'')) {
+        i += 1;
+    }
+    while matches!(bytes.get(i), Some(b' ') | Some(b'\t')) {
+        i += 1;
+    }
+    let sinal = *bytes.get(i)?;
+    if !matches!(sinal, b'=' | b':') {
+        return None;
+    }
+    let mut j = i + 1;
+    if sinal == b'=' && matches!(bytes.get(j), Some(b'=') | Some(b'~')) {
+        return None;
+    }
+    while matches!(bytes.get(j), Some(b' ') | Some(b'\t')) {
+        j += 1;
+    }
+    if esta_mascarado(linha, j) {
+        return None;
+    }
+    match bytes.get(j)? {
+        b'$' => None,
+        aspa @ (b'"' | b'\'') => {
+            let inicio = j + 1;
+            let fim = fim_do_valor_entre_aspas(linha, inicio, *aspa);
+            (fim > inicio).then_some((inicio, fim))
+        }
+        _ => {
+            let fim = fim_do_valor(linha, j);
+            let corpo = &linha[j..fim];
+            (corpo.chars().count() >= 6).then_some((j, fim))
+        }
+    }
+}
+
+/// Todas as atribuições de segredo de uma linha, na ordem. Uma linha pode ter duas
+/// (`password = …; secret = …`): a detecção antiga devolvia no máximo uma chave —
+/// parava na primeira que não existia na linha, e na primeira que existia sem se
+/// qualificar — então as outras ficavam invisíveis para a checagem **e** para a
+/// máscara.
+fn atribuicoes(linha: &str) -> Vec<Atribuicao> {
+    let bytes = linha.as_bytes();
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        let Some((pos, chave)) = CHAVES_DE_SEGREDO
+            .iter()
+            .filter_map(|c| ocorrencia(bytes, c.as_bytes(), cursor).map(|i| (i, *c)))
+            .min_by_key(|(i, _)| *i)
+        else {
+            break;
+        };
+        let depois = pos + chave.len();
+        match valor_de_uma_atribuicao(linha, depois) {
+            Some((inicio, fim)) => {
+                out.push(Atribuicao { chave, inicio, fim });
+                cursor = fim.max(depois);
+            }
+            None => cursor = depois,
+        }
+    }
+    out
+}
+
+/// Os intervalos de uma linha que são valor de segredo: atribuições, cabeçalhos
+/// `Bearer …` e caudas de token conhecido, fundidos e sem sobreposição. Uma
+/// passada só sobre o texto original — é assim que uma máscara não corta a outra
+/// no meio do marcador, em vez de depender da ordem de três passadas.
+///
+/// O prefixo de um token conhecido fica de fora: ele diz a espécie do segredo e não
+/// é segredo, então uma máscara que o cobriria se divide ao redor dele.
+fn intervalos_a_esconder(linha: &str) -> Vec<(usize, usize)> {
+    let mut escondidos: Vec<(usize, usize)> = Vec::new();
+    let mut a_vista: Vec<(usize, usize)> = Vec::new();
+
+    for a in atribuicoes(linha) {
+        escondidos.push((a.inicio, a.fim));
+    }
+    // `Bearer …`: a palavra fica, o que vem depois dela não — pode ser um token
+    // opaco, sem prefixo de espécie nenhuma para a máscara reconhecer.
+    for i in ocorrencias(linha, b"bearer ") {
+        let inicio = i + 7;
+        if esta_mascarado(linha, inicio) {
+            continue;
+        }
+        let fim = fim_do_valor(linha, inicio);
+        if fim > inicio {
+            escondidos.push((inicio, fim));
+        }
+    }
+    for prefixo in PREFIXOS_TOKEN {
+        for i in ocorrencias(linha, prefixo.as_bytes()) {
+            let inicio = i + prefixo.len();
+            let fim = fim_do_token(linha, inicio);
+            if fim > inicio {
+                escondidos.push((inicio, fim));
+            }
+            a_vista.push((i, inicio));
+        }
+    }
+
+    escondidos.sort_unstable();
+    let mut fundidos: Vec<(usize, usize)> = Vec::new();
+    for (inicio, fim) in escondidos {
+        match fundidos.last_mut() {
+            Some(u) if inicio <= u.1 => u.1 = u.1.max(fim),
+            _ => fundidos.push((inicio, fim)),
+        }
+    }
+    a_vista.sort_unstable();
+
+    let mut saida = Vec::new();
+    for (inicio, fim) in fundidos {
+        let mut corte = inicio;
+        for &(de, ate) in &a_vista {
+            if ate <= corte || de >= fim {
+                continue;
+            }
+            if de > corte {
+                saida.push((corte, de));
+            }
+            corte = ate.max(corte);
+        }
+        if corte < fim {
+            saida.push((corte, fim));
+        }
+    }
+    saida
 }
 
 /// O valor de um segredo nunca deixa esta função. A linha mascarada é o que vai
 /// para o banco, para a tela e para o pacote que uma IA lê — é a mesma regra da
 /// checagem de segredo, aplicada antes de qualquer texto de arquivo ser guardado.
 pub fn mascarar(line: &str) -> String {
-    let com_atribuicao = match looks_like_assignment(line) {
-        Some(key) => mascarar_atribuicao(line, key).unwrap_or_else(|| line.to_string()),
-        None => line.to_string(),
-    };
-    // O `Bearer` age antes da passada de prefixos: se ele esconde o token inteiro,
-    // não sobra prefixo para uma segunda máscara cortar no meio do «valor mascarado».
-    mascarar_prefixos(&mascarar_bearer(&com_atribuicao))
-}
-
-/// Esconde o valor de um cabeçalho `Bearer …`. A palavra fica à vista porque é o
-/// formato, não o segredo; o que vem depois dela é a credencial, e ela pode ser
-/// um token opaco, sem prefixo de espécie nenhuma para a máscara reconhecer.
-fn mascarar_bearer(line: &str) -> String {
-    const MARCA: &str = "bearer ";
-    let minuscula = line.to_lowercase();
-    if minuscula.len() != line.len() {
+    let intervalos = intervalos_a_esconder(line);
+    if intervalos.is_empty() {
         return line.to_string();
     }
     let mut saida = String::with_capacity(line.len());
     let mut cursor = 0usize;
-    while let Some(pos) = minuscula[cursor..].find(MARCA) {
-        let inicio = cursor + pos + MARCA.len();
-        let cauda = &minuscula[inicio..];
-        let fim = cauda
-            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';'))
-            .unwrap_or(cauda.len());
+    for (inicio, fim) in intervalos {
         saida.push_str(&line[cursor..inicio]);
-        if fim > 0 {
-            saida.push_str("«valor mascarado»");
-        }
-        cursor = inicio + fim;
+        saida.push_str(MARCA_DE_MASCARA);
+        cursor = fim;
     }
     saida.push_str(&line[cursor..]);
-    saida
-}
-
-/// Esconde o lado direito de `chave = "valor"`. Os deslocamentos são os mesmos
-/// da detecção, e só são usados quando a forma minúscula tem o mesmo tamanho de
-/// bytes: se o casing não-ASCII mudou o tamanho, cortar a originalceria no meio
-/// de um caractere, então a linha fica como está e só a passada de prefixos age.
-fn mascarar_atribuicao(line: &str, chave: &str) -> Option<String> {
-    let minuscula = line.to_lowercase();
-    if minuscula.len() != line.len() {
-        return None;
-    }
-    let ate = minuscula.find(chave)? + chave.len();
-    let depois = minuscula[ate..].trim_start();
-    let separador = depois.as_bytes().first()?;
-    if *separador != b'=' && *separador != b':' {
-        return None;
-    }
-    let espaco = &line[ate..];
-    let inicio = ate + (espaco.len() - espaco.trim_start().len()) + 1;
-    let apos = &line[inicio..];
-    let valor = inicio + (apos.len() - apos.trim_start().len());
-    let com_aspa = &line[valor..];
-    let aspa = match com_aspa.chars().next() {
-        Some(c @ ('"' | '\'')) => c.len_utf8(),
-        _ => 0,
-    };
-    let corpo = &line[valor + aspa..];
-    let fim = corpo
-        .find([' ', '#', ';', ',', '"', '\''])
-        .unwrap_or(corpo.len());
-    Some(format!(
-        "{}«valor mascarado»{}",
-        &line[..valor + aspa],
-        &line[valor + aspa + fim..]
-    ))
-}
-
-/// Esconde a cauda de um token conhecido (`ghp_…`, `AKIA…`). O prefixo fica à
-/// vista: é ele que diz a espécie do segredo, e não é segredo.
-fn mascarar_prefixos(line: &str) -> String {
-    let mut saida = String::with_capacity(line.len());
-    let mut restante = line;
-    while !restante.is_empty() {
-        let Some((pos, prefixo)) = PREFIXOS_TOKEN
-            .iter()
-            .filter_map(|p| restante.find(p).map(|i| (i, *p)))
-            .min_by_key(|(i, _)| *i)
-        else {
-            saida.push_str(restante);
-            break;
-        };
-        let cauda = &restante[pos + prefixo.len()..];
-        let fim = cauda
-            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-            .unwrap_or(cauda.len());
-        saida.push_str(&restante[..pos + prefixo.len()]);
-        saida.push_str("«valor mascarado»");
-        restante = &cauda[fim..];
-    }
     saida
 }
 
@@ -295,8 +425,8 @@ fn content_findings(rel: &str, bytes: &[u8]) -> Vec<Finding> {
         );
     }
     for line in text.lines().take(4000) {
-        if let Some(key) = line.find("AKIA") {
-            let tail: String = line[key + 4..].chars().take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit()).collect();
+        for at in ocorrencias(line, b"AKIA") {
+            let tail: String = line[at + 4..].chars().take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit()).collect();
             if tail.len() >= 16 {
                 push(
                     "conteudo",
@@ -306,12 +436,9 @@ fn content_findings(rel: &str, bytes: &[u8]) -> Vec<Finding> {
             }
         }
         for prefix in PREFIXOS_TOKEN.iter().filter(|p| **p != "AKIA") {
-            if let Some(at) = line.find(prefix) {
-                let tail: String = line[at + prefix.len()..]
-                    .chars()
-                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-                    .collect();
-                if tail.len() >= 12 {
+            for at in ocorrencias(line, prefix.as_bytes()) {
+                let cauda = &line[at + prefix.len()..fim_do_token(line, at + prefix.len())];
+                if cauda.len() >= 12 {
                     push(
                         "conteudo",
                         format!("contém um token com o prefixo {prefix}"),
@@ -320,13 +447,10 @@ fn content_findings(rel: &str, bytes: &[u8]) -> Vec<Finding> {
                 }
             }
         }
-        let low = line.to_lowercase();
-        if let Some(at) = low.find("bearer ") {
-            let tail: String = low[at + 7..]
-                .chars()
-                .take_while(|c| !(c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';')))
-                .collect();
-            if tail.len() >= 12 {
+        for at in ocorrencias(line, b"bearer ") {
+            let inicio = at + 7;
+            let tail = &line[inicio..fim_do_valor(line, inicio)];
+            if tail.chars().count() >= 12 {
                 push(
                     "conteudo",
                     "traz uma credencial no cabeçalho Bearer".into(),
@@ -334,11 +458,11 @@ fn content_findings(rel: &str, bytes: &[u8]) -> Vec<Finding> {
                 );
             }
         }
-        if let Some(key) = looks_like_assignment(line) {
+        for a in atribuicoes(line) {
             push(
                 "conteudo",
-                format!("atribui um valor a “{key}” no arquivo"),
-                "mov o valor para uma variável de ambiente ou arquivo fora do repositório".into(),
+                format!("atribui um valor a “{}” no arquivo", a.chave),
+                "mova o valor para uma variável de ambiente ou arquivo fora do repositório".into(),
             );
         }
     }
@@ -622,6 +746,117 @@ mod tests {
         let opaco = mascarar("curl -H 'Authorization: Bearer um-token-opaco-sem-prefixo-de-especie'");
         assert!(opaco.contains("Bearer «valor mascarado»"), "{opaco}");
         assert!(!opaco.contains("um-token-opaco"), "{opaco}");
+    }
+
+    #[test]
+    fn toda_chave_de_segredo_tem_o_valor_escondido() {
+        // A detecção antiga parava na primeira chave que não existia na linha: só
+        // `password` era vista, e `secret = FICTICIO…` passava pela tela e pelo banco
+        // com o valor à vista. As sete chaves têm de se comportar igual.
+        for chave in CHAVES_DE_SEGREDO {
+            let linha = format!("{chave} = FICTICIO_VALOR_DE_TESTE");
+            let saida = mascarar(&linha);
+            assert!(!saida.contains("FICTICIO_VALOR_DE_TESTE"), "{chave}: {saida}");
+            assert!(saida.contains(MARCA_DE_MASCARA), "{chave}: {saida}");
+            let found = content_findings("app.conf", format!("{linha}\n").as_bytes());
+            assert!(
+                found.iter().any(|f| f.reason.contains(chave)),
+                "{chave} não barra: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn uma_linha_pode_ter_mais_de_um_valor() {
+        let saida = mascarar("password = FICTICIO_UM; secret = FICTICIO_DOIS");
+        assert!(!saida.contains("FICTICIO_UM"), "{saida}");
+        assert!(!saida.contains("FICTICIO_DOIS"), "{saida}");
+        assert_eq!(saida.matches(MARCA_DE_MASCARA).count(), 2, "{saida}");
+        let found = content_findings(
+            "app.conf",
+            b"password = FICTICIO_UM; secret = FICTICIO_DOIS\n",
+        );
+        assert_eq!(found.len(), 2, "{found:?}");
+    }
+
+    #[test]
+    fn o_valor_entre_aspas_some_inteiro() {
+        // Uma frase-senha tem espaços. O valor antigo cortava no primeiro e deixava
+        // o resto legível no trecho gravado.
+        let saida = mascarar("password = \"FICTICIO_UM FICTICIO_DOIS FICTICIO_TRES\"");
+        assert!(!saida.contains("FICTICIO"), "{saida}");
+        assert!(saida.starts_with("password = \""), "{saida}");
+        assert!(saida.ends_with('"'), "{saida}");
+        // aspas simples, e JSON com o nome entre aspas, são a mesma forma
+        assert!(!mascarar("password = 'FICTICIO_UM FICTICIO_DOIS'").contains("FICTICIO"));
+        let json = mascarar("{ \"password\": \"FICTICIO_UM FICTICIO_DOIS\" }");
+        assert!(!json.contains("FICTICIO"), "{json}");
+    }
+
+    #[test]
+    fn a_mascara_nao_desiste_diante_de_unicode() {
+        // `İ` minúsculo ocupa dois bytes a mais: a máscara antiga comparava o
+        // tamanho da cópia em minúsculas com o do original e devolvia a linha
+        // inteira sem esconder nada.
+        let bearer = mascarar("İ Bearer FICTICIO_TOKEN_OPACO_123");
+        assert!(bearer.contains("Bearer "), "{bearer}");
+        assert!(!bearer.contains("FICTICIO_TOKEN"), "{bearer}");
+        let atribuicao = mascarar("İnfo: password = FICTICIO_SENHA_COM_ACENTUAÇÃO_çã");
+        assert!(!atribuicao.contains("FICTICIO"), "{atribuicao}");
+        assert!(atribuicao.contains("İnfo"), "{atribuicao}");
+    }
+
+    #[test]
+    fn o_que_nao_e_valor_fica_a_vista() {
+        // Esconder tudo não é esconder segredo: uma referência de ambiente, um nome
+        // de variável, uma comparação e um texto comum têm de continuar legíveis —
+        // senão a tela vira ruído e ninguém confia nela. Um `Bearer ` seguido de uma
+        // palavra qualquer, esse é escondido: a forma de um token e a de uma palavra
+        // não se distinguem aqui, e o erro de segurança é o único dos dois que custa.
+        for linha in [
+            "password = ${DB_PASSWORD}",
+            "secret = $SEGREDO",
+            "password = \"\"",
+            "if password == hash_antiga {",
+            "print(password)",
+            "a senha do sistema usa password_hash()",
+        ] {
+            let saida = mascarar(linha);
+            assert_eq!(saida, linha, "escondeu o que não é valor");
+            let found = content_findings("app.conf", format!("{linha}\n").as_bytes());
+            assert!(
+                found.iter().all(|f| !f.reason.contains("valor a")),
+                "bloqueou o que não é valor: {linha} → {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mascara_e_idempotente() {
+        // A linha mascarada pode passar pela máscara de novo (log, auditoria,
+        // reexportação). Uma segunda passada não pode escrever um segundo marcador
+        // colado no primeiro nem descobrir o que a primeira escondeu.
+        for linha in [
+            "password = \"FICTICIO_UM FICTICIO_DOIS\"",
+            "curl -H 'Authorization: Bearer FICTICIO_TOKEN_OPACO_12345' https://api.example",
+            "auth_token = FICTICIO_VALOR_SOLTO_123",
+            "secret = 'FICTICIO_UM'; api_key = \"FICTICIO_DOIS COM ESPACO\"",
+            "stripe = \"sk_live_NAO-E-UMA-CHAVE-REAL-2026\"",
+        ] {
+            let uma_vez = mascarar(linha);
+            let duas_vezes = mascarar(&uma_vez);
+            assert_eq!(uma_vez, duas_vezes, "a segunda passada mudou a linha");
+            assert!(!duas_vezes.contains("FICTICIO"), "{duas_vezes}");
+        }
+    }
+
+    #[test]
+    fn o_prefixo_de_token_continua_dizendo_a_especie() {
+        // Dentro de um valor entre aspas o prefixo também fica: a máscara se divide
+        // ao redor dele em vez de cobri-lo.
+        let saida = mascarar("auth = \"ghp_FICTICIO_CAUDA_123456\"");
+        assert!(saida.contains("ghp_"), "{saida}");
+        assert!(!saida.contains("FICTICIO_CAUDA"), "{saida}");
     }
 
     #[test]

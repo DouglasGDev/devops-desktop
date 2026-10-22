@@ -769,11 +769,11 @@ export interface AnalysisPackage {
   };
   cobertura: { arquivosLidos: number; arquivosPulados: number; achadosGuardados: number };
   veredito: {
-    /** `barra`, `cobertura-nula`, `varredura-interrompida`, `revalidar-varredura`, `sem-achados` ou `achados-abaixo-do-corte`. */
+    /** `barra`, `cobertura-nula`, `varredura-interrompida`, `leitura-incompleta`, `revalidar-varredura`, `sem-achados` ou `achados-abaixo-do-corte`. */
     classificacao: string;
     bloqueia: boolean;
     corte: string;
-    contagem: AnalysisCounts & { total: number };
+    contagem: AnalysisCounts & { total: number; noCorte: number };
   };
   decisoes: { acao: string; motivo: string; evidencia: string }[];
   porRegra: {

@@ -1665,10 +1665,11 @@ fn rodar_no_analise(ctx: &mut Ctx, no: &PipelineNode, posicao: i64) -> Result<St
 }
 
 /// O veredito que o nó `analise` dá a uma corrida já gravada: barra quando o corte
-/// foi atingido, falha quando a varredura não pôde ser lida, e só então conclui
-/// com a linha que fica no histórico. Separado do motor porque depende apenas da
-/// corrida — é a mesma resposta que a tela de Análise mostra, e assim ela pode ser
-/// conferida sem uma janela nem um semgrep na máquina.
+/// foi atingido, devolve o cancelamento quando a varredura foi cortada no meio,
+/// falha quando ela não pôde ser lida, e só então conclui com a linha que fica no
+/// histórico. Separado do motor porque depende apenas da corrida — é a mesma
+/// resposta que a tela de Análise mostra, e assim ela pode ser conferida sem uma
+/// janela nem um semgrep na máquina.
 fn veredito_do_no(run: &AnalysisRun) -> Result<String, Fail> {
     let corte = if run.severity_gate.is_empty() {
         "sem corte".to_string()
@@ -1687,6 +1688,12 @@ fn veredito_do_no(run: &AnalysisRun) -> Result<String, Fail> {
             format!("dentro do corte {corte}")
         }
     );
+    // Uma varredura interrompida não terminou: é o mesmo estado de um comando
+    // cortado, e o motor tem de tratá-la como cancelamento — senão o nó fica
+    // "concluído" com metade da árvore lida e os dependentes seguem.
+    if run.status == "interrompida" {
+        return Err(Fail::cancelled());
+    }
     if run.blocked {
         return Err(Fail::failed(
             format!("análise de código (corte {corte})"),
@@ -1697,15 +1704,17 @@ fn veredito_do_no(run: &AnalysisRun) -> Result<String, Fail> {
             ),
         ));
     }
-    // Sem corte o nó informa, mas uma varredura que não leu nada ou que perdeu o
-    // instrumento pedido não informa coisa nenhuma: é falha, não sucesso.
-    if run.status == "falhou" {
+    // Sem corte o nó informa, mas uma varredura que falhou — ou que não chegou a
+    // um estado terminal — não informa coisa nenhuma: é falha dita com a nota de
+    // quem varreu, nunca um sucesso presumido.
+    if run.status != "concluida" {
         return Err(Fail::failed(
             format!("análise de código ({})", run.tool),
             None,
-            run.note
-                .clone()
-                .unwrap_or_else(|| "a varredura não conseguiu ler o código".to_string()),
+            run.note.clone().unwrap_or_else(|| match run.status.as_str() {
+                "falhou" => "a varredura não conseguiu ler o código".to_string(),
+                outro => format!("a varredura terminou no estado “{outro}”, que não é uma conclusão"),
+            }),
         ));
     }
     Ok(texto)
@@ -4867,6 +4876,31 @@ mod tests {
         // e um nó que só informa, com a leitura feita, conclui dizendo que nada barra
         let informativo = veredito_do_no(&corrida(false, "concluida", "", None)).unwrap();
         assert!(informativo.contains("nada barra"), "{informativo}");
+    }
+
+    #[test]
+    fn uma_varredura_interrompida_e_cancelamento_do_no() {
+        // Interrompida com corte atingido: os números estão lá, mas o estado diz que
+        // a varredura não terminou. É cancelamento, não falha de contagem — quem vê
+        // o histórico tem de ler "interrompida", não "o código tem 2 erros".
+        let cortada = veredito_do_no(&corrida(true, "interrompida", "ERROR", None)).unwrap_err();
+        assert!(cortada.cancelled, "{:?}", cortada.message);
+        assert_eq!(cortada.message, "interrompido pelo usuário");
+        assert_eq!(cortada.command, None, "não houve comando de ferramenta cortado");
+
+        // sem corte também: metade da árvore lida não conclui o nó
+        let muda = veredito_do_no(&corrida(false, "interrompida", "", None)).unwrap_err();
+        assert!(muda.cancelled);
+
+        // um estado que não é nenhum dos terminais — a corrida que ficou "rodando"
+        // porque o aplicativo morreu no meio — é falha dita, nunca sucesso presumido
+        let parada = veredito_do_no(&corrida(false, "rodando", "ERROR", None)).unwrap_err();
+        assert!(!parada.cancelled, "estado desconhecido não é vontade do usuário");
+        assert!(
+            parada.message.contains("que não é uma conclusão"),
+            "{}",
+            parada.message
+        );
     }
 
     #[test]

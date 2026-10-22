@@ -24,7 +24,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -1027,6 +1027,11 @@ fn peso(severidade: &str) -> u8 {
 /// é só um número: medido, uma varredura completa com um arquivo que ela não
 /// interpretou volta com código 2 e JSON inteiro, e outra com um erro volta com
 /// código 0. O veredito vem dos dados, nunca dele.
+///
+/// Os estados de "não sei" têm nome próprio, porque a ação é outra: `sem_resposta`
+/// é "havia programa e ele não acordou", `invalida` é "respondeu, mas o que
+/// devolveu não se leu". A ausência do programa é dita antes, pela sondagem.
+#[derive(Default)]
 struct Resposta {
     achados: Vec<Achado>,
     lidos: i64,
@@ -1035,25 +1040,21 @@ struct Resposta {
     code: Option<i32>,
     sem_resposta: bool,
     cancelado: bool,
-    ausente: bool,
+    invalida: bool,
     nota: Option<String>,
     regras: Vec<String>,
 }
 
 impl Resposta {
-    fn falha(nota: String) -> Self {
-        Resposta {
-            achados: Vec::new(),
-            lidos: 0,
-            pulados: 0,
-            erros: 0,
-            code: None,
-            sem_resposta: false,
-            cancelado: false,
-            ausente: true,
-            nota: Some(nota),
-            regras: Vec::new(),
-        }
+    /// Havia programa, e ele não acordou a tempo.
+    fn sem_resposta(nota: String) -> Self {
+        Resposta { sem_resposta: true, nota: Some(nota), ..Resposta::default() }
+    }
+
+    /// A resposta chegou, mas não diz o que foi varrido: não é "zero achados", é
+    /// nenhuma prova. Os achados que por acaso vieram continuam, o veredito não.
+    fn invalida(nota: String) -> Self {
+        Resposta { invalida: true, nota: Some(nota), ..Resposta::default() }
     }
 }
 
@@ -1067,7 +1068,15 @@ fn varredura_semgrep(
     prazo: Duration,
     cancel: &AtomicBool,
 ) -> Resposta {
-    let saida = std::env::temp_dir().join(format!("devops-desktop-semgrep-{}.json", std::process::id()));
+    // Duas varreduras podem rodar ao mesmo tempo em projetos diferentes: o
+    // arquivo de saída é de uma corrida, não do processo. Um nome por PID faria uma
+    // ler o JSON da outra — veredito trocado por cima do disco.
+    static SEQUENCIA: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQUENCIA.fetch_add(1, Ordering::SeqCst);
+    let saida = std::env::temp_dir().join(format!(
+        "devops-desktop-semgrep-{}-{seq}.json",
+        std::process::id()
+    ));
     let arquivo_saida = saida.display().to_string();
     let args = [
         "scan",
@@ -1084,31 +1093,27 @@ fn varredura_semgrep(
         return Resposta {
             cancelado: true,
             nota: Some("a varredura foi interrompida".to_string()),
-            ..Resposta::falha(String::new())
+            ..Resposta::default()
         };
     }
     if chamada.sem_resposta {
         let _ = std::fs::remove_file(&saida);
-        return Resposta {
-            sem_resposta: true,
-            nota: Some(format!(
-                "o semgrep não terminou dentro do prazo de {} s — o que ele varreu não é conhecido",
-                prazo.as_secs()
-            )),
-            ..Resposta::falha(String::new())
-        };
+        return Resposta::sem_resposta(format!(
+            "o semgrep não terminou dentro do prazo de {} s — o que ele varreu não é conhecido",
+            prazo.as_secs()
+        ));
     }
     let conteudo = std::fs::read_to_string(&saida);
     let _ = std::fs::remove_file(&saida);
     let Ok(conteudo) = conteudo else {
-        return Resposta::falha(format!(
+        return Resposta::invalida(format!(
             "o semgrep não escreveu o resultado (código {:?}); disse: {}",
             chamada.code,
             cauda(&chamada.stderr)
         ));
     };
     let Ok(valor) = serde_json::from_str::<Value>(&conteudo) else {
-        return Resposta::falha(format!(
+        return Resposta::invalida(format!(
             "o JSON do semgrep não é legível (código {:?})",
             chamada.code
         ));
@@ -1117,80 +1122,124 @@ fn varredura_semgrep(
 }
 
 /// Lê o envelope real do semgrep 1.181: `results[]`, `errors[]`, `paths.scanned`,
-/// `paths.skipped`. Cada campo é opcional — um formato que muda não pode fazer a
-/// varredura mentir sobre o que não estava lá.
+/// `paths.skipped`. As três listas que sustentam a prova são obrigatórias: um
+/// formato que mudou não pode fazer a varredura mentir sobre o que não estava lá,
+/// e um campo ausente não é um campo vazio — `results` que não veio virava
+/// "nenhum achado", que é justamente a conclusão que libera o pipeline.
 fn ler_envelope(valor: &Value, raiz: &Path, chamada: Chamada, regras: &Path) -> Resposta {
+    let Some(results) = valor.get("results").and_then(Value::as_array) else {
+        return Resposta::invalida("a resposta do semgrep não traz a lista de achados".to_string());
+    };
+    let Some(errors) = valor.get("errors").and_then(Value::as_array) else {
+        return Resposta::invalida("a resposta do semgrep não traz a lista de erros".to_string());
+    };
+    let paths = valor.get("paths");
+    let Some(scanned) = paths.and_then(|p| p.get("scanned")).and_then(Value::as_array) else {
+        return Resposta::invalida(
+            "a resposta do semgrep não diz quais arquivos foram lidos".to_string(),
+        );
+    };
+    match paths.and_then(|p| p.get("skipped")) {
+        None | Some(Value::Array(_)) => {}
+        Some(_) => {
+            return Resposta::invalida(
+                "a resposta do semgrep diz quais arquivos pulou de um jeito ilegível".to_string(),
+            )
+        }
+    }
+
     let mut achados = Vec::new();
     let mut vistos: Vec<String> = Vec::new();
     let mut trechos = Trechos::default();
-    if let Some(lista) = valor.get("results").and_then(Value::as_array) {
-        for r in lista {
-            let Some(id) = r.get("check_id").and_then(Value::as_str) else {
-                continue;
-            };
-            // `check_id` é o caminho da config pontuado mais o identificador da
-            // regra; o que importa é o identificador, que é o nome que os dois
-            // instrumentos compartilham.
-            let regra = id.rsplit('.').next().unwrap_or(id).to_string();
-            if !vistos.contains(&regra) {
-                vistos.push(regra.clone());
-            }
-            let extra = r.get("extra").cloned().unwrap_or(Value::Null);
-            let metadata = extra.get("metadata").cloned().unwrap_or(Value::Null);
-            let severidade = extra
-                .get("severity")
-                .and_then(Value::as_str)
-                .or_else(|| metadata.get("severity").and_then(Value::as_str))
-                .map(|s| s.to_uppercase())
-                // Fora dos três conhecidos entra como WARNING: é o meio termo
-                // honesto entre descartar um achado e inflar um aviso.
-                .filter(|s| SEVERIDADES.contains(&s.as_str()))
-                .unwrap_or_else(|| "WARNING".to_string());
-            let arquivo = r.get("path").and_then(Value::as_str).unwrap_or("");
-            let inicio = r.get("start").and_then(|s| s.get("line")).and_then(Value::as_i64).unwrap_or(0);
-            let fim = r
-                .get("end")
-                .and_then(|s| s.get("line"))
-                .and_then(Value::as_i64)
-                .filter(|n| *n >= inicio)
-                .unwrap_or(inicio);
-            achados.push(Achado {
-                rule_id: regra,
-                source: "semgrep".to_string(),
-                severity: severidade,
-                file: nome_relativo(raiz, &Path::new(raiz).join(arquivo.replace('\\', "/"))),
-                line_start: inicio,
-                line_end: fim,
-                message: extra
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("a regra não escreveu mensagem")
-                    .to_string(),
-                cwe: cwe_da_metadata(&metadata),
-                // O modo livre não devolve o trecho: medido, `extra.lines` vem
-                // escrito "requires login". Então é o aplicativo que lê a linha,
-                // e é aqui que ela encontra a mascaráção antes de qualquer gravação.
-                snippet: trechos.trecho(raiz, arquivo, inicio, fim),
-            });
+    let mut sem_forma = 0usize;
+    for r in results {
+        // Um achado sem regra, sem caminho ou sem linha não tem onde ficar: conta
+        // como leitura que não se leu, não como achado que não existia.
+        let Some(id) = r.get("check_id").and_then(Value::as_str) else {
+            sem_forma += 1;
+            continue;
+        };
+        let Some(arquivo) = r.get("path").and_then(Value::as_str) else {
+            sem_forma += 1;
+            continue;
+        };
+        let Some(inicio) = r
+            .get("start")
+            .and_then(|s| s.get("line"))
+            .and_then(Value::as_i64)
+        else {
+            sem_forma += 1;
+            continue;
+        };
+        // `check_id` é o caminho da config pontuado mais o identificador da
+        // regra; o que importa é o identificador, que é o nome que os dois
+        // instrumentos compartilham.
+        let regra = id.rsplit('.').next().unwrap_or(id).to_string();
+        if !vistos.contains(&regra) {
+            vistos.push(regra.clone());
         }
+        let extra = r.get("extra").cloned().unwrap_or(Value::Null);
+        let metadata = extra.get("metadata").cloned().unwrap_or(Value::Null);
+        let severidade = extra
+            .get("severity")
+            .and_then(Value::as_str)
+            .or_else(|| metadata.get("severity").and_then(Value::as_str))
+            .map(|s| s.to_uppercase())
+            // Fora dos três conhecidos entra como WARNING: é o meio termo
+            // honesto entre descartar um achado e inflar um aviso.
+            .filter(|s| SEVERIDADES.contains(&s.as_str()))
+            .unwrap_or_else(|| "WARNING".to_string());
+        let fim = r
+            .get("end")
+            .and_then(|s| s.get("line"))
+            .and_then(Value::as_i64)
+            .filter(|n| *n >= inicio)
+            .unwrap_or(inicio);
+        achados.push(Achado {
+            rule_id: regra,
+            source: "semgrep".to_string(),
+            severity: severidade,
+            file: nome_relativo(raiz, &Path::new(raiz).join(arquivo.replace('\\', "/"))),
+            line_start: inicio,
+            line_end: fim,
+            message: extra
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("a regra não escreveu mensagem")
+                .to_string(),
+            cwe: cwe_da_metadata(&metadata),
+            // O modo livre não devolve o trecho: medido, `extra.lines` vem
+            // escrito "requires login". Então é o aplicativo que lê a linha,
+            // e é aqui que ela encontra a mascaráção antes de qualquer gravação.
+            snippet: trechos.trecho(raiz, arquivo, inicio, fim),
+        });
     }
-    let erros = contador_de_lista(valor.get("errors"));
-    let nota = (erros > 0).then(|| {
-        format!(
+    let erros = errors.len() as i64;
+    let mut motivos: Vec<String> = Vec::new();
+    if sem_forma > 0 {
+        motivos.push(format!(
+            "{sem_forma} achado(s) da resposta vieram sem regra, caminho ou linha — a varredura não é completa"
+        ));
+    }
+    if erros > 0 {
+        motivos.push(format!(
             "a ferramenta reportou {erros} erro(s) fora dos achados — o que ela não interpretou não foi varrido"
-        )
-    });
+        ));
+    }
     Resposta {
         achados: dedupe(achados),
-        lidos: contador_de_lista(valor.get("paths").and_then(|p| p.get("scanned"))),
-        pulados: contador_de_lista(valor.get("paths").and_then(|p| p.get("skipped"))),
+        lidos: scanned.len() as i64,
+        pulados: paths
+            .and_then(|p| p.get("skipped"))
+            .and_then(Value::as_array)
+            .map(|a| a.len() as i64)
+            .unwrap_or(0),
         erros,
         code: chamada.code,
-        sem_resposta: false,
-        cancelado: false,
-        ausente: false,
-        nota,
+        invalida: sem_forma > 0,
+        nota: (!motivos.is_empty()).then(|| motivos.join(" · ")),
         regras: efetivamente_lidos(vistos, regras),
+        ..Default::default()
     }
 }
 
@@ -1223,25 +1272,19 @@ fn cwe_da_metadata(metadata: &Value) -> Option<String> {
     }
 }
 
-fn contador_de_lista(valor: Option<&Value>) -> i64 {
-    valor.and_then(Value::as_array).map(|a| a.len() as i64).unwrap_or(0)
-}
-
 /// O fim da reclamação de uma ferramenta. Duzentos caracteres dizem o que foi; o
-/// resto é log, e log de ferramenta não é achado.
+/// resto é log, e log de ferramenta não é achado. A máscara age antes do corte: um
+/// stderr que citou um caminho de config com token não pode ser gravado como veio.
 fn cauda(texto: &str) -> String {
-    let limpo = texto.trim();
-    if limpo.len() <= 200 {
-        return limpo.to_string();
+    let limpo = security::mascarar(texto.trim());
+    let total = limpo.chars().count();
+    if total <= 200 {
+        return limpo;
     }
-    let mut corte = 200;
-    while !limpo.is_char_boundary(corte) {
-        corte -= 1;
-    }
-    format!("…{}", &limpo[limpo.len() - corte..])
+    format!("…{}", limpo.chars().skip(total - 200).collect::<String>())
 }
 
-/// Busca a linha que o semgrep apontou e a devolve mascaráda.
+/// Busca a linha que o semgrep apontou e a devolve mascarada.
 #[derive(Default)]
 struct Trechos {
     cache: HashMap<String, Vec<String>>,
@@ -1391,9 +1434,10 @@ pub fn executar(
     let mut achados: Vec<Achado> = Vec::new();
     let mut exit_code = None;
     let mut tool_errors = 0;
-    // O instrumento externo foi pedido e não esteve disponível: é diferente de
-    // "não foi pedido", e é isso que a nota e o corte precisam dizer.
-    let mut externo_indisponivel = false;
+    // O instrumento externo foi pedido e não entregou prova: não estava lá, não
+    // respondeu, ou respondeu de um jeito que não se leu. É diferente de "varreu e
+    // não achou nada", e é isso que a nota e o corte precisam dizer.
+    let mut externo_sem_prova = false;
 
     if instrumento != "semgrep" {
         let (embutidos, dele) = varredura_embutida(&alvo, cancel);
@@ -1425,17 +1469,9 @@ pub fn executar(
             if let Some(nota) = resposta.nota {
                 notas.push(nota);
             }
-            externo_indisponivel = resposta.ausente || resposta.sem_resposta;
-            if externo_indisponivel {
-                notas.push(match ferramenta.estado.as_str() {
-                    "sem-resposta" => "o semgrep existe mas não respondeu à sondagem de versão".to_string(),
-                    _ => format!(
-                        "o semgrep não estava disponível nesta máquina — instale-o ou aponte o caminho em {CHAVE_CONFIG}"
-                    ),
-                });
-            }
+            externo_sem_prova = resposta.sem_resposta || resposta.invalida;
         } else {
-            externo_indisponivel = true;
+            externo_sem_prova = true;
             notas.push(match ferramenta.estado.as_str() {
                 "sem-resposta" => "o semgrep existe mas não respondeu à sondagem de versão".to_string(),
                 _ => format!(
@@ -1473,11 +1509,18 @@ pub fn executar(
     if sem_leitura {
         notas.push("a varredura não leu arquivo nenhum — não há o que afirmar sobre o código".to_string());
     }
-    // Um corte é uma promessa de leitura completa. Com o instrumento pedido
-    // ausente, a promessa não pode ser cumprida por metade dela: o varrido é
-    // dito, mas a corrida não passa por limpa.
+    // Um corte é uma promessa de leitura completa. "Não consegui ler" não é "está
+    // limpo": quando o instrumento pedido não entregou prova, ou quando não houve
+    // leitura nenhuma, a corrida é dita falha — os achados que existem continuam
+    // gravados, e é a nota que diz o que falta.
+    let sem_prova = sem_leitura || externo_sem_prova;
+    // Cobertura parcial não é ausência de prova — é prova de menos. Com um corte
+    // declarado, a promessa vale para a árvore inteira, então ela barra; sem corte,
+    // o nó informa e a nota diz o que ficou de fora.
+    let cobertura_parcial =
+        cobertura.cortada || tool_errors > 0 || externo_sem_prova || sem_leitura;
     aberto.id = run_id;
-    aberto.status = if sem_leitura || (externo_indisponivel && instrumento == "semgrep") {
+    aberto.status = if sem_prova {
         "falhou".to_string()
     } else {
         "concluida".to_string()
@@ -1488,8 +1531,7 @@ pub fn executar(
     aberto.files_skipped = cobertura.pulados;
     aberto.exit_code = exit_code.map(i64::from);
     aberto.tool_errors = tool_errors;
-    aberto.blocked = barra_o_corte(&corte, &counts)
-        || ((sem_leitura || externo_indisponivel) && !corte.is_empty());
+    aberto.blocked = barra_o_corte(&corte, &counts) || (!corte.is_empty() && cobertura_parcial);
     aberto.counts = counts;
     aberto.rules = regras_usadas.join(", ");
     aberto.note = (!notas.is_empty()).then(|| notas.join(" · "));
@@ -1499,7 +1541,9 @@ pub fn executar(
 }
 
 /// Fecha a corrida como interrompida. Uma varredura cortada no meio não é uma
-/// varredura limpa, e é assim que ela tem de aparecer no histórico.
+/// varredura limpa, e é assim que ela tem de aparecer no histórico: com o corte
+/// declarado, a promessa não cumprida barra; é o nó que devolve o cancelamento,
+/// não um sucesso com a nota no meio.
 fn fechar_interrompida(
     conn: &Connection,
     run_id: i64,
@@ -1511,6 +1555,7 @@ fn fechar_interrompida(
     fechado.status = "interrompida".to_string();
     fechado.finished_at = Some(db::now_rfc3339());
     fechado.duration_ms = duracao_ms(inicio);
+    fechado.blocked = !fechado.severity_gate.is_empty();
     fechado.note = Some("a varredura foi interrompida antes do fim".to_string());
     db::fechar_analise(conn, run_id, &fechado)?;
     db::obter_analise(conn, run_id)
@@ -1519,11 +1564,17 @@ fn fechar_interrompida(
 /// O corte é uma frase sobre o futuro: "com qualquer coisa deste nível para cima,
 /// a publicação para". Vazio é "nada barra".
 pub fn barra_o_corte(corte: &str, counts: &AnalysisCounts) -> bool {
+    !corte.is_empty() && achados_no_corte(corte, counts) > 0
+}
+
+/// Quantos achados estão no corte declarado ou acima dele. É outro número que o
+/// total: dizer "barram 1.358 achados" quando o corte é ERROR e os erros são 676
+/// seria inventar o resto.
+fn achados_no_corte(corte: &str, counts: &AnalysisCounts) -> i64 {
     match corte {
-        "ERROR" => counts.error > 0,
-        "WARNING" => counts.error + counts.warning > 0,
-        "INFO" => counts.total() > 0,
-        _ => false,
+        "ERROR" => counts.error,
+        "WARNING" => counts.error + counts.warning,
+        _ => counts.total(),
     }
 }
 
@@ -1618,9 +1669,13 @@ fn classificar(run: &AnalysisRun) -> Value {
         "varredura-interrompida"
     } else if run.files_scanned == 0 {
         "cobertura-nula"
+    } else if run.status == "falhou" || run.tool.contains("ausente") {
+        // O instrumento pedido não entregou prova. Os números que existem são os
+        // dele, e a ausência do resto não pode ser lida como "sem achados".
+        "leitura-incompleta"
     } else if run.blocked {
         "barra"
-    } else if run.tool_errors > 0 || run.tool.contains("ausente") {
+    } else if run.tool_errors > 0 {
         "revalidar-varredura"
     } else if total == 0 {
         "sem-achados"
@@ -1636,6 +1691,7 @@ fn classificar(run: &AnalysisRun) -> Value {
             "warning": run.counts.warning,
             "info": run.counts.info,
             "total": total,
+            "noCorte": achados_no_corte(&run.severity_gate, &run.counts),
         },
     })
 }
@@ -1648,12 +1704,18 @@ fn decisoes(run: &AnalysisRun, veredito: &Value) -> Vec<Value> {
         .and_then(Value::as_str)
         .unwrap_or("");
     let mut out = Vec::new();
-    match rotulo {
-        "barra" => out.push(json!({
+    if run.blocked {
+        out.push(json!({
             "acao": "parar-a-publicacao",
-            "motivo": format!("{} achado(s) no corte {} ou acima", run.counts.total(), run.severity_gate),
-            "evidencia": "veredito.contagem",
-        })),
+            "motivo": format!(
+                "{} achado(s) no corte {} ou acima",
+                achados_no_corte(&run.severity_gate, &run.counts),
+                if run.severity_gate.is_empty() { "nenhum" } else { &run.severity_gate }
+            ),
+            "evidencia": "veredito.contagem.noCorte",
+        }));
+    }
+    match rotulo {
         "cobertura-nula" => out.push(json!({
             "acao": "revisar-o-pedido",
             "motivo": "a varredura não abriu arquivo nenhum; não há conclusão possível sobre o código",
@@ -1664,12 +1726,17 @@ fn decisoes(run: &AnalysisRun, veredito: &Value) -> Vec<Value> {
             "motivo": "a varredura foi cortada antes do fim",
             "evidencia": "execucao.status",
         })),
+        "leitura-incompleta" => out.push(json!({
+            "acao": "refazer-a-varredura",
+            "motivo": "o instrumento pedido não entregou prova; o que ele não leu não pode ser dado como limpo",
+            "evidencia": "execucao.status",
+        })),
         _ => {}
     }
     if run.tool_errors > 0 {
         out.push(json!({
             "acao": "revalidar-varredura",
-            "motivo": format!("a ferramenta não interpretou {} arquivo(s); o que ela não leu não foi varrido", run.tool_errors),
+            "motivo": format!("a ferramenta reportou {} erro(s) de interpretação fora dos achados; parte da árvore não foi varrida", run.tool_errors),
             "evidencia": "execucao.errosDaFerramenta",
         }));
     }
@@ -2191,13 +2258,84 @@ mod tests {
         assert_eq!(resposta.pulados, 1);
         assert_eq!(resposta.erros, 1);
         assert_eq!(resposta.code, Some(2));
-        assert!(!resposta.ausente && !resposta.sem_resposta);
+        assert!(!resposta.sem_resposta && !resposta.invalida);
         let nota = resposta.nota.clone().unwrap_or_default();
         assert!(nota.contains("1 erro(s)"), "{nota}");
         // O trecho veio do arquivo lido por nós, não do JSON — que em modo livre
         // devolve "requires login" no lugar da linha.
         assert_eq!(resposta.achados[0].snippet.as_deref(), Some("os.system(cmd)"));
         let _ = std::fs::remove_dir_all(&pasta);
+    }
+
+    /// Envelope gravado de uma varredura real do semgrep 1.181.0 nesta máquina, em
+    /// 2026-10-21: um arquivo rastreado pelo Git, duas linhas de comando, `errors`
+    /// vazio e **sem** `paths.skipped` — porque nada foi pulado. É a forma que o
+    /// leitor tem de continuar aceitando: um campo obrigatório que a ferramenta não
+    /// escreve tornaria toda varredura limpa inválida.
+    fn envelope_medido() -> Value {
+        let achado = |linha: i64, ate: i64, offset: i64, offset_ate: i64| {
+            json!({
+                "check_id": "E.ssh-master.src-tauri.regras.dd-101-shell-true",
+                "path": "a.py",
+                "start": { "line": linha, "col": 5, "offset": offset },
+                "end": { "line": ate, "col": 19, "offset": offset_ate },
+                "extra": {
+                    "message": "um comando é montado e entregue a um shell",
+                    "metadata": { "cwe": "CWE-78: OS Command Injection" },
+                    "severity": "ERROR",
+                    "fingerprint": "requires login",
+                    "lines": "requires login",
+                    "validation_state": "NO_VALIDATOR",
+                    "engine_kind": "OSS"
+                }
+            })
+        };
+        json!({
+            "version": "1.181.0",
+            "results": [achado(5, 5, 45, 59), achado(6, 6, 64, 103)],
+            "errors": [],
+            "paths": { "scanned": ["a.py"] },
+            "time": { "rules": [], "targets": [], "total_bytes": 0 },
+            "engine_requested": "OSS",
+            "skipped_rules": [],
+            "profiling_results": []
+        })
+    }
+
+    #[test]
+    fn o_envelope_real_medido_e_lido_com_prova() {
+        let casa = pasta_de_teste("envelope-medido");
+        escrever(
+            &casa,
+            "a.py",
+            "import os\nimport subprocess\n\ndef f(cmd):\n    os.system(cmd)\n    \
+             subprocess.run(\"ls \" + cmd, shell=True)\n",
+        );
+        let resposta = ler_envelope(
+            &envelope_medido(),
+            &casa,
+            chamada_de(Some(0)),
+            &caminho_das_regras(),
+        );
+        assert!(!resposta.invalida && !resposta.sem_resposta, "{:?}", resposta.nota);
+        assert_eq!(resposta.lidos, 1);
+        assert_eq!(resposta.pulados, 0, "sem `skipped` no JSON não há arquivo pulado");
+        assert_eq!(resposta.erros, 0);
+        assert_eq!(resposta.nota, None, "varredura lida não tem o que reclamar");
+        assert_eq!(resposta.code, Some(0));
+        // o `check_id` é o caminho da config pontuado: o nome que os dois
+        // instrumentos compartilham é o da regra
+        assert_eq!(resposta.achados[0].rule_id, "dd-101-shell-true");
+        assert_eq!(resposta.achados.len(), 2);
+        // `cwe` veio como texto, não como lista
+        assert_eq!(
+            resposta.achados[0].cwe.as_deref(),
+            Some("CWE-78: OS Command Injection")
+        );
+        // o trecho é a linha do arquivo, com a indentação que ela tem
+        assert_eq!(resposta.achados[0].snippet.as_deref(), Some("    os.system(cmd)"));
+        assert_eq!(resposta.regras, vec!["dd-101-shell-true".to_string()]);
+        let _ = std::fs::remove_dir_all(&casa);
     }
 
     /// O arquivo de regras embarcado, pelo caminho real do crate. É o que a
@@ -2221,15 +2359,71 @@ mod tests {
 
     #[test]
     fn um_envelope_incompleto_nao_inventa_numero() {
+        // "lista de achados vazia" sem as outras duas listas não é "varreu e não
+        // achou nada": é um formato que não lemos. Os zeros que sobram não são
+        // prova, e era com eles que a corrida anterior se concluía.
         let resposta = ler_envelope(
             &json!({ "results": [] }),
             Path::new("."),
             chamada_de(None),
             Path::new("../regras/dd-seguranca.yaml"),
         );
+        assert!(resposta.invalida, "envelope sem erros nem caminhos lidos não conclui");
         assert_eq!(resposta.lidos, 0);
         assert_eq!(resposta.pulados, 0);
         assert_eq!(resposta.erros, 0);
+        let nota = resposta.nota.clone().unwrap_or_default();
+        assert!(nota.contains("lista de erros"), "{nota}");
+
+        // o outro lado: o campo de achados que não veio virava "nenhum achado"
+        let sem_achados = ler_envelope(
+            &json!({ "errors": [], "paths": { "scanned": ["a.py"] } }),
+            Path::new("."),
+            chamada_de(Some(0)),
+            Path::new("../regras/dd-seguranca.yaml"),
+        );
+        assert!(sem_achados.invalida);
+        assert!(sem_achados.nota.clone().unwrap_or_default().contains("lista de achados"));
+
+        // um achado sem linha não desaparece da conta: é leitura que não se leu
+        let sem_forma = ler_envelope(
+            &json!({
+                "results": [{ "check_id": "p.regra", "path": "a.py", "extra": { "message": "m" } }],
+                "errors": [],
+                "paths": { "scanned": ["a.py"] }
+            }),
+            Path::new("."),
+            chamada_de(Some(0)),
+            Path::new("../regras/dd-seguranca.yaml"),
+        );
+        assert!(sem_forma.achados.is_empty());
+        assert!(sem_forma.invalida);
+        assert!(sem_forma
+            .nota
+            .unwrap_or_default()
+            .contains("sem regra, caminho ou linha"));
+    }
+
+    #[test]
+    fn a_cauda_corta_em_caractere_e_esconde_o_valor_que_passa_por_ela() {
+        // O caso medido: 201 bytes com o acento exatamente na borda do corte. A
+        // régua antiga contava bytes e o slice caía no meio do `é` — pânico no meio
+        // da varredura, e a varredura é o que dava o veredito.
+        let na_borda = format!("é{}", "a".repeat(199));
+        assert_eq!(na_borda.len(), 201, "o caso é de bytes, não de caracteres");
+        assert_eq!(na_borda.chars().count(), 200);
+        assert_eq!(cauda(&na_borda), na_borda, "200 caracteres estão dentro do limite");
+
+        let bruto = format!("{}{}é", "x".repeat(100), "y".repeat(199));
+        let corte = cauda(&bruto);
+        assert_eq!(corte.chars().count(), 201, "a cauda cabe em 200 caracteres");
+        assert!(corte.starts_with('…') && corte.ends_with('é'), "{corte}");
+
+        // um stderr que citou a linha de comando com o token não é gravado como veio
+        let com_segredo =
+            cauda("falhou ao ler C:\\x\\config com password = \"FICTICIO_VALOR_SOLTO_123\"");
+        assert!(com_segredo.contains("password = "), "{com_segredo}");
+        assert!(!com_segredo.contains("FICTICIO_VALOR_SOLTO_123"), "{com_segredo}");
     }
 
     #[test]
@@ -2250,14 +2444,49 @@ mod tests {
 
     #[test]
     fn o_trecho_gravado_nunca_tem_o_valor_de_um_segredo() {
+        let valor = "FICTICIO_TOKEN_OPACO_123456789";
+        let chave = "FICTICIO_CHAVE_DE_API_123456789";
         let pasta = pasta_de_teste("mascara");
-        escrever(&pasta, "a.py", "API_TOKEN = 'abc123SECRET'\nos.system('ls')\n");
+        // O segredo está na linha que a regra aponta (embutido) e dentro da janela
+        // de três linhas do achado (semgrep): é o trecho que ia para o banco.
+        escrever(
+            &pasta,
+            "a.py",
+            &format!(
+                "import os\nos.system(\"curl -H 'Authorization: Bearer {valor}'\")\napi_key = \"{chave}\"\n"
+            ),
+        );
+
         let (achados, _) = varredura_embutida(&pasta, &AtomicBool::new(false));
-        assert!(!achados.is_empty(), "a varredura não achou a linha");
-        for a in &achados {
+        let apontados: Vec<&Achado> = achados
+            .iter()
+            .filter(|a| a.snippet.as_deref().unwrap_or("").contains("Bearer"))
+            .collect();
+        assert!(!apontados.is_empty(), "a varredura não achou a linha do comando");
+        for a in &apontados {
             let texto = a.snippet.clone().unwrap_or_default();
-            assert!(!texto.contains("abc123SECRET"), "o valor de uma atribuição vazou: {texto}");
+            assert!(!texto.contains(valor), "o valor do cabeçalho vazou: {texto}");
+            assert!(texto.contains("Bearer «valor mascarado»"), "{texto}");
         }
+
+        // O mesmo arquivo pelo caminho do semgrep: o trecho é lido por nós, linha a
+        // linha, e a linha do segredo pode estar dentro da janela sem ser a linha
+        // apontada.
+        let valor_json = json!({
+            "results": [{
+                "check_id": "regras.dd-101-shell-true",
+                "path": "a.py",
+                "start": { "line": 2 },
+                "end": { "line": 3 },
+                "extra": { "message": "m", "severity": "ERROR" }
+            }],
+            "errors": [],
+            "paths": { "scanned": ["a.py"] }
+        });
+        let resposta = ler_envelope(&valor_json, &pasta, chamada_de(Some(0)), Path::new("r.yaml"));
+        let texto = resposta.achados[0].snippet.clone().unwrap_or_default();
+        assert!(!texto.contains(valor) && !texto.contains(chave), "{texto}");
+        assert!(texto.contains("«valor mascarado»"), "{texto}");
         let _ = std::fs::remove_dir_all(&pasta);
     }
 
@@ -2370,10 +2599,53 @@ mod tests {
         interrompida.status = "interrompida".to_string();
         assert_eq!(classificar(&interrompida)["classificacao"].as_str(), Some("varredura-interrompida"));
 
+        // A varredura que falhou não é "sem achados": os números que ela trouxe são
+        // dela, e o resto continua sem prova.
+        let falhou = AnalysisRun { status: "falhou".to_string(), ..base.clone() };
+        assert_eq!(classificar(&falhou)["classificacao"].as_str(), Some("leitura-incompleta"));
+        let acoes: Vec<String> = decisoes(&falhou, &classificar(&falhou))
+            .iter()
+            .map(|d| d["acao"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert!(acoes.contains(&"refazer-a-varredura".to_string()), "{acoes:?}");
+        assert!(!acoes.contains(&"prosseguir".to_string()), "{acoes:?}");
+
         let ferramenta_fora = AnalysisRun { tool: "semgrep ausente".to_string(), ..base };
+        assert_eq!(
+            classificar(&ferramenta_fora)["classificacao"].as_str(),
+            Some("leitura-incompleta")
+        );
         assert!(decisoes(&ferramenta_fora, &classificar(&ferramenta_fora))
             .iter()
             .any(|d| d["acao"].as_str() == Some("instalar-ou-apontar-a-ferramenta")));
+    }
+
+    #[test]
+    fn o_que_barra_e_a_contagem_do_corte_nao_a_contagem_total() {
+        // A corrida medida: 1.358 achados, 676 deles ERROR, corte ERROR. Dizer
+        // "barram 1.358" inventaria 682 avisos que ninguém pediu para barrar.
+        let base = corrida("cheia");
+        let mut conta = base.clone();
+        conta.counts = AnalysisCounts { error: 2, warning: 7, info: 3 };
+        let veredito = classificar(&conta);
+        assert_eq!(veredito["contagem"]["noCorte"].as_i64(), Some(2));
+        assert_eq!(veredito["contagem"]["total"].as_i64(), Some(12));
+        let decisao = &decisoes(&conta, &veredito)[0];
+        assert_eq!(decisao["acao"].as_str(), Some("parar-a-publicacao"));
+        assert_eq!(
+            decisao["motivo"].as_str(),
+            Some("2 achado(s) no corte ERROR ou acima"),
+            "{decisao}"
+        );
+        assert_eq!(decisao["evidencia"].as_str(), Some("veredito.contagem.noCorte"));
+
+        // aviso acima de um corte que só barra erro continua barrando por erro
+        let so_aviso = AnalysisRun {
+            counts: AnalysisCounts { error: 0, warning: 4, info: 0 },
+            blocked: false,
+            ..base
+        };
+        assert_eq!(classificar(&so_aviso)["classificacao"].as_str(), Some("achados-abaixo-do-corte"));
     }
 
     #[test]
@@ -2593,6 +2865,107 @@ mod tests {
         assert_eq!(corrida.files_scanned, 1);
         let pacote = self::pacote(&conn, corrida.id, None).unwrap();
         assert_eq!(pacote["veredito"]["classificacao"], "sem-achados");
+        let _ = std::fs::remove_dir_all(&casa);
+        let _ = std::fs::remove_dir_all(&dados);
+    }
+
+    /// Aponta um caminho de ferramenta que não existe, para a corrida falar do
+    /// instrumento externo sem depender do que está instalado nesta máquina.
+    fn ferramenta_apontada(conn: &Connection, caminho: &str) {
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![CHAVE_CONFIG, caminho, db::now_rfc3339()],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn o_instrumento_pedido_que_nao_rodou_nao_conclui_a_corrida() {
+        let casa = arvore_de_teste();
+        let conn = banco();
+        ferramenta_apontada(&conn, r"C:\nao\há\semgrep.exe");
+        let projeto = projeto_de_teste(&conn, &casa);
+        let dados = pasta_de_teste("dados-ausente");
+        let raiz = raiz_do_projeto(&projeto).unwrap();
+        let corrida = executar(
+            &conn,
+            &dados,
+            &projeto,
+            &raiz,
+            &pedido(projeto.id, "ambos", "ERROR"),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        // Medido: a corrida #17 foi pedida como `ambos`, o semgrep não estava no
+        // PATH e ela voltou `concluida` com a contagem do embutido — o nó leu
+        // "sem nada acima do corte" e publicou. Um instrumento que não rodou não é
+        // um instrumento que não achou nada.
+        assert_eq!(corrida.status, "falhou", "{:?}", corrida.note);
+        assert!(corrida.tool.contains("semgrep ausente"), "{}", corrida.tool);
+        assert!(corrida.blocked, "corte declarado sem a leitura prometida barra");
+        let nota = corrida.note.clone().unwrap_or_default();
+        assert!(nota.contains("instale-o ou aponte o caminho"), "{nota}");
+        // o que foi lido continua gravado: é a nota que diz o que falta, não o
+        // sumiço do que existe
+        assert!(corrida.counts.error > 0);
+        assert_eq!(
+            db::listar_achados(&conn, corrida.id, Some("ERROR"), 500).unwrap().len() as i64,
+            corrida.counts.error
+        );
+        let pacote = self::pacote(&conn, corrida.id, None).unwrap();
+        assert_eq!(pacote["veredito"]["classificacao"], "leitura-incompleta");
+        let acoes: Vec<String> = pacote["decisoes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["acao"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert!(acoes.contains(&"parar-a-publicacao".to_string()), "{acoes:?}");
+        assert!(acoes.contains(&"instalar-ou-apontar-a-ferramenta".to_string()), "{acoes:?}");
+        assert!(!acoes.contains(&"prosseguir".to_string()), "{acoes:?}");
+
+        // sem corte declarado não há promessa de leitura a descumprir: a corrida é
+        // dita falha pelo que aconteceu, mas nada barra por contagem
+        let sem_corte = executar(
+            &conn,
+            &dados,
+            &projeto,
+            &raiz,
+            &pedido(projeto.id, "ambos", ""),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(sem_corte.status, "falhou");
+        assert!(!sem_corte.blocked, "nada foi pedido para barrar");
+        let _ = std::fs::remove_dir_all(&casa);
+        let _ = std::fs::remove_dir_all(&dados);
+    }
+
+    #[test]
+    fn uma_casa_onde_nada_foi_lido_nao_e_uma_casa_limpa() {
+        let casa = pasta_de_teste("nada-lido");
+        // binário: o arquivo existe, a varredura passa por ele e não abre nada.
+        std::fs::write(casa.join("dados.bin"), [0u8; 512]).unwrap();
+        let conn = banco();
+        let projeto = projeto_de_teste(&conn, &casa);
+        let dados = pasta_de_teste("dados-nada-lido");
+        let raiz = raiz_do_projeto(&projeto).unwrap();
+        let corrida = executar(
+            &conn,
+            &dados,
+            &projeto,
+            &raiz,
+            &pedido(projeto.id, "embutido", "ERROR"),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(corrida.files_scanned, 0);
+        assert_eq!(corrida.status, "falhou", "{:?}", corrida.note);
+        assert!(corrida.blocked, "zero leitura com corte ERROR não é zero achados");
+        let nota = corrida.note.clone().unwrap_or_default();
+        assert!(nota.contains("não leu arquivo nenhum"), "{nota}");
+        let pacote = self::pacote(&conn, corrida.id, None).unwrap();
+        assert_eq!(pacote["veredito"]["classificacao"], "cobertura-nula");
         let _ = std::fs::remove_dir_all(&casa);
         let _ = std::fs::remove_dir_all(&dados);
     }
