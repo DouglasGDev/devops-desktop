@@ -29,14 +29,19 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let conn = db::init(app.handle())?;
+            let banco = db::init(app.handle())?;
             // Nenhuma execução sobrevive ao fechamento do aplicativo: antes de
-            // mostrar o banco, o que estava `'running'` vira interrompido.
-            pipeline::recover_open_runs(&conn);
-            // O mesmo para uma varredura de código cortada no meio: ela não leu o
-            // fim de nada e não pode aparecer no histórico como se tivesse lido.
-            pipeline::recover_open_analyses(&conn);
-            app.manage(db::AppState::new(conn));
+            // mostrar o banco, o que estava `'running'` vira interrompido. A
+            // conexão volta para a fila no fim deste bloco, antes de o estado
+            // passar a ser dono da alça.
+            {
+                let conn = banco.lock()?;
+                pipeline::recover_open_runs(&conn);
+                // O mesmo para uma varredura de código cortada no meio: ela não leu o
+                // fim de nada e não pode aparecer no histórico como se tivesse lido.
+                pipeline::recover_open_analyses(&conn);
+            }
+            app.manage(db::AppState::new(banco));
             app.manage(terminal::TerminalState::new());
             app.manage(files_transfer::TransferState::new());
             app.manage(auth::AuthBroker::new());

@@ -1,11 +1,11 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{atomic::AtomicBool, Arc, Mutex, MutexGuard},
+    sync::atomic::AtomicBool,
     time::Duration,
 };
 
-use rusqlite::{types::ToSql, Connection};
+use rusqlite::types::ToSql;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::{open_path, open_url};
@@ -30,10 +30,13 @@ use crate::{
     tools,
 };
 
-type DbHandle = Arc<Mutex<Connection>>;
+type DbHandle = db::DbHandle;
 
-fn lock_db(db: &DbHandle) -> Result<MutexGuard<'_, Connection>, String> {
-    db.lock().map_err(|_| "o banco de dados local está indisponível".to_string())
+/// Pega uma conexão só da chamada. Não é mais a conexão única do aplicativo
+/// atrás de um mutex: uma varredura que demora minutos não segura nada que a
+/// tela do terminal precise esperar.
+fn lock_db(db: &DbHandle) -> Result<db::Emprestimo<'_>, String> {
+    db.lock()
 }
 
 fn like_pattern(query: &str) -> String {
@@ -653,12 +656,18 @@ fn profile_summary(profile: &DeployProfile) -> String {
 // Deploy (capítulo 10) — o motor roda em thread própria e fala com o servidor
 // de verdade. A interface só recebe progresso e o registro final.
 
+/// Pré-vistoria local do deploy: vagueia a árvore do projeto e abre um `git` para
+/// saber o que está rastreado. Vai para a thread bloqueante pelo mesmo motivo das
+/// demais leituras pesadas — numa pasta de disco externo isso espera o kernel, e
+/// na thread do runtime assíncrono seguraria também os outros comandos da
+/// aplicação.
 #[tauri::command]
 async fn deploy_preflight(
     state: State<'_, AppState>,
     profile_id: i64,
 ) -> Result<deploy::Preflight, String> {
-    deploy::preflight(&state.db, profile_id)
+    let db = state.db.clone();
+    spawn("deploy_preflight", move || deploy::preflight(&db, profile_id)).await
 }
 
 #[tauri::command]
@@ -764,9 +773,14 @@ async fn pipeline_revisions(
     pipeline::revisions(&state.db, definition_id)
 }
 
+/// Valida o grafo na thread bloqueante. A validação abre dois caminhos por
+/// `com_prazo`, e a espera de cada um é um `recv_timeout`: parada aqui, uma pasta
+/// que não responde prendia um worker do runtime assíncrono — que é o que as
+/// outras telas usam.
 #[tauri::command]
 async fn pipeline_validate(state: State<'_, AppState>, definition_id: i64) -> Result<String, String> {
-    pipeline::validate(&state.db, definition_id)
+    let db = state.db.clone();
+    spawn("pipeline_validate", move || pipeline::validate(&db, definition_id)).await
 }
 
 #[tauri::command]
@@ -2170,8 +2184,17 @@ async fn open_in_editor(
     project_id: i64,
     path: Option<String>,
 ) -> Result<(), String> {
-    let (name, dir) = project_repo(&state.db, project_id)?;
-    let editor = read_setting(&state.db, "git_editor")?.unwrap_or_else(|| "system".into());
+    let db = state.db.clone();
+    spawn("open_in_editor", move || abrir_no_editor(&db, project_id, path)).await
+}
+
+/// Resolver a pasta, sondar o caminho e chamar o executável — tudo em thread
+/// bloqueante, como `project_repo` já exige: ele abre um `git` de sondagem, e a
+/// espera do `com_prazo` é o disco respondendo ou não. Num worker do runtime
+/// assíncrono, um externo adormecido prendia ali também as outras telas.
+fn abrir_no_editor(db: &DbHandle, project_id: i64, path: Option<String>) -> Result<(), String> {
+    let (name, dir) = project_repo(db, project_id)?;
+    let editor = read_setting(db, "git_editor")?.unwrap_or_else(|| "system".into());
     let target: Option<PathBuf> = match trim_opt(path) {
         Some(rel) => {
             validate_file_path(&rel)?;
@@ -2219,7 +2242,7 @@ async fn open_in_editor(
             None => Err("nenhum arquivo para abrir".to_string()),
         },
     };
-    let conn = lock_db(&state.db)?;
+    let conn = lock_db(db)?;
     audit::log(
         &conn,
         if opened.is_ok() { "success" } else { "error" },

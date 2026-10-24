@@ -1081,7 +1081,9 @@ mod tests {
             }],
         )
         .unwrap();
-        let alça: DbHandle = std::sync::Arc::new(std::sync::Mutex::new(conn));
+        // Banco em memória não tem arquivo para reabrir: a alça empresta a única
+        // conexão que existe.
+        let alça: DbHandle = std::sync::Arc::new(db::Db::unica(conn));
 
         // A tela lê pelo mesmo portão que qualquer outro consultor: as duas
         // tentativas, na ordem, sem nada sobrescrito.

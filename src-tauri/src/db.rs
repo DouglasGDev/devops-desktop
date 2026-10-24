@@ -1,4 +1,8 @@
-use std::{path::PathBuf, sync::Arc, sync::Mutex};
+use std::{
+    ops::Deref,
+    path::PathBuf,
+    sync::{Arc, Condvar, Mutex},
+};
 
 use rusqlite::{Connection, OptionalExtension, Row};
 use tauri::Manager;
@@ -10,16 +14,147 @@ use crate::models::{
 };
 
 pub struct AppState {
-    pub db: Arc<Mutex<Connection>>,
+    pub db: DbHandle,
+}
+
+/// O banco visto pelas telas. Uma conexão por vez não serve: a varredura de
+/// código segura a sua por minutos, e todo o resto — abrir um terminal, listar
+/// um projeto, gravar auditoria — esperava atrás dela. Aqui cada requisição
+/// recebe uma conexão, pega da fila de ociosas ou aberta na hora, e a devolve
+/// quando o empréstimo morre.
+pub struct Db {
+    /// `Some` é o arquivo do aplicativo: enquanto houver conexão ociosa ela é
+    /// reaproveitada, senão uma nova é aberta. `None` é o banco em memória dos
+    /// testes, que não pode ser reaberto e por isso empresta a única que tem.
+    arquivo: Option<PathBuf>,
+    ociosas: Mutex<Vec<Connection>>,
+    espera: Condvar,
+}
+
+/// Conexão emprestada. Devolve sozinha ao pool quando sai do escopo.
+pub struct Emprestimo<'a> {
+    banco: &'a Db,
+    conn: Option<Connection>,
 }
 
 /// Alça compartilhada do banco: todos os módulos que precisam de acesso fora
 /// da thread principal usam este tipo em vez de repetir o alias.
-pub type DbHandle = Arc<Mutex<Connection>>;
+pub type DbHandle = Arc<Db>;
+
+/// Conexões que ficam de reserva. Passou disso, a sobra é fechada — abrir o
+/// arquivo custa menos do que carregar handles indefinidamente.
+const OCIOSAS_MAXIMAS: usize = 8;
+
+const INDISPONIVEL: &str = "o banco de dados local está indisponível";
+
+impl Db {
+    /// O banco do aplicativo, no arquivo, já com a primeira conexão sintonizada
+    /// e migrada.
+    pub fn novo(caminho: PathBuf, conn: Connection) -> Self {
+        Self {
+            arquivo: Some(caminho),
+            ociosas: Mutex::new(vec![conn]),
+            espera: Condvar::new(),
+        }
+    }
+
+    /// Uma única conexão, emprestada de cada vez. Existe para os testes, que
+    /// rodam contra um banco em memória sem arquivo para reabrir.
+    #[cfg(test)]
+    pub fn unica(conn: Connection) -> Self {
+        Self {
+            arquivo: None,
+            ociosas: Mutex::new(vec![conn]),
+            espera: Condvar::new(),
+        }
+    }
+
+    /// Pede uma conexão. O nome continua `lock` porque quem chama já conhecia
+    /// o `Mutex::lock`; o que mudou é o que sai daqui: uma conexão só sua. A
+    /// espera deixa de ser o tempo da varredura e passa a ser o tempo de tirar
+    /// uma da fila — ou de abrir o arquivo, quando todas estão em uso.
+    pub fn lock(&self) -> Result<Emprestimo<'_>, String> {
+        let mut ociosas = self.ociosas.lock().map_err(|_| INDISPONIVEL.to_string())?;
+        if let Some(conn) = ociosas.pop() {
+            return Ok(Emprestimo {
+                banco: self,
+                conn: Some(conn),
+            });
+        }
+        match &self.arquivo {
+            Some(caminho) => {
+                drop(ociosas);
+                let conn = Connection::open(caminho)
+                    .map_err(|e| format!("não foi possível abrir o banco {}: {e}", caminho.display()))?;
+                sintonizar(&conn)?;
+                Ok(Emprestimo {
+                    banco: self,
+                    conn: Some(conn),
+                })
+            }
+            None => loop {
+                let fila = self
+                    .espera
+                    .wait(ociosas)
+                    .map_err(|_| INDISPONIVEL.to_string())?;
+                ociosas = fila;
+                if let Some(conn) = ociosas.pop() {
+                    return Ok(Emprestimo {
+                        banco: self,
+                        conn: Some(conn),
+                    });
+                }
+            },
+        }
+    }
+
+    fn devolver(&self, conn: Connection) {
+        let Ok(mut ociosas) = self.ociosas.lock() else {
+            return;
+        };
+        if ociosas.len() < OCIOSAS_MAXIMAS {
+            ociosas.push(conn);
+        }
+        // Notifica mesmo quando a conexão foi fechada em vez de guardada: quem
+        // espera pela conexão única do teste não pode acordar sozinho.
+        let _ = self.espera.notify_one();
+    }
+}
+
+impl Deref for Emprestimo<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        // A conexão só sai do empréstimo no `Drop`, e nada deref depois disso.
+        self.conn.as_ref().expect(INDISPONIVEL)
+    }
+}
+
+impl Drop for Emprestimo<'_> {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            self.banco.devolver(conn);
+        }
+    }
+}
+
+/// Os PRAGMAs que toda conexão precisa carregar. Ficam separados da abertura
+/// porque o pool abre conexões novas a qualquer momento, não só no início.
+fn sintonizar(conn: &Connection) -> Result<(), String> {
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| format!("falha ao definir timeout do banco: {e}"))?;
+    // O SQLite embutido já vem com SQLITE_DEFAULT_FOREIGN_KEYS=1, mas as cascatas do
+    // esquema são parte da consistência dos dados: a promessa é declarada aqui, e não
+    // deixada nas mãos de como a lib foi compilada. Vale para cada conexão nova,
+    // inclusive a que a varredura abre em paralelo com a tela que a iniciou.
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .map_err(|e| format!("falha ao ativar as chaves estrangeiras: {e}"))?;
+    Ok(())
+}
 
 impl AppState {
-    pub fn new(conn: Connection) -> Self {
-        Self { db: Arc::new(Mutex::new(conn)) }
+    pub fn new(db: DbHandle) -> Self {
+        Self { db }
     }
 }
 
@@ -466,24 +601,21 @@ pub fn pasta_de_dados(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("não foi possível determinar o diretório de dados: {e}"))
 }
 
-pub fn init(app: &tauri::AppHandle) -> Result<Connection, String> {
+pub fn init(app: &tauri::AppHandle) -> Result<DbHandle, String> {
     let dir = pasta_de_dados(app)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("não foi possível criar o diretório de dados {}: {e}", dir.display()))?;
     let db_path = dir.join("devops-desktop.db");
     let conn = Connection::open(&db_path)
         .map_err(|e| format!("não foi possível abrir o banco {}: {e}", db_path.display()))?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|e| format!("falha ao definir timeout do banco: {e}"))?;
+    // O WAL é do arquivo, não da conexão: declarado uma vez aqui, toda conexão
+    // que o pool abrir depois já o encontra ligado — e é ele que permite leituras
+    // concomitantes enquanto a varredura escreve.
     let _wal: String = conn
         .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
         .map_err(|e| format!("falha ao ativar WAL: {e}"))?;
-    // O SQLite embutido já vem com SQLITE_DEFAULT_FOREIGN_KEYS=1, mas as cascatas do
-    // esquema são parte da consistência dos dados: a promessa é declarada aqui, e não
-    // deixada nas mãos de como a lib foi compilada.
-    conn.pragma_update(None, "foreign_keys", "ON")
-        .map_err(|e| format!("falha ao ativar as chaves estrangeiras: {e}"))?;
+    sintonizar(&conn)?;
     migrate(&conn)?;
-    Ok(conn)
+    Ok(Arc::new(Db::novo(db_path, conn)))
 }
 
 pub(crate) fn migrate(conn: &Connection) -> Result<(), String> {
@@ -2122,6 +2254,41 @@ mod tests {
         let conn = Connection::open_in_memory().expect("abrir banco em memória");
         migrate(&conn).expect("migrações");
         conn
+    }
+
+    /// O motivo do pool existir: uma varredura segura a conexão dela por minutos,
+    /// e a tela que abre um terminal não pode esperar a varredura acabar. O
+    /// arquivo é de teste, não o banco do aplicativo — é justamente a reabertura
+    /// do pool que se quer provar.
+    #[test]
+    fn uma_conexao_em_uso_nao_obriga_a_segunda_a_esperar() {
+        let caminho = std::env::temp_dir().join(format!("devops-desktop-teste-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&caminho);
+        let conn = Connection::open(&caminho).expect("abrir banco de teste");
+        migrate(&conn).expect("migrações");
+        let banco = Arc::new(Db::novo(caminho.clone(), conn));
+
+        let varredura = banco.lock().expect("a conexão da varredura");
+        let terminal = banco.lock().expect("outra conexão com a primeira em uso");
+
+        varredura
+            .execute(
+                "INSERT INTO settings (key, value) VALUES ('varredura', '1')",
+                [],
+            )
+            .expect("grava pela primeira");
+        terminal
+            .execute(
+                "INSERT INTO settings (key, value) VALUES ('terminal', '1')",
+                [],
+            )
+            .expect("grava pela segunda, sem esperar a primeira");
+
+        drop(varredura);
+        drop(terminal);
+        let _ = std::fs::remove_file(&caminho);
+        let _ = std::fs::remove_file(format!("{}-wal", caminho.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", caminho.display()));
     }
 
     /// Procedência de teste: o que a execução registra de onde saiu.
