@@ -538,15 +538,19 @@ instrumentos, escolhidos por varredura:
 | Instrumento | O que roda | Regras |
 | --- | --- | --- |
 | **Embutido** | o analisador do próprio aplicativo, no processo | as 19 regras em `src-tauri/regras/dd-seguranca.yaml` (`dd-101`…`dd-111`), por linguagem: Python, JavaScript/TypeScript, PHP e genéricas |
-| **Semgrep** | o executável do [semgrep](https://github.com/semgrep/semgrep), chamado com `--json` e lido de volta | as regras dele, mais as embarcadas entregues no mesmo diretório |
+| **Semgrep** | o executável do [semgrep](https://github.com/semgrep/semgrep), chamado com `--config p/default --json-output` e lido de volta | as regras padrão dele, multi-linguagem: quem define o alcance é o registry da ferramenta, e a casa não entrega regra nenhuma por essa porta |
 | **Embutido + Semgrep** | os dois, na mesma corrida | a união, com o instrumento de cada achado na linha dele |
 
 O semgrep é uma ferramenta externa: **Sondar ferramenta** diz o estado real nesta máquina (`encontrado`, `ausente`,
-`sem-resposta`) com a versão, a origem do binário e quanto a sondagem levou. O caminho do executável, quando não está no
-`PATH`, é o campo de configuração `analise.semgrep.caminho`. **Conferir regras** valida o YAML embarcado antes de
-qualquer varredura. As duas deixam linha no **Histórico** (categoria *Análise*), com o que estava apontado em
-Configurações, de onde o caminho saiu, quanto levou e o que a máquina respondeu — inclusive quando a resposta é "não
-está aqui" ou "não respondeu".
+`sem-resposta`) com a versão, a origem do binário e quanto a sondagem levou. Com o campo `analise.semgrep.caminho`
+vazio, a busca automática procura `pysemgrep.exe` antes do wrapper `semgrep.exe` (que só funciona com o primeiro no
+`PATH`) e, se o `PATH` não responde, os `Scripts` do Python do usuário; com o campo preenchido, o caminho apontado
+manda e nenhuma busca acontece. Ausente de verdade, a tela tem **Instalar Semgrep**, que roda `pip install --user
+semgrep` e, se não der, `pipx install semgrep` — ferramenta que falta não é mais fim de linha, é uma instalação. A
+primeira varredura com `p/default` baixa as regras do registry e pode levar minutos; as seguintes usam o cache local.
+**Conferir regras** valida o YAML embarcado — as regras do instrumento embutido, não as da ferramenta externa. As duas
+deixam linha no **Histórico** (categoria *Análise*), com o que estava apontado em Configurações, de onde o caminho
+saiu, quanto levou e o que a máquina respondeu — inclusive quando a resposta é "não está aqui" ou "não respondeu".
 
 O veredito **nunca** é o código de saída da ferramenta: é a contagem de achados contra o **corte de severidade** que
 você escolheu — *Nada barra*, *Barra se houver erro*, *Barra se houver aviso ou erro*, *Barra se houver qualquer
