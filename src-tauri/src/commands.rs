@@ -3238,6 +3238,15 @@ async fn analysis_detectar(state: State<'_, AppState>) -> Result<analysis::Ferra
 }
 
 #[tauri::command]
+async fn analysis_instalar_semgrep() -> Result<String, String> {
+    let resultado = spawn("analysis_instalar_semgrep", move || {
+        analysis::instalar_semgrep()
+    })
+    .await;
+    resultado
+}
+
+#[tauri::command]
 async fn analysis_regras() -> Result<Vec<analysis::RegraInfo>, String> {
     Ok(analysis::regras_embarcadas())
 }
@@ -3526,6 +3535,7 @@ pub fn register_all(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri
         pipeline_approve,
         pipeline_approvals_pending,
         analysis_detectar,
+        analysis_instalar_semgrep,
         analysis_regras,
         analysis_conferir,
         analysis_executar,

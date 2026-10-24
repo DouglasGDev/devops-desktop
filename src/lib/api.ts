@@ -208,6 +208,7 @@ export const api = {
   // rodam é o mesmo `analysis::executar` que o nó `analise` do grafo chama por dentro
   // do motor — uma varredura, um veredito, duas portas.
   analysisDetectar: () => invoke<AnalysisTool>("analysis_detectar"),
+  analysisInstalarSemgrep: () => invoke<string>("analysis_instalar_semgrep"),
   analysisRegras: () => invoke<AnalysisRule[]>("analysis_regras"),
   analysisConferir: () => invoke<AnalysisCheck>("analysis_conferir"),
   analysisExecutar: (entrada: AnalysisInput) =>
