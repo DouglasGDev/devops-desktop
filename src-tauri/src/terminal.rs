@@ -22,7 +22,7 @@ use crate::{
     ssh_config,
 };
 
-type DbHandle = std::sync::Arc<Mutex<rusqlite::Connection>>;
+type DbHandle = db::DbHandle;
 
 const CONNECT_TIMEOUT_SECS: u64 = 20;
 
@@ -232,7 +232,7 @@ fn pump_output(app: AppHandle, session_id: i64, mut reader: Box<dyn Read + Send>
 fn watch_exit(
     app: AppHandle,
     sessions: Arc<Mutex<HashMap<i64, Session>>>,
-    db: Arc<Mutex<rusqlite::Connection>>,
+    db: DbHandle,
     session_id: i64,
     server_name: String,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,

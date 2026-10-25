@@ -88,6 +88,7 @@ export function AnalysisView() {
   const [varrendo, setVarrendo] = useState<number[]>([]);
   const [pedido, setPedido] = useState(false);
   const [conferindo, setConferindo] = useState(false);
+  const [instalando, setInstalando] = useState(false);
   const [pacote, setPacote] = useState<AnalysisPackage | null>(null);
   const [destino, setDestino] = useState<string | null>(null);
   const [removendo, setRemovendo] = useState<AnalysisRun | null>(null);
@@ -204,6 +205,19 @@ export function AnalysisView() {
       pushToast("error", String(e));
     } finally {
       setConferindo(false);
+    }
+  };
+
+  const instalarSemgrep = async () => {
+    setInstalando(true);
+    try {
+      const caminho = await api.analysisInstalarSemgrep();
+      pushToast("success", `Semgrep instalado com sucesso em ${caminho}`);
+      await sondar();
+    } catch (e) {
+      pushToast("error", `Falha ao instalar o Semgrep: ${String(e)}`);
+    } finally {
+      setInstalando(false);
     }
   };
 
@@ -342,7 +356,17 @@ export function AnalysisView() {
           <Button size="sm" variant="ghost" onClick={() => void sondar()}>
             <RefreshIcon /> Sondar ferramenta
           </Button>
+          <Button size="sm" variant="ghost" loading={instalando} onClick={() => void instalarSemgrep()}>
+            Instalar Semgrep
+          </Button>
         </div>
+
+        {analyzer !== "embutido" && (
+          <div className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+            A primeira varredura com Semgrep pode demorar alguns minutos para baixar as regras padrão (p/default).
+            As próximas execuções usam o cache local e são mais rápidas.
+          </div>
+        )}
 
         <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
           {ferramenta ? (

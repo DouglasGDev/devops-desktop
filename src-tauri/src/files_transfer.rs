@@ -25,7 +25,7 @@ use crate::auth::AskPass;
 use crate::files::{sftp_cmd, sftp_quote};
 use crate::models::Server;
 
-pub(crate) type DbHandle = Arc<Mutex<rusqlite::Connection>>;
+pub(crate) type DbHandle = crate::db::DbHandle;
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]

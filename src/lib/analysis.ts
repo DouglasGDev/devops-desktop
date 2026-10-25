@@ -2,9 +2,9 @@ import type { NodeAnalyzer, SeverityGate } from "../types";
 
 /** Os instrumentos que o motor sabe varrer, nos mesmos tokens do backend. */
 export const INSTRUMENTOS: { valor: NodeAnalyzer; rotulo: string }[] = [
-  { valor: "embutido", rotulo: "Embutido" },
-  { valor: "semgrep", rotulo: "Semgrep" },
-  { valor: "ambos", rotulo: "Embutido + Semgrep" },
+  { valor: "embutido", rotulo: "Embutido (regras locais)" },
+  { valor: "semgrep", rotulo: "Semgrep (regras padrão)" },
+  { valor: "ambos", rotulo: "Embutido + Semgrep (regras padrão)" },
 ];
 
 // Os rótulos do corte são a regra de `barra_o_corte`, dita com os números dela.

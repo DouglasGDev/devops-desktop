@@ -45,10 +45,12 @@ pub const NOME_DAS_REGRAS: &str = "dd-seguranca.yaml";
 /// máquina, com a ferramenta dentro de um ambiente virtual de teste.
 pub const CHAVE_CONFIG: &str = "analise.semgrep.caminho";
 
-/// Prazo de uma varredura quando o pedido não diz nada. Medido: 1181 arquivos com
-/// as regras embarcadas levam ~7 s; 180 s é margem para um projeto grande sem
-/// deixar a janela presa sem fim.
-pub const PRAZO_PADRAO: Duration = Duration::from_secs(180);
+/// Prazo de uma varredura quando o pedido não diz nada. Com p/default, a varredura
+/// cobre múltiplas linguagens e pode demorar, especialmente na primeira execução
+/// (baixa as regras do registry). Medido: 1181 arquivos com as regras embarcadas
+/// levam ~7 s; com p/default em projetos poliglotas pode chegar a 2-5 minutos.
+/// 600 s (10 minutos) é margem para um projeto grande sem deixar a janela presa.
+pub const PRAZO_PADRAO: Duration = Duration::from_secs(600);
 
 /// Prazo da sondagem de versão. `semgrep --version` frio levou 2,2 s medido — o
 /// prazo de 5 s das sondas de ferramenta é apertado demais para um Python que
@@ -114,7 +116,9 @@ impl Ferramenta {
 /// PATH; em POSIX o launcher é um script sem extensão.
 fn nomes_da_ferramenta() -> &'static [&'static str] {
     if cfg!(windows) {
-        &["semgrep.exe"]
+        // pysemgrep.exe é o executável real; semgrep.exe é um wrapper que precisa
+        // de pysemgrep no PATH. Procuramos pysemgrep primeiro para evitar o wrapper.
+        &["pysemgrep.exe", "semgrep.exe"]
     } else {
         &["semgrep"]
     }
@@ -133,6 +137,41 @@ fn no_path(nome: &str) -> Option<String> {
         let candidato = Path::new(pasta).join(nome);
         if candidato.is_file() {
             return Some(candidato.display().to_string());
+        }
+    }
+    None
+}
+
+/// Procura o executável em diretórios comuns de instalação do Python no Windows
+/// (user scripts e local programs). Retorna o primeiro caminho encontrado.
+fn no_python_scripts(nome: &str) -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let home = dirs::home_dir()?;
+    let appdata = home.join("AppData");
+    // Tenta Roaming/Python/Python3X/Scripts (pip install --user)
+    let roaming = appdata.join("Roaming").join("Python");
+    if roaming.exists() {
+        if let Ok(entries) = std::fs::read_dir(&roaming) {
+            for entry in entries.flatten() {
+                let scripts = entry.path().join("Scripts").join(nome);
+                if scripts.is_file() {
+                    return Some(scripts.display().to_string());
+                }
+            }
+        }
+    }
+    // Tenta Local/Programs/Python/Python3X/Scripts (instalação padrão)
+    let local = appdata.join("Local").join("Programs").join("Python");
+    if local.exists() {
+        if let Ok(entries) = std::fs::read_dir(&local) {
+            for entry in entries.flatten() {
+                let scripts = entry.path().join("Scripts").join(nome);
+                if scripts.is_file() {
+                    return Some(scripts.display().to_string());
+                }
+            }
         }
     }
     None
@@ -163,11 +202,20 @@ pub fn localizar(caminho_explicito: Option<&str>) -> Ferramenta {
     let mut binario = caminho_explicito
         .and_then(resolver_explicito)
         .inspect(|_| origem = "configuração".to_string());
-    if binario.is_none() {
+    // Só faz busca automática se nenhum caminho explícito válido foi fornecido
+    let explicito_vazio = caminho_explicito.is_none()
+        || caminho_explicito.map(|s| s.trim().is_empty()).unwrap_or(true);
+    if binario.is_none() && explicito_vazio {
         for nome in nomes_da_ferramenta() {
             if let Some(achado) = no_path(nome) {
                 binario = Some(achado);
                 origem = "path".to_string();
+                break;
+            }
+            // Fallback: procura em diretórios comuns do Python no Windows
+            if let Some(achado) = no_python_scripts(nome) {
+                binario = Some(achado);
+                origem = "python-scripts".to_string();
                 break;
             }
         }
@@ -207,6 +255,57 @@ pub fn localizar(caminho_explicito: Option<&str>) -> Ferramenta {
         apontado,
         resposta: cauda(&chamada.stdout),
     }
+}
+
+/// Tenta instalar o Semgrep automaticamente quando ele não está disponível.
+/// Primeiro tenta `pip install --user semgrep`, depois `pipx install semgrep`.
+/// Retorna o caminho do binário instalado ou erro.
+pub fn instalar_semgrep(cancel: &AtomicBool) -> Result<String, String> {
+    // Tenta pip primeiro (mais comum)
+    let pip_cmd = if cfg!(target_os = "windows") {
+        "python"
+    } else {
+        "python3"
+    };
+    let pip_args = ["-m", "pip", "install", "--user", "semgrep"];
+    let pip_result = rodar(
+        pip_cmd,
+        &pip_args,
+        None,
+        Duration::from_secs(300),
+        cancel,
+    );
+    if pip_result.cancelado {
+        return Err("a instalação do semgrep foi interrompida".to_string());
+    }
+    if pip_result.code == Some(0) {
+        // Instalação via pip bem-sucedida; tenta localizar de novo
+        let ferramenta = localizar(None);
+        if let Some(caminho) = ferramenta.caminho {
+            return Ok(caminho);
+        }
+    }
+    // Tenta pipx como fallback
+    let pipx_args = ["install", "semgrep"];
+    let pipx_result = rodar(
+        "pipx",
+        &pipx_args,
+        None,
+        Duration::from_secs(300),
+        cancel,
+    );
+    if pipx_result.cancelado {
+        return Err("a instalação do semgrep foi interrompida".to_string());
+    }
+    if pipx_result.code == Some(0) {
+        let ferramenta = localizar(None);
+        if let Some(caminho) = ferramenta.caminho {
+            return Ok(caminho);
+        }
+    }
+    Err(format!(
+        "não foi possível instalar o semgrep automaticamente. Instale manualmente com `pip install semgrep` ou `pipx install semgrep`"
+    ))
 }
 
 fn duracao_ms(inicio: Instant) -> i64 {
@@ -481,6 +580,13 @@ fn rodar(
         .env("PATH", std::env::var("PATH").unwrap_or_default());
     if let Some(pasta) = pasta {
         cmd.current_dir(pasta);
+    }
+    // Reduz a prioridade do processo no Windows para não afetar outras operações
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x00004000;
+        cmd.creation_flags(BELOW_NORMAL_PRIORITY_CLASS);
     }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -1060,9 +1166,11 @@ impl Resposta {
 
 /// Roda o semgrep sobre `alvo` e lê o JSON que ele escreveu. `raiz` é o diretório
 /// de trabalho do filho, e é por ela que os caminhos do JSON chegam relativos ao
-/// que foi varrido.
+/// que foi varrido. `configs` é a lista de configs a usar: pode incluir tanto o
+/// arquivo de regras embarcadas quanto `p/default` para cobertura multi-linguagem.
 fn varredura_semgrep(
     binario: &str,
+    configs: &[String],
     regras: &Path,
     raiz: &Path,
     prazo: Duration,
@@ -1071,6 +1179,8 @@ fn varredura_semgrep(
     // Duas varreduras podem rodar ao mesmo tempo em projetos diferentes: o
     // arquivo de saída é de uma corrida, não do processo. Um nome por PID faria uma
     // ler o JSON da outra — veredito trocado por cima do disco.
+    // Medido no semgrep 1.182: o caminho do TEMP vale como foi dado, curto
+    // (DOUGLA~1.GRO) ou comprido — o que ele não aceita é o prefixo `\\?\`.
     static SEQUENCIA: AtomicU64 = AtomicU64::new(0);
     let seq = SEQUENCIA.fetch_add(1, Ordering::SeqCst);
     let saida = std::env::temp_dir().join(format!(
@@ -1078,16 +1188,19 @@ fn varredura_semgrep(
         std::process::id()
     ));
     let arquivo_saida = saida.display().to_string();
-    let args = [
-        "scan",
-        "--metrics=off",
-        "--json-output",
-        &arquivo_saida,
-        "--config",
-        &regras.display().to_string(),
-        ".",
+    let mut args = vec![
+        "scan".to_string(),
+        "--metrics=off".to_string(),
+        "--json-output".to_string(),
+        arquivo_saida.clone(),
     ];
-    let chamada = rodar(binario, &args, Some(raiz), prazo, cancel);
+    for config in configs {
+        args.push("--config".to_string());
+        args.push(config.clone());
+    }
+    args.push(".".to_string());
+    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let chamada = rodar(binario, &args_ref, Some(raiz), prazo, cancel);
     if chamada.cancelado {
         let _ = std::fs::remove_file(&saida);
         return Resposta {
@@ -1103,9 +1216,9 @@ fn varredura_semgrep(
             prazo.as_secs()
         ));
     }
-    let conteudo = std::fs::read_to_string(&saida);
+    let conteudo = ler_resultado(&saida);
     let _ = std::fs::remove_file(&saida);
-    let Ok(conteudo) = conteudo else {
+    let Some(conteudo) = conteudo else {
         return Resposta::invalida(format!(
             "o semgrep não escreveu o resultado (código {:?}); disse: {}",
             chamada.code,
@@ -1118,7 +1231,33 @@ fn varredura_semgrep(
             chamada.code
         ));
     };
-    ler_envelope(&valor, raiz, chamada, regras)
+    let mut resposta = ler_envelope(&valor, raiz, chamada, regras);
+    // O relatório nomeia todas as fontes que estavam em vigor. Sem achado, o
+    // envelope não nomeia nenhuma, e o arquivo embarcado sozinho esconderia que
+    // o registry também foi consultado.
+    if configs.iter().any(|c| c == "p/default") && !resposta.regras.iter().any(|r| r == "p/default") {
+        resposta.regras.push("p/default".to_string());
+    }
+    resposta
+}
+
+/// Lê o JSON que o semgrep escreveu, com um pouco de insistência. O filho devolve
+/// 0 antes de os trabalhadores paralelos dele largarem o arquivo do
+/// `--json-output`, e é a varredura grande — a que tem resultado bom pra ler —
+/// que chega perto de esbarrar nessa janela. A decodificação é tolerante porque o
+/// resultado ecoa linhas do código varrido, e arquivo em latin-1 não é UTF-8.
+fn ler_resultado(saida: &Path) -> Option<String> {
+    for tentativa in 0..10 {
+        if let Ok(bytes) = std::fs::read(saida) {
+            if !bytes.is_empty() {
+                return Some(String::from_utf8_lossy(&bytes).into_owned());
+            }
+        }
+        if tentativa + 1 < 10 {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+    None
 }
 
 /// Lê o envelope real do semgrep 1.181: `results[]`, `errors[]`, `paths.scanned`,
@@ -1244,15 +1383,22 @@ fn ler_envelope(valor: &Value, raiz: &Path, chamada: Chamada, regras: &Path) -> 
 }
 
 /// As regras que a varredura tinha. Quando o JSON não nomeia nenhuma — varredura
-/// sem achados, o caso mais provável — a lista vem do arquivo embarcado, para a
-/// corrida nunca dizer "zero regras".
+/// sem achados, o caso mais provável — a lista diz "p/default" (as regras padrão
+/// do Semgrep que foram usadas).
 fn efetivamente_lidos(vistos: Vec<String>, caminho_das_regras: &Path) -> Vec<String> {
     if !vistos.is_empty() {
         return vistos;
     }
+    // Tenta ler o arquivo local (analisador embutido); se não existir, retorna
+    // "p/default" que é o config remoto usado pelo Semgrep.
+    if caminho_das_regras.as_os_str().is_empty()
+        || !caminho_das_regras.exists()
+    {
+        return vec!["p/default".to_string()];
+    }
     std::fs::read_to_string(caminho_das_regras)
         .map(|t| ids_do_yaml(&t))
-        .unwrap_or_else(|_| ids_embarcados().into_iter().map(|s| s.to_string()).collect())
+        .unwrap_or_else(|_| vec!["p/default".to_string()])
 }
 
 /// `cwe` chega como texto ou como lista de textos, dependendo da regra. Os dois
@@ -1387,8 +1533,12 @@ pub fn executar(
         PRAZO_PADRAO
     };
     let quer_externo = instrumento != "embutido";
-    let ferramenta = if quer_externo {
-        let explicito = db::setting_value(conn, CHAVE_CONFIG)?.unwrap_or_default();
+    let explicito = if quer_externo {
+        db::setting_value(conn, CHAVE_CONFIG)?.unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let mut ferramenta = if quer_externo {
         localizar(Some(&explicito))
     } else {
         Ferramenta {
@@ -1439,6 +1589,26 @@ pub fn executar(
     // não achou nada", e é isso que a nota e o corte precisam dizer.
     let mut externo_sem_prova = false;
 
+    // Instalação automática só quando ninguém apontou um caminho e o programa
+    // realmente não está aqui. Um caminho configurado é uma ordem — se ele não
+    // serve, a nota diz isso; e "sem-resposta" é programa presente que não
+    // acordou, que instalar por cima não conserta.
+    if quer_externo && ferramenta.estado == "ausente" && explicito.trim().is_empty() {
+        notas.push("o semgrep não está nesta máquina — tentando instalar com pip/pipx".to_string());
+        match instalar_semgrep(cancel) {
+            Ok(caminho) => {
+                notas.push(format!("semgrep instalado em {caminho}"));
+                ferramenta = localizar(Some(&caminho));
+                aberto.tool = nome_do_instrumento(&instrumento, &ferramenta);
+                aberto.tool_version = ferramenta.versao.clone();
+            }
+            Err(erro) => notas.push(erro),
+        }
+        if cancel.load(Ordering::SeqCst) {
+            return fechar_interrompida(conn, run_id, &aberto, inicio);
+        }
+    }
+
     if instrumento != "semgrep" {
         let (embutidos, dele) = varredura_embutida(&alvo, cancel);
         if cancel.load(Ordering::SeqCst) {
@@ -1450,8 +1620,14 @@ pub fn executar(
     }
     if quer_externo {
         if ferramenta.encontrada() {
+            // Duas fontes, uma chamada: as 19 regras da casa cobrem o que o
+            // registry não conhece do domínio, e `p/default` cobre as linguagens
+            // que o YAML embarcado não olha. A primeira execução baixa o
+            // registry — daí o prazo padrão maior.
+            let configs = vec![regras.display().to_string(), "p/default".to_string()];
             let resposta = varredura_semgrep(
                 ferramenta.caminho.as_deref().unwrap_or("semgrep"),
+                &configs,
                 &regras,
                 &alvo,
                 prazo,
@@ -1474,8 +1650,11 @@ pub fn executar(
             externo_sem_prova = true;
             notas.push(match ferramenta.estado.as_str() {
                 "sem-resposta" => "o semgrep existe mas não respondeu à sondagem de versão".to_string(),
+                _ if explicito.trim().is_empty() => format!(
+                    "o semgrep não estava disponível nesta máquina e a instalação automática não o trouxe — instale-o ou aponte o caminho em {CHAVE_CONFIG}"
+                ),
                 _ => format!(
-                    "o semgrep não estava disponível nesta máquina — instale-o ou aponte o caminho em {CHAVE_CONFIG}"
+                    "o caminho apontado em {CHAVE_CONFIG} não serve — instale-o ou aponte o caminho certo"
                 ),
             });
         }
@@ -2354,6 +2533,30 @@ mod tests {
         assert_eq!(resposta.lidos, 1);
         assert_eq!(resposta.regras.len(), 19, "{:?}", resposta.regras.len());
         assert!(resposta.nota.is_none());
+        let _ = std::fs::remove_dir_all(&pasta);
+    }
+
+    #[test]
+    fn um_envelope_sem_achados_com_semgrep_puro_declara_p_default() {
+        let pasta = pasta_de_teste("vazio-p-default");
+        escrever(&pasta, "a.py", "x = 1\n");
+        let valor = json!({ "results": [], "errors": [], "paths": { "scanned": ["a.py"] } });
+        // Caminho vazio: o Semgrep usa apenas p/default, sem arquivo local.
+        let resposta = ler_envelope(&valor, &pasta, chamada_de(Some(0)), Path::new(""));
+        assert!(resposta.achados.is_empty());
+        assert_eq!(resposta.regras, vec!["p/default".to_string()]);
+        let _ = std::fs::remove_dir_all(&pasta);
+    }
+
+    #[test]
+    fn um_resultado_fora_de_utf8_e_lido_do_mesmo_modo() {
+        let pasta = pasta_de_teste("ler-resultado");
+        let caminho = pasta.join("saida.json");
+        // "café" em latin-1: o 0xE9 sozinho não forma UTF-8, e o achado ecoa a
+        // linha do arquivo varrido, não uma cópia limpa.
+        std::fs::write(&caminho, b"{\"results\": [{\"linha\": \"caf\xE9\"}]}").expect("escrever");
+        let lido = ler_resultado(&caminho).expect("o byte solto não descarta o resultado");
+        assert!(lido.contains("caf"));
         let _ = std::fs::remove_dir_all(&pasta);
     }
 
