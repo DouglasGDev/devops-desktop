@@ -2,6 +2,10 @@ node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/schemas/
+
+# Runtime Python portátil local do usuário: não faz parte do aplicativo e não
+# entra no histórico nem nas varreduras de código.
+Python/
 *.local
 .DS_Store
 

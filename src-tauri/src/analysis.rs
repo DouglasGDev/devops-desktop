@@ -21,7 +21,7 @@
 //! disciplina de varredura de árvore e a mascaráção de segredo são de
 //! [`crate::security`], e o processo filho com prazo é de [`crate::sshexec`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -32,7 +32,9 @@ use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::models::{AnalysisCounts, AnalysisFinding, AnalysisInput, AnalysisRun, Project, SEVERIDADES};
+use crate::models::{
+    AnalysisCounts, AnalysisFinding, AnalysisInput, AnalysisRun, Project, SEVERIDADES,
+};
 use crate::{db, git_probe, proc, security, sshexec};
 
 /// As regras embarcadas no aplicativo. Elas são copiadas para os dados do
@@ -52,10 +54,11 @@ pub const CHAVE_CONFIG: &str = "analise.semgrep.caminho";
 /// 600 s (10 minutos) é margem para um projeto grande sem deixar a janela presa.
 pub const PRAZO_PADRAO: Duration = Duration::from_secs(600);
 
-/// Prazo da sondagem de versão. `semgrep --version` frio levou 2,2 s medido — o
-/// prazo de 5 s das sondas de ferramenta é apertado demais para um Python que
-/// precisa acordar, então a análise tem o seu.
-const PRAZO_SONDA: Duration = Duration::from_secs(20);
+/// Prazo da sondagem de versão. `semgrep --version` quente levou 3,0 s medido; a
+/// primeira execução depois da instalação levou 19,5 s nesta máquina, com o
+/// sistema ainda lendo os arquivos novos. Os 20 s de antes transformavam essa
+/// primeira leitura em "sem-resposta", então o prazo tem folga para a fria.
+const PRAZO_SONDA: Duration = Duration::from_secs(30);
 
 /// Arquivos abertos pelo analisador embutido antes de a varredura se declarar
 /// cortada. Passou disso a nota diz que a cobertura é parcial: varrer sem limite
@@ -109,6 +112,13 @@ pub struct Ferramenta {
 impl Ferramenta {
     pub fn encontrada(&self) -> bool {
         self.estado == "encontrado"
+    }
+
+    /// O valor apontado em Configurações não resolveu e o binário veio da busca
+    /// automática. É o que a tela precisa dizer para ninguém achar que aquele
+    /// caminho ainda manda na varredura.
+    pub fn apontado_ignorado(&self) -> bool {
+        !self.apontado.trim().is_empty() && !self.origem.is_empty() && self.origem != "configuração"
     }
 }
 
@@ -178,9 +188,12 @@ fn no_python_scripts(nome: &str) -> Option<String> {
 }
 
 /// Resolve o caminho que alguém apontou na configuração. Um nome com barra é um
-/// caminho e tem de existir como arquivo; um nome solto é um programa e só o PATH
-/// responde por ele.
-fn resolver_explicito(bruto: &str) -> Option<String> {
+/// caminho e tem de existir como arquivo; um nome solto é um programa e só o
+/// caminho de busca responde por ele.
+fn resolver_explicito_com(
+    bruto: &str,
+    achar_no_path: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
     let nome = bruto.trim().trim_matches('"');
     if nome.is_empty() {
         return None;
@@ -189,37 +202,54 @@ fn resolver_explicito(bruto: &str) -> Option<String> {
         let caminho = crate::ssh_config::expand_tilde(nome);
         return caminho.is_file().then(|| caminho.display().to_string());
     }
-    no_path(nome)
+    achar_no_path(nome)
 }
 
-/// Localiza o semgrep e pergunta a versão dele. Nada aqui é presunção: o programa
-/// é executado com prazo, e quem não responde é dito sem resposta.
-pub fn localizar(caminho_explicito: Option<&str>) -> Ferramenta {
-    let inicio = Instant::now();
-    let regras = contar_regras(REGRAS_YAML);
-    let apontado = caminho_explicito.unwrap_or("").trim().to_string();
+/// O binário que a varredura vai chamar e de onde ele veio. O caminho apontado
+/// tenta primeiro; se ele não resolve — uma pasta, um caminho antigo —, a busca
+/// automática continua em vez de declarar a ferramenta ausente. O valor apontado
+/// fica com quem chamou para a tela poder dizer que ele não serviu.
+fn procurar_binario(
+    caminho_explicito: Option<&str>,
+    achar_no_path: impl Fn(&str) -> Option<String>,
+    achar_nos_scripts: impl Fn(&str) -> Option<String>,
+) -> (Option<String>, String) {
     let mut origem = String::new();
     let mut binario = caminho_explicito
-        .and_then(resolver_explicito)
+        .and_then(|bruto| resolver_explicito_com(bruto, &achar_no_path))
         .inspect(|_| origem = "configuração".to_string());
-    // Só faz busca automática se nenhum caminho explícito válido foi fornecido
-    let explicito_vazio = caminho_explicito.is_none()
-        || caminho_explicito.map(|s| s.trim().is_empty()).unwrap_or(true);
-    if binario.is_none() && explicito_vazio {
+    if binario.is_none() {
         for nome in nomes_da_ferramenta() {
-            if let Some(achado) = no_path(nome) {
+            if let Some(achado) = achar_no_path(nome) {
                 binario = Some(achado);
                 origem = "path".to_string();
                 break;
             }
-            // Fallback: procura em diretórios comuns do Python no Windows
-            if let Some(achado) = no_python_scripts(nome) {
+            if let Some(achado) = achar_nos_scripts(nome) {
                 binario = Some(achado);
                 origem = "python-scripts".to_string();
                 break;
             }
         }
     }
+    (binario, origem)
+}
+
+/// Localiza o semgrep e pergunta a versão dele. Nada aqui é presunção: o programa
+/// é executado com prazo, e quem não responde é dito sem resposta.
+pub fn localizar(caminho_explicito: Option<&str>) -> Ferramenta {
+    localizar_com(caminho_explicito, no_path, no_python_scripts)
+}
+
+fn localizar_com(
+    caminho_explicito: Option<&str>,
+    achar_no_path: impl Fn(&str) -> Option<String>,
+    achar_nos_scripts: impl Fn(&str) -> Option<String>,
+) -> Ferramenta {
+    let inicio = Instant::now();
+    let regras = contar_regras(REGRAS_YAML);
+    let apontado = caminho_explicito.unwrap_or("").trim().to_string();
+    let (binario, origem) = procurar_binario(caminho_explicito, achar_no_path, achar_nos_scripts);
     let Some(binario) = binario else {
         return Ferramenta {
             estado: "ausente".to_string(),
@@ -232,7 +262,13 @@ pub fn localizar(caminho_explicito: Option<&str>) -> Ferramenta {
             resposta: String::new(),
         };
     };
-    let chamada = rodar(&binario, &["--version"], None, PRAZO_SONDA, &AtomicBool::new(false));
+    let chamada = rodar(
+        &binario,
+        &["--version"],
+        None,
+        PRAZO_SONDA,
+        &AtomicBool::new(false),
+    );
     if chamada.sem_resposta || chamada.code.is_none() && chamada.stderr.is_empty() {
         return Ferramenta {
             estado: "sem-resposta".to_string(),
@@ -268,13 +304,7 @@ pub fn instalar_semgrep(cancel: &AtomicBool) -> Result<String, String> {
         "python3"
     };
     let pip_args = ["-m", "pip", "install", "--user", "semgrep"];
-    let pip_result = rodar(
-        pip_cmd,
-        &pip_args,
-        None,
-        Duration::from_secs(300),
-        cancel,
-    );
+    let pip_result = rodar(pip_cmd, &pip_args, None, Duration::from_secs(300), cancel);
     if pip_result.cancelado {
         return Err("a instalação do semgrep foi interrompida".to_string());
     }
@@ -287,13 +317,7 @@ pub fn instalar_semgrep(cancel: &AtomicBool) -> Result<String, String> {
     }
     // Tenta pipx como fallback
     let pipx_args = ["install", "semgrep"];
-    let pipx_result = rodar(
-        "pipx",
-        &pipx_args,
-        None,
-        Duration::from_secs(300),
-        cancel,
-    );
+    let pipx_result = rodar("pipx", &pipx_args, None, Duration::from_secs(300), cancel);
     if pipx_result.cancelado {
         return Err("a instalação do semgrep foi interrompida".to_string());
     }
@@ -303,9 +327,10 @@ pub fn instalar_semgrep(cancel: &AtomicBool) -> Result<String, String> {
             return Ok(caminho);
         }
     }
-    Err(format!(
+    Err(
         "não foi possível instalar o semgrep automaticamente. Instale manualmente com `pip install semgrep` ou `pipx install semgrep`"
-    ))
+            .to_string(),
+    )
 }
 
 fn duracao_ms(inicio: Instant) -> i64 {
@@ -319,7 +344,13 @@ fn versao_da_resposta(stdout: &str, stderr: &str) -> Option<String> {
         for linha in texto.lines() {
             let solto: String = linha
                 .chars()
-                .map(|c| if c.is_ascii_digit() || c == '.' { c } else { ' ' })
+                .map(|c| {
+                    if c.is_ascii_digit() || c == '.' {
+                        c
+                    } else {
+                        ' '
+                    }
+                })
                 .collect();
             if let Some(pedaco) = solto
                 .split(' ')
@@ -427,6 +458,8 @@ pub struct LinhaVerificacao {
 pub fn linha_da_sonda(f: &Ferramenta) -> LinhaVerificacao {
     let apontado = if f.apontado.is_empty() {
         "nada apontado em Configurações".to_string()
+    } else if f.apontado_ignorado() {
+        format!("apontado “{}” (não serve)", f.apontado)
     } else {
         format!("apontado “{}”", f.apontado)
     };
@@ -516,7 +549,13 @@ pub fn conferir_regras(conn: &Connection, dados: &Path) -> Result<Validacao, Str
     let caminho = regras.to_string_lossy();
     let chamada = rodar(
         ferramenta.caminho.as_deref().unwrap_or("semgrep"),
-        &["scan", "--metrics=off", "--validate", "--config", caminho.as_ref()],
+        &[
+            "scan",
+            "--metrics=off",
+            "--validate",
+            "--config",
+            caminho.as_ref(),
+        ],
         None,
         PRAZO_SONDA,
         &AtomicBool::new(false),
@@ -622,11 +661,17 @@ struct Marca {
 }
 
 const fn m(texto: &'static str) -> Marca {
-    Marca { texto, colado: false }
+    Marca {
+        texto,
+        colado: false,
+    }
 }
 
 const fn mc(texto: &'static str) -> Marca {
-    Marca { texto, colado: true }
+    Marca {
+        texto,
+        colado: true,
+    }
 }
 
 /// Regra do analisador embutido. Uma alternativa casa quando **todas** as suas
@@ -657,10 +702,15 @@ const REGRAS_EMBUTIDAS: &[RegraEmbutida] = &[
     RegraEmbutida {
         id: "dd-101-shell-true",
         severidade: "ERROR",
-        mensagem: "um comando é montado e entregue a um shell; se qualquer parte vier de fora, é injeção",
+        mensagem:
+            "um comando é montado e entregue a um shell; se qualquer parte vier de fora, é injeção",
         cwe: "CWE-78: OS Command Injection",
         familias: &["py"],
-        alternativas: &[&[m("subprocess."), mc("shell=true")], &[m("os.system(")], &[m("os.popen(")]],
+        alternativas: &[
+            &[m("subprocess."), mc("shell=true")],
+            &[m("os.system(")],
+            &[m("os.popen(")],
+        ],
         anterior: "",
     },
     RegraEmbutida {
@@ -669,7 +719,12 @@ const REGRAS_EMBUTIDAS: &[RegraEmbutida] = &[
         mensagem: "entrada é levada a um comando de sistema",
         cwe: "CWE-78: OS Command Injection",
         familias: &["php"],
-        alternativas: &[&[m("system(")], &[m("shell_exec(")], &[m("passthru(")], &[m("exec(")]],
+        alternativas: &[
+            &[m("system(")],
+            &[m("shell_exec(")],
+            &[m("passthru(")],
+            &[m("exec(")],
+        ],
         anterior: "",
     },
     // ---------- SQL montado no código ----------
@@ -831,7 +886,8 @@ const REGRAS_EMBUTIDAS: &[RegraEmbutida] = &[
     RegraEmbutida {
         id: "dd-109-verificacao-suprimida",
         severidade: "WARNING",
-        mensagem: "uma checagem automática foi calada nesta linha — o motivo precisa estar escrito aqui",
+        mensagem:
+            "uma checagem automática foi calada nesta linha — o motivo precisa estar escrito aqui",
         cwe: "",
         familias: &[],
         alternativas: &[
@@ -915,7 +971,8 @@ fn contem(texto: &str, marca: &str) -> bool {
         return false;
     }
     let inicio_ok = |i: usize| i == 0 || !eh_ident(alvo[0]) || !eh_ident(bytes[i - 1]);
-    let fim_ok = |j: usize| j >= bytes.len() || !eh_ident(alvo[alvo.len() - 1]) || !eh_ident(bytes[j]);
+    let fim_ok =
+        |j: usize| j >= bytes.len() || !eh_ident(alvo[alvo.len() - 1]) || !eh_ident(bytes[j]);
     let mut i = 0usize;
     while i + alvo.len() <= bytes.len() {
         if &bytes[i..i + alvo.len()] == alvo && inicio_ok(i) && fim_ok(i + alvo.len()) {
@@ -966,6 +1023,7 @@ impl Achado {
             message: self.message,
             cwe: self.cwe,
             snippet: self.snippet,
+            fingerprint: String::new(),
         }
     }
 }
@@ -1003,10 +1061,10 @@ fn varredura_embutida(raiz: &Path, cancel: &AtomicBool) -> (Vec<Achado>, Cobertu
                 if !regra.anterior.is_empty() && !contem(&anterior, regra.anterior) {
                     continue;
                 }
-                let casa = regra
-                    .alternativas
-                    .iter()
-                    .any(|alt| alt.iter().all(|marca| contem(escolha(marca, &min, &apertado), marca.texto)));
+                let casa = regra.alternativas.iter().any(|alt| {
+                    alt.iter()
+                        .all(|marca| contem(escolha(marca, &min, &apertado), marca.texto))
+                });
                 if casa {
                     achados.push(Achado {
                         rule_id: regra.id.to_string(),
@@ -1040,19 +1098,52 @@ fn escolha<'a>(marca: &Marca, min: &'a str, apertado: &'a str) -> &'a str {
 /// fora antes de qualquer leitura, e o limite de arquivos é conferido a cada
 /// entrada — uma árvore de 200 mil arquivos não pode ser lida até o fim.
 fn percorrer(raiz: &Path, cobertura: &mut Cobertura) -> Vec<PathBuf> {
+    let Ok(raiz_canonica) = raiz.canonicalize() else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     let mut pilha = vec![raiz.to_path_buf()];
+    // Uma pasta alcançada por dois caminhos (link simbólico dentro da árvore) só
+    // precisa ser lida uma vez; sem isto, um link em ciclo trava a varredura.
+    let mut pastas_vistas: BTreeSet<PathBuf> = BTreeSet::new();
+    pastas_vistas.insert(raiz_canonica.clone());
     while let Some(pasta) = pilha.pop() {
         if out.len() >= LIMITE_ARQUIVOS {
             cobertura.cortada = true;
             break;
         }
-        let Ok(leituras) = std::fs::read_dir(&pasta) else { continue };
+        let Ok(leituras) = std::fs::read_dir(&pasta) else {
+            continue;
+        };
         for entrada in leituras.flatten() {
             let nome = entrada.file_name().to_string_lossy().to_string();
             let caminho = entrada.path();
-            let eh_dir = entrada
-                .file_type()
+            let tipo = entrada.file_type();
+            // Link simbólico é resolvido antes de qualquer leitura: um link para
+            // fora da raiz varrida não é código do projeto, e lê-lo entregaria à
+            // análise (e ao pacote) conteúdo que ninguém pediu para varrer.
+            if tipo.as_ref().map(|t| t.is_symlink()).unwrap_or(false) {
+                let Ok(alvo) = caminho.canonicalize() else {
+                    cobertura.pulados += 1;
+                    continue;
+                };
+                if !alvo.starts_with(&raiz_canonica) {
+                    cobertura.pulados += 1;
+                    continue;
+                }
+                if alvo.is_dir() {
+                    if !security::pular_dir(&nome) && pastas_vistas.insert(alvo.clone()) {
+                        pilha.push(alvo);
+                    }
+                } else if out.len() < LIMITE_ARQUIVOS {
+                    out.push(alvo);
+                } else {
+                    cobertura.cortada = true;
+                    return out;
+                }
+                continue;
+            }
+            let eh_dir = tipo
                 .map(|t| t.is_dir())
                 .unwrap_or_else(|_| caminho.is_dir());
             if eh_dir {
@@ -1072,8 +1163,7 @@ fn percorrer(raiz: &Path, cobertura: &mut Cobertura) -> Vec<PathBuf> {
 }
 
 fn sufixo(nome: &str) -> String {
-    nome
-        .rsplit('.')
+    nome.rsplit('.')
         .next()
         .filter(|s| s.len() <= 8 && !s.contains('/'))
         .unwrap_or("")
@@ -1154,13 +1244,21 @@ struct Resposta {
 impl Resposta {
     /// Havia programa, e ele não acordou a tempo.
     fn sem_resposta(nota: String) -> Self {
-        Resposta { sem_resposta: true, nota: Some(nota), ..Resposta::default() }
+        Resposta {
+            sem_resposta: true,
+            nota: Some(nota),
+            ..Resposta::default()
+        }
     }
 
     /// A resposta chegou, mas não diz o que foi varrido: não é "zero achados", é
     /// nenhuma prova. Os achados que por acaso vieram continuam, o veredito não.
     fn invalida(nota: String) -> Self {
-        Resposta { invalida: true, nota: Some(nota), ..Resposta::default() }
+        Resposta {
+            invalida: true,
+            nota: Some(nota),
+            ..Resposta::default()
+        }
     }
 }
 
@@ -1235,7 +1333,8 @@ fn varredura_semgrep(
     // O relatório nomeia todas as fontes que estavam em vigor. Sem achado, o
     // envelope não nomeia nenhuma, e o arquivo embarcado sozinho esconderia que
     // o registry também foi consultado.
-    if configs.iter().any(|c| c == "p/default") && !resposta.regras.iter().any(|r| r == "p/default") {
+    if configs.iter().any(|c| c == "p/default") && !resposta.regras.iter().any(|r| r == "p/default")
+    {
         resposta.regras.push("p/default".to_string());
     }
     resposta
@@ -1273,7 +1372,10 @@ fn ler_envelope(valor: &Value, raiz: &Path, chamada: Chamada, regras: &Path) -> 
         return Resposta::invalida("a resposta do semgrep não traz a lista de erros".to_string());
     };
     let paths = valor.get("paths");
-    let Some(scanned) = paths.and_then(|p| p.get("scanned")).and_then(Value::as_array) else {
+    let Some(scanned) = paths
+        .and_then(|p| p.get("scanned"))
+        .and_then(Value::as_array)
+    else {
         return Resposta::invalida(
             "a resposta do semgrep não diz quais arquivos foram lidos".to_string(),
         );
@@ -1391,9 +1493,7 @@ fn efetivamente_lidos(vistos: Vec<String>, caminho_das_regras: &Path) -> Vec<Str
     }
     // Tenta ler o arquivo local (analisador embutido); se não existir, retorna
     // "p/default" que é o config remoto usado pelo Semgrep.
-    if caminho_das_regras.as_os_str().is_empty()
-        || !caminho_das_regras.exists()
-    {
+    if caminho_das_regras.as_os_str().is_empty() || !caminho_das_regras.exists() {
         return vec!["p/default".to_string()];
     }
     std::fs::read_to_string(caminho_das_regras)
@@ -1409,7 +1509,10 @@ fn cwe_da_metadata(metadata: &Value) -> Option<String> {
         Some(Value::Array(itens)) => {
             let junta = itens
                 .iter()
-                .filter_map(|i| i.as_str().or_else(|| i.get("value").and_then(Value::as_str)))
+                .filter_map(|i| {
+                    i.as_str()
+                        .or_else(|| i.get("value").and_then(Value::as_str))
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             (!junta.is_empty()).then_some(junta)
@@ -1450,7 +1553,10 @@ impl Trechos {
             let bytes = security::texto_do_arquivo(&raiz.join(&chave))?;
             let texto = String::from_utf8_lossy(&bytes).to_string();
             self.usado += texto.len();
-            self.cache.insert(chave.clone(), texto.lines().map(|l| l.to_string()).collect());
+            self.cache.insert(
+                chave.clone(),
+                texto.lines().map(|l| l.to_string()).collect(),
+            );
         }
         let linhas = self.cache.get(&chave)?;
         let i = (inicio - 1) as usize;
@@ -1521,6 +1627,20 @@ pub fn executar(
     entrada: &AnalysisInput,
     cancel: &AtomicBool,
 ) -> Result<AnalysisRun, String> {
+    executar_com(conn, dados, projeto, raiz, entrada, cancel, localizar)
+}
+
+/// O mesmo caminho de [`executar`], com o localizador da ferramenta aberto para
+/// quem testa poder fixar a ausência sem depender do que está instalado na máquina.
+fn executar_com(
+    conn: &Connection,
+    dados: &Path,
+    projeto: &Project,
+    raiz: &Path,
+    entrada: &AnalysisInput,
+    cancel: &AtomicBool,
+    localizador: impl Fn(Option<&str>) -> Ferramenta,
+) -> Result<AnalysisRun, String> {
     let inicio = Instant::now();
     let relativa = entrada.conferir()?;
     let pedido = raiz.join(relativa.as_deref().unwrap_or(""));
@@ -1539,7 +1659,7 @@ pub fn executar(
         String::new()
     };
     let mut ferramenta = if quer_externo {
-        localizar(Some(&explicito))
+        localizador(Some(&explicito))
     } else {
         Ferramenta {
             estado: "não-usada".to_string(),
@@ -1589,16 +1709,27 @@ pub fn executar(
     // não achou nada", e é isso que a nota e o corte precisam dizer.
     let mut externo_sem_prova = false;
 
+    // O caminho apontado não pode esconder a ferramenta que a busca automática
+    // achou. A varredura segue com ela, mas a nota guarda que o apontado não serviu.
+    if quer_externo && ferramenta.apontado_ignorado() {
+        notas.push(format!(
+            "o caminho apontado em {CHAVE_CONFIG} não serve; foi usado {} ({})",
+            ferramenta.caminho.as_deref().unwrap_or("semgrep"),
+            ferramenta.origem
+        ));
+    }
+
     // Instalação automática só quando ninguém apontou um caminho e o programa
-    // realmente não está aqui. Um caminho configurado é uma ordem — se ele não
-    // serve, a nota diz isso; e "sem-resposta" é programa presente que não
-    // acordou, que instalar por cima não conserta.
+    // realmente não está aqui. A busca automática já tentou PATH e scripts do
+    // Python mesmo com um valor apontado; se nada apareceu, a nota diz o que foi
+    // tentado. "Sem-resposta" é programa presente que não acordou, que instalar
+    // por cima não conserta.
     if quer_externo && ferramenta.estado == "ausente" && explicito.trim().is_empty() {
         notas.push("o semgrep não está nesta máquina — tentando instalar com pip/pipx".to_string());
         match instalar_semgrep(cancel) {
             Ok(caminho) => {
                 notas.push(format!("semgrep instalado em {caminho}"));
-                ferramenta = localizar(Some(&caminho));
+                ferramenta = localizador(Some(&caminho));
                 aberto.tool = nome_do_instrumento(&instrumento, &ferramenta);
                 aberto.tool_version = ferramenta.versao.clone();
             }
@@ -1638,8 +1769,12 @@ pub fn executar(
             }
             exit_code = resposta.code;
             tool_errors = resposta.erros;
-            cobertura.lidos += resposta.lidos;
-            cobertura.pulados += resposta.pulados;
+            // Os dois instrumentos leem a mesma árvore: somar os arquivos lidos
+            // contaria o mesmo arquivo duas vezes em `ambos`. O maior é a leitura
+            // de fato comprovada por algum deles; a nota de cobertura parcial
+            // continua vindo de cada resposta, não deste número.
+            cobertura.lidos = cobertura.lidos.max(resposta.lidos);
+            cobertura.pulados = cobertura.pulados.max(resposta.pulados);
             achados.extend(resposta.achados);
             regras_usadas.extend(resposta.regras);
             if let Some(nota) = resposta.nota {
@@ -1686,7 +1821,9 @@ pub fn executar(
     }
     let sem_leitura = cobertura.lidos == 0;
     if sem_leitura {
-        notas.push("a varredura não leu arquivo nenhum — não há o que afirmar sobre o código".to_string());
+        notas.push(
+            "a varredura não leu arquivo nenhum — não há o que afirmar sobre o código".to_string(),
+        );
     }
     // Um corte é uma promessa de leitura completa. "Não consegui ler" não é "está
     // limpo": quando o instrumento pedido não entregou prova, ou quando não houve
@@ -1788,9 +1925,28 @@ pub fn pacote(conn: &Connection, run_id: i64, limite: Option<usize>) -> Result<V
     let limite = limite.unwrap_or(LIMITE_DO_PACOTE).clamp(1, LIMITE_ACHADOS);
     let achados = db::listar_achados(conn, run_id, None, limite as i64 + 1)?;
     let truncado = achados.len() > limite;
-    let mostrados = if truncado { &achados[..limite] } else { &achados[..] };
+    let mostrados = if truncado {
+        &achados[..limite]
+    } else {
+        &achados[..]
+    };
     let veredito = classificar(&run);
     let decisoes = decisoes(&run, &veredito);
+    let comparacao = db::comparar_analises(conn, run_id)?;
+    let exemplos_corrigidos: Vec<Value> = comparacao
+        .corrigidos_itens
+        .iter()
+        .take(20)
+        .map(|a| {
+            json!({
+                "regra": a.rule_id,
+                "severidade": a.severity,
+                "arquivo": a.file,
+                "linha": a.line_start,
+                "mensagem": a.message,
+            })
+        })
+        .collect();
 
     Ok(json!({
         "esquema": "devops-desktop/analise@1",
@@ -1822,8 +1978,25 @@ pub fn pacote(conn: &Connection, run_id: i64, limite: Option<usize>) -> Result<V
         },
         "veredito": veredito,
         "decisoes": decisoes,
+        // A comparação é o que transforma uma lista de achados em decisão: o que
+        // esta corrida trouxe, o que continua e o que sumiu. Sem corrida anterior
+        // comparável, `base` é nulo — e isso não é "tudo novo".
+        "comparacao": {
+            "base": comparacao.baseline.as_ref().map(|b| json!({
+                "id": b.id,
+                "inicio": b.started_at,
+                "ferramenta": b.tool,
+                "versao": b.tool_version,
+            })),
+            "novos": comparacao.novos,
+            "persistentes": comparacao.persistentes,
+            "corrigidos": comparacao.corrigidos,
+            "corrigidosConclusivos": comparacao.corrigidos_conclusivos,
+            "corrigidosExemplos": exemplos_corrigidos,
+        },
         "porRegra": agrupar_por_regra(mostrados),
         "achados": mostrados.iter().map(|a| json!({
+            "impressao": a.fingerprint,
             "regra": a.rule_id,
             "origem": a.source,
             "severidade": a.severity,
@@ -1948,9 +2121,10 @@ fn decisoes(run: &AnalysisRun, veredito: &Value) -> Vec<Value> {
 fn agrupar_por_regra(achados: &[AnalysisFinding]) -> Vec<Value> {
     let mut contar: BTreeMap<&str, (usize, Vec<&str>, &str)> = BTreeMap::new();
     for a in achados {
-        let entrada = contar
-            .entry(a.rule_id.as_str())
-            .or_insert((0, Vec::new(), a.severity.as_str()));
+        let entrada =
+            contar
+                .entry(a.rule_id.as_str())
+                .or_insert((0, Vec::new(), a.severity.as_str()));
         entrada.0 += 1;
         if !entrada.1.contains(&a.file.as_str()) {
             entrada.1.push(a.file.as_str());
@@ -1958,13 +2132,15 @@ fn agrupar_por_regra(achados: &[AnalysisFinding]) -> Vec<Value> {
     }
     contar
         .into_iter()
-        .map(|(regra, (quantidade, arquivos, severidade))| json!({
-            "regra": regra,
-            "severidade": severidade,
-            "quantidade": quantidade,
-            "arquivosDiferentes": arquivos.len(),
-            "exemplos": arquivos.iter().take(3).copied().collect::<Vec<_>>(),
-        }))
+        .map(|(regra, (quantidade, arquivos, severidade))| {
+            json!({
+                "regra": regra,
+                "severidade": severidade,
+                "quantidade": quantidade,
+                "arquivosDiferentes": arquivos.len(),
+                "exemplos": arquivos.iter().take(3).copied().collect::<Vec<_>>(),
+            })
+        })
         .collect()
 }
 
@@ -1974,15 +2150,57 @@ fn agrupar_por_regra(achados: &[AnalysisFinding]) -> Vec<Value> {
 pub fn sarif(conn: &Connection, run_id: i64) -> Result<Value, String> {
     let run = db::obter_analise(conn, run_id)?;
     let achados = db::listar_achados(conn, run_id, None, LIMITE_ACHADOS as i64)?;
-    let regras: Vec<Value> = agrupar_por_regra(&achados)
-        .into_iter()
-        .map(|r| {
+    let comparacao = db::comparar_analises(conn, run_id)?;
+    let base = match comparacao.baseline.as_ref() {
+        Some(b) => Some(db::impressoes_da_corrida(conn, b.id)?),
+        None => None,
+    };
+
+    // A ordem das regras é a ordem do `ruleIndex` dos resultados. `BTreeMap`
+    // garante que duas exportações da mesma corrida tenham o mesmo índice.
+    let mut por_regra: BTreeMap<&str, (u8, &str, Option<&str>)> = BTreeMap::new();
+    for a in &achados {
+        let detalhe = REGRAS_EMBUTIDAS.iter().find(|r| r.id == a.rule_id);
+        let entrada = por_regra.entry(a.rule_id.as_str()).or_insert((
+            peso(&a.severity),
+            detalhe.map(|r| r.mensagem).unwrap_or(a.message.as_str()),
+            detalhe
+                .map(|r| r.cwe)
+                .filter(|c| !c.is_empty())
+                .or(a.cwe.as_deref()),
+        ));
+        entrada.0 = entrada.0.min(peso(&a.severity));
+        if entrada.1.is_empty() {
+            entrada.1 = a.message.as_str();
+        }
+        if entrada.2.is_none() {
+            entrada.2 = a.cwe.as_deref();
+        }
+    }
+    let indice: BTreeMap<&str, usize> = por_regra
+        .keys()
+        .enumerate()
+        .map(|(i, regra)| (*regra, i))
+        .collect();
+    let regras: Vec<Value> = por_regra
+        .iter()
+        .map(|(regra, (nivel, descricao, cwe))| {
+            let nivel = *nivel;
+            let descricao = *descricao;
+            let cwe = *cwe;
+            let link = cwe.and_then(link_do_cwe);
             json!({
-                "id": r["regra"],
-                "name": r["regra"],
-                "shortDescription": { "text": r["regra"] },
+                "id": regra,
+                "name": regra,
+                "shortDescription": { "text": descricao },
+                "fullDescription": { "text": descricao },
+                "helpUri": link,
                 "defaultConfiguration": {
-                    "level": nivel_da_severidade(r["severidade"].as_str().unwrap_or("INFO")),
+                    "level": nivel_da_severidade_por_peso(nivel),
+                },
+                "properties": {
+                    "tags": ["security", cwe.unwrap_or("análise")],
+                    "security-severity": peso_do_security_severity(nivel),
                 },
             })
         })
@@ -1990,8 +2208,9 @@ pub fn sarif(conn: &Connection, run_id: i64) -> Result<Value, String> {
     let results: Vec<Value> = achados
         .iter()
         .map(|a| {
-            json!({
+            let mut resultado = json!({
                 "ruleId": a.rule_id,
+                "ruleIndex": indice.get(a.rule_id.as_str()).copied().unwrap_or(0),
                 "level": nivel_da_severidade(&a.severity),
                 "message": { "text": a.message },
                 "locations": [{
@@ -2000,9 +2219,53 @@ pub fn sarif(conn: &Connection, run_id: i64) -> Result<Value, String> {
                         "region": { "startLine": a.line_start, "endLine": a.line_end },
                     }
                 }],
-            })
+                "partialFingerprints": {
+                    "devopsFingerprint/v1": a.fingerprint,
+                },
+                "properties": {
+                    "source": a.source,
+                    "cwe": a.cwe,
+                },
+            });
+            if let Some(base) = &base {
+                let mapa = resultado.as_object_mut().expect("resultado é objeto");
+                mapa.insert(
+                    "baselineState".to_string(),
+                    Value::String(
+                        if base.contains(&a.fingerprint) {
+                            "unchanged"
+                        } else {
+                            "new"
+                        }
+                        .to_string(),
+                    ),
+                );
+            }
+            resultado
         })
         .collect();
+    let mut invocacao = json!({
+        "executionSuccessful": run.status == "concluida",
+        "startTimeUtc": run.started_at,
+        "endTimeUtc": run.finished_at,
+        "exitCode": run.exit_code,
+        "properties": {
+            "status": run.status,
+            "blocked": run.blocked,
+            "filesScanned": run.files_scanned,
+            "filesSkipped": run.files_skipped,
+            "toolErrors": run.tool_errors,
+            "new": comparacao.novos,
+            "persisting": comparacao.persistentes,
+            "fixed": comparacao.corrigidos,
+        },
+    });
+    if let Some(nota) = &run.note {
+        invocacao["toolExecutionNotifications"] = json!([{
+            "level": "warning",
+            "message": { "text": nota },
+        }]);
+    }
     Ok(json!({
         "version": "2.1.0",
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
@@ -2010,15 +2273,55 @@ pub fn sarif(conn: &Connection, run_id: i64) -> Result<Value, String> {
             "tool": {
                 "driver": {
                     "name": "devops-desktop",
-                    "version": run.tool_version,
+                    "fullName": "DevOps Desktop — análise de código",
+                    "version": run.tool_version.clone().unwrap_or_else(|| "desconhecida".to_string()),
                     "informationUri": "https://github.com/DouglasGDev/devops-desktop",
                     "rules": regras,
                 }
             },
+            "invocations": [invocacao],
             "results": results,
             "columnKind": "utf16CodeUnits",
+            "properties": {
+                "project": run.project,
+                "analyzer": run.analyzer,
+                "tool": run.tool,
+                "severityGate": run.severity_gate,
+                "baselineRunId": comparacao.baseline.as_ref().map(|b| b.id),
+            },
         }],
     }))
+}
+
+fn nivel_da_severidade_por_peso(peso: u8) -> &'static str {
+    match peso {
+        0 => "error",
+        1 => "warning",
+        _ => "note",
+    }
+}
+
+/// O que o GitHub code scanning lê para ordenar alertas. É uma nota no formato do
+/// CVSS que acompanha a severidade da regra, não uma medição do achado.
+fn peso_do_security_severity(peso: u8) -> &'static str {
+    match peso {
+        0 => "8.0",
+        1 => "5.0",
+        _ => "2.0",
+    }
+}
+
+/// O número de um `CWE-78: …` vira o link oficial da fraqueza. Sem número, sem
+/// link — inventar uma URL seria pior do que não ter ajuda.
+fn link_do_cwe(cwe: &str) -> Option<String> {
+    let resto = cwe.strip_prefix("CWE-")?;
+    let numero: String = resto.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if numero.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "https://cwe.mitre.org/data/definitions/{numero}.html"
+    ))
 }
 
 fn nivel_da_severidade(severidade: &str) -> &'static str {
@@ -2055,7 +2358,11 @@ pub fn exportar(
     let valor = match formato {
         "pacote" => pacote(conn, run_id, limite)?,
         "sarif" => sarif(conn, run_id)?,
-        outro => return Err(format!("a exportação escreve pacote ou sarif, não “{outro}”")),
+        outro => {
+            return Err(format!(
+                "a exportação escreve pacote ou sarif, não “{outro}”"
+            ))
+        }
     };
     if destino.as_os_str().is_empty() || !destino.is_absolute() {
         return Err(format!(
@@ -2125,7 +2432,9 @@ impl Estado {
 
     /// Levanta a flag de quem está rodando e diz se havia alguém rodando.
     pub fn interromper(&self, project_id: i64) -> bool {
-        let Ok(guard) = self.ativas.lock() else { return false };
+        let Ok(guard) = self.ativas.lock() else {
+            return false;
+        };
         match guard.get(&project_id) {
             Some(flag) => {
                 flag.store(true, Ordering::SeqCst);
@@ -2162,7 +2471,8 @@ mod tests {
     fn pasta_de_teste(prefixo: &str) -> PathBuf {
         static NUMERO: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NUMERO.fetch_add(1, Ordering::SeqCst);
-        let caminho = std::env::temp_dir().join(format!("dd-analise-{prefixo}-{}-{n}", std::process::id()));
+        let caminho =
+            std::env::temp_dir().join(format!("dd-analise-{prefixo}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&caminho);
         std::fs::create_dir_all(&caminho).unwrap();
         caminho
@@ -2238,9 +2548,13 @@ mod tests {
     }
 
     #[test]
-    fn as_duas_listas_de_regras_tem_os_mesmos_ids_na_mesma_ordem() {        // Os dois instrumentos têm de falar a mesma língua, ou `ambos` produz duas
+    fn as_duas_listas_de_regras_tem_os_mesmos_ids_na_mesma_ordem() {
+        // Os dois instrumentos têm de falar a mesma língua, ou `ambos` produz duas
         // listas que ninguém soma.
-        let embutidas: Vec<String> = ids_embarcados().into_iter().map(|s| s.to_string()).collect();
+        let embutidas: Vec<String> = ids_embarcados()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(embutidas, ids_do_yaml(REGRAS_YAML));
         assert_eq!(contar_regras(REGRAS_YAML), REGRAS_EMBUTIDAS.len());
         assert_eq!(REGRAS_EMBUTIDAS.len(), 19);
@@ -2252,9 +2566,17 @@ mod tests {
         let (achados, cobertura) = varredura_embutida(&pasta, &AtomicBool::new(false));
         let vistas: Vec<&str> = achados.iter().map(|a| a.rule_id.as_str()).collect();
         for regra in REGRAS_EMBUTIDAS {
-            assert!(vistas.contains(&regra.id), "a regra {} não disparou", regra.id);
+            assert!(
+                vistas.contains(&regra.id),
+                "a regra {} não disparou",
+                regra.id
+            );
         }
-        assert!(cobertura.lidos >= 5, "poucos arquivos lidos: {}", cobertura.lidos);
+        assert!(
+            cobertura.lidos >= 5,
+            "poucos arquivos lidos: {}",
+            cobertura.lidos
+        );
         let _ = std::fs::remove_dir_all(&pasta);
     }
 
@@ -2276,10 +2598,21 @@ mod tests {
             "const {Client} = require(\"pg\");\nfunction pinta(el, texto) { el.textContent = texto; }\n\
              async function q(sql, valores) { return client.query(sql, valores); }\n",
         );
-        escrever(&pasta, "bom.php", "<?php\n$hesita = password_hash($s, PASSWORD_DEFAULT);\n");
+        escrever(
+            &pasta,
+            "bom.php",
+            "<?php\n$hesita = password_hash($s, PASSWORD_DEFAULT);\n",
+        );
         let (achados, cobertura) = varredura_embutida(&pasta, &AtomicBool::new(false));
         assert_eq!(cobertura.lidos, 3);
-        assert!(achados.is_empty(), "{:?}", achados.iter().map(|a| (&a.file, a.line_start, &a.rule_id)).collect::<Vec<_>>());
+        assert!(
+            achados.is_empty(),
+            "{:?}",
+            achados
+                .iter()
+                .map(|a| (&a.file, a.line_start, &a.rule_id))
+                .collect::<Vec<_>>()
+        );
         let _ = std::fs::remove_dir_all(&pasta);
     }
 
@@ -2300,7 +2633,10 @@ mod tests {
         assert!(!contem(&colado("el.textContent = texto"), ".innerhtml="));
         // `eslint-disable-next-line` mantém a marca: hífen não é caractere de
         // identificador para a borda, senão a marca acabaria em `-` e sumiria.
-        assert!(contem(&colado("// eslint-disable-next-line"), "eslint-disable"));
+        assert!(contem(
+            &colado("// eslint-disable-next-line"),
+            "eslint-disable"
+        ));
     }
 
     #[test]
@@ -2323,21 +2659,34 @@ mod tests {
         escrever(&pasta, "node_modules/pacote/app.py", "os.system('ls')\n");
         escrever(&pasta, ".git/hooks/app.py", "os.system('ls')\n");
         let (achados, cobertura) = varredura_embutida(&pasta, &AtomicBool::new(false));
-        assert_eq!(cobertura.lidos, 1, "{:?}", achados.iter().map(|a| &a.file).collect::<Vec<_>>());
+        assert_eq!(
+            cobertura.lidos,
+            1,
+            "{:?}",
+            achados.iter().map(|a| &a.file).collect::<Vec<_>>()
+        );
         assert!(achados.iter().all(|a| a.file == "app.py"));
         let _ = std::fs::remove_dir_all(&pasta);
     }
 
     #[test]
     fn o_corte_diz_quando_barra() {
-        let contagem = AnalysisCounts { error: 0, warning: 2, info: 5 };
+        let contagem = AnalysisCounts {
+            error: 0,
+            warning: 2,
+            info: 5,
+        };
         assert!(!barra_o_corte("", &contagem));
         assert!(!barra_o_corte("ERROR", &contagem));
         assert!(barra_o_corte("WARNING", &contagem));
         assert!(barra_o_corte("INFO", &contagem));
         assert!(barra_o_corte(
             "ERROR",
-            &AnalysisCounts { error: 1, warning: 0, info: 0 }
+            &AnalysisCounts {
+                error: 1,
+                warning: 0,
+                info: 0
+            }
         ));
     }
 
@@ -2418,7 +2767,13 @@ mod tests {
     }
 
     fn chamada_de(code: Option<i32>) -> Chamada {
-        Chamada { stdout: String::new(), stderr: String::new(), code, sem_resposta: false, cancelado: false }
+        Chamada {
+            stdout: String::new(),
+            stderr: String::new(),
+            code,
+            sem_resposta: false,
+            cancelado: false,
+        }
     }
 
     #[test]
@@ -2428,11 +2783,19 @@ mod tests {
         // o mesmo tipo de conclusão — o que pesa são os dados.
         let pasta = pasta_de_teste("envelope");
         escrever(&pasta, "a.py", "import os\n\nos.system(cmd)\n");
-        let resposta = ler_envelope(&envelope_real(), &pasta, chamada_de(Some(2)), Path::new("regras.yaml"));
+        let resposta = ler_envelope(
+            &envelope_real(),
+            &pasta,
+            chamada_de(Some(2)),
+            Path::new("regras.yaml"),
+        );
         assert_eq!(resposta.achados.len(), 1);
         assert_eq!(resposta.achados[0].rule_id, "dd-105-avaliacao-de-codigo");
         assert_eq!(resposta.achados[0].severity, "ERROR");
-        assert_eq!(resposta.achados[0].cwe.as_deref(), Some("CWE-94: Code Injection"));
+        assert_eq!(
+            resposta.achados[0].cwe.as_deref(),
+            Some("CWE-94: Code Injection")
+        );
         assert_eq!(resposta.lidos, 3);
         assert_eq!(resposta.pulados, 1);
         assert_eq!(resposta.erros, 1);
@@ -2442,7 +2805,10 @@ mod tests {
         assert!(nota.contains("1 erro(s)"), "{nota}");
         // O trecho veio do arquivo lido por nós, não do JSON — que em modo livre
         // devolve "requires login" no lugar da linha.
-        assert_eq!(resposta.achados[0].snippet.as_deref(), Some("os.system(cmd)"));
+        assert_eq!(
+            resposta.achados[0].snippet.as_deref(),
+            Some("os.system(cmd)")
+        );
         let _ = std::fs::remove_dir_all(&pasta);
     }
 
@@ -2496,9 +2862,16 @@ mod tests {
             chamada_de(Some(0)),
             &caminho_das_regras(),
         );
-        assert!(!resposta.invalida && !resposta.sem_resposta, "{:?}", resposta.nota);
+        assert!(
+            !resposta.invalida && !resposta.sem_resposta,
+            "{:?}",
+            resposta.nota
+        );
         assert_eq!(resposta.lidos, 1);
-        assert_eq!(resposta.pulados, 0, "sem `skipped` no JSON não há arquivo pulado");
+        assert_eq!(
+            resposta.pulados, 0,
+            "sem `skipped` no JSON não há arquivo pulado"
+        );
         assert_eq!(resposta.erros, 0);
         assert_eq!(resposta.nota, None, "varredura lida não tem o que reclamar");
         assert_eq!(resposta.code, Some(0));
@@ -2512,7 +2885,10 @@ mod tests {
             Some("CWE-78: OS Command Injection")
         );
         // o trecho é a linha do arquivo, com a indentação que ela tem
-        assert_eq!(resposta.achados[0].snippet.as_deref(), Some("    os.system(cmd)"));
+        assert_eq!(
+            resposta.achados[0].snippet.as_deref(),
+            Some("    os.system(cmd)")
+        );
         assert_eq!(resposta.regras, vec!["dd-101-shell-true".to_string()]);
         let _ = std::fs::remove_dir_all(&casa);
     }
@@ -2520,7 +2896,9 @@ mod tests {
     /// O arquivo de regras embarcado, pelo caminho real do crate. É o que a
     /// varredura materializa, e o que os testes de leitura conferem.
     fn caminho_das_regras() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("regras").join(NOME_DAS_REGRAS)
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("regras")
+            .join(NOME_DAS_REGRAS)
     }
 
     #[test]
@@ -2571,7 +2949,10 @@ mod tests {
             chamada_de(None),
             Path::new("../regras/dd-seguranca.yaml"),
         );
-        assert!(resposta.invalida, "envelope sem erros nem caminhos lidos não conclui");
+        assert!(
+            resposta.invalida,
+            "envelope sem erros nem caminhos lidos não conclui"
+        );
         assert_eq!(resposta.lidos, 0);
         assert_eq!(resposta.pulados, 0);
         assert_eq!(resposta.erros, 0);
@@ -2586,7 +2967,11 @@ mod tests {
             Path::new("../regras/dd-seguranca.yaml"),
         );
         assert!(sem_achados.invalida);
-        assert!(sem_achados.nota.clone().unwrap_or_default().contains("lista de achados"));
+        assert!(sem_achados
+            .nota
+            .clone()
+            .unwrap_or_default()
+            .contains("lista de achados"));
 
         // um achado sem linha não desaparece da conta: é leitura que não se leu
         let sem_forma = ler_envelope(
@@ -2615,7 +3000,11 @@ mod tests {
         let na_borda = format!("é{}", "a".repeat(199));
         assert_eq!(na_borda.len(), 201, "o caso é de bytes, não de caracteres");
         assert_eq!(na_borda.chars().count(), 200);
-        assert_eq!(cauda(&na_borda), na_borda, "200 caracteres estão dentro do limite");
+        assert_eq!(
+            cauda(&na_borda),
+            na_borda,
+            "200 caracteres estão dentro do limite"
+        );
 
         let bruto = format!("{}{}é", "x".repeat(100), "y".repeat(199));
         let corte = cauda(&bruto);
@@ -2626,7 +3015,10 @@ mod tests {
         let com_segredo =
             cauda("falhou ao ler C:\\x\\config com password = \"FICTICIO_VALOR_SOLTO_123\"");
         assert!(com_segredo.contains("password = "), "{com_segredo}");
-        assert!(!com_segredo.contains("FICTICIO_VALOR_SOLTO_123"), "{com_segredo}");
+        assert!(
+            !com_segredo.contains("FICTICIO_VALOR_SOLTO_123"),
+            "{com_segredo}"
+        );
     }
 
     #[test]
@@ -2641,7 +3033,12 @@ mod tests {
             "errors": [],
             "paths": { "scanned": ["a.py"] }
         });
-        let resposta = ler_envelope(&valor, Path::new("."), chamada_de(Some(0)), Path::new("r.yaml"));
+        let resposta = ler_envelope(
+            &valor,
+            Path::new("."),
+            chamada_de(Some(0)),
+            Path::new("r.yaml"),
+        );
         assert_eq!(resposta.achados[0].severity, "WARNING");
     }
 
@@ -2665,10 +3062,16 @@ mod tests {
             .iter()
             .filter(|a| a.snippet.as_deref().unwrap_or("").contains("Bearer"))
             .collect();
-        assert!(!apontados.is_empty(), "a varredura não achou a linha do comando");
+        assert!(
+            !apontados.is_empty(),
+            "a varredura não achou a linha do comando"
+        );
         for a in &apontados {
             let texto = a.snippet.clone().unwrap_or_default();
-            assert!(!texto.contains(valor), "o valor do cabeçalho vazou: {texto}");
+            assert!(
+                !texto.contains(valor),
+                "o valor do cabeçalho vazou: {texto}"
+            );
             assert!(texto.contains("Bearer «valor mascarado»"), "{texto}");
         }
 
@@ -2686,7 +3089,12 @@ mod tests {
             "errors": [],
             "paths": { "scanned": ["a.py"] }
         });
-        let resposta = ler_envelope(&valor_json, &pasta, chamada_de(Some(0)), Path::new("r.yaml"));
+        let resposta = ler_envelope(
+            &valor_json,
+            &pasta,
+            chamada_de(Some(0)),
+            Path::new("r.yaml"),
+        );
         let texto = resposta.achados[0].snippet.clone().unwrap_or_default();
         assert!(!texto.contains(valor) && !texto.contains(chave), "{texto}");
         assert!(texto.contains("«valor mascarado»"), "{texto}");
@@ -2715,9 +3123,18 @@ mod tests {
 
     #[test]
     fn a_versao_e_lida_do_que_a_ferramenta_escreve() {
-        assert_eq!(versao_da_resposta("1.181.0", "").as_deref(), Some("1.181.0"));
-        assert_eq!(versao_da_resposta("semgrep 1.181.0\n", "").as_deref(), Some("1.181.0"));
-        assert_eq!(versao_da_resposta("", "Traceback: nada de versão aqui").as_deref(), None);
+        assert_eq!(
+            versao_da_resposta("1.181.0", "").as_deref(),
+            Some("1.181.0")
+        );
+        assert_eq!(
+            versao_da_resposta("semgrep 1.181.0\n", "").as_deref(),
+            Some("1.181.0")
+        );
+        assert_eq!(
+            versao_da_resposta("", "Traceback: nada de versão aqui").as_deref(),
+            None
+        );
     }
 
     #[test]
@@ -2726,7 +3143,11 @@ mod tests {
         let arquivo = publicar_regras(&dados).unwrap();
         assert_eq!(std::fs::read_to_string(&arquivo).unwrap(), REGRAS_YAML);
         // Uma regra antiga esquecida no disco é reescrita, não respeitada.
-        escrever(&dados, "regras/dd-seguranca.yaml", "rules:\n  - id: antiga\n");
+        escrever(
+            &dados,
+            "regras/dd-seguranca.yaml",
+            "rules:\n  - id: antiga\n",
+        );
         publicar_regras(&dados).unwrap();
         assert_eq!(std::fs::read_to_string(&arquivo).unwrap(), REGRAS_YAML);
         let _ = std::fs::remove_dir_all(&dados);
@@ -2749,7 +3170,11 @@ mod tests {
     fn corrida(campos: &str) -> AnalysisRun {
         let counts = match campos {
             "vazia" => AnalysisCounts::default(),
-            "cheia" => AnalysisCounts { error: 2, warning: 0, info: 0 },
+            "cheia" => AnalysisCounts {
+                error: 2,
+                warning: 0,
+                info: 0,
+            },
             _ => AnalysisCounts::default(),
         };
         AnalysisRun {
@@ -2779,41 +3204,71 @@ mod tests {
     #[test]
     fn a_classificacao_diz_o_que_os_numeros_dizem() {
         let base = corrida("vazia");
-        assert_eq!(classificar(&base)["classificacao"].as_str(), Some("sem-achados"));
+        assert_eq!(
+            classificar(&base)["classificacao"].as_str(),
+            Some("sem-achados")
+        );
         assert_eq!(
             decisoes(&base, &classificar(&base))[0]["acao"].as_str(),
             Some("prosseguir")
         );
-        assert_eq!(classificar(&corrida("sem-leitura"))["classificacao"].as_str(), Some("cobertura-nula"));
-        assert_eq!(classificar(&corrida("cheia"))["classificacao"].as_str(), Some("barra"));
+        assert_eq!(
+            classificar(&corrida("sem-leitura"))["classificacao"].as_str(),
+            Some("cobertura-nula")
+        );
+        assert_eq!(
+            classificar(&corrida("cheia"))["classificacao"].as_str(),
+            Some("barra")
+        );
         assert_eq!(
             decisoes(&corrida("cheia"), &classificar(&corrida("cheia")))[0]["acao"].as_str(),
             Some("parar-a-publicacao")
         );
         let reclamou = corrida("erros");
-        assert_eq!(classificar(&reclamou)["classificacao"].as_str(), Some("revalidar-varredura"));
+        assert_eq!(
+            classificar(&reclamou)["classificacao"].as_str(),
+            Some("revalidar-varredura")
+        );
         let acoes: Vec<String> = decisoes(&reclamou, &classificar(&reclamou))
             .iter()
             .map(|d| d["acao"].as_str().unwrap_or("").to_string())
             .collect();
-        assert!(acoes.contains(&"revalidar-varredura".to_string()), "{acoes:?}");
+        assert!(
+            acoes.contains(&"revalidar-varredura".to_string()),
+            "{acoes:?}"
+        );
 
         let mut interrompida = base.clone();
         interrompida.status = "interrompida".to_string();
-        assert_eq!(classificar(&interrompida)["classificacao"].as_str(), Some("varredura-interrompida"));
+        assert_eq!(
+            classificar(&interrompida)["classificacao"].as_str(),
+            Some("varredura-interrompida")
+        );
 
         // A varredura que falhou não é "sem achados": os números que ela trouxe são
         // dela, e o resto continua sem prova.
-        let falhou = AnalysisRun { status: "falhou".to_string(), ..base.clone() };
-        assert_eq!(classificar(&falhou)["classificacao"].as_str(), Some("leitura-incompleta"));
+        let falhou = AnalysisRun {
+            status: "falhou".to_string(),
+            ..base.clone()
+        };
+        assert_eq!(
+            classificar(&falhou)["classificacao"].as_str(),
+            Some("leitura-incompleta")
+        );
         let acoes: Vec<String> = decisoes(&falhou, &classificar(&falhou))
             .iter()
             .map(|d| d["acao"].as_str().unwrap_or("").to_string())
             .collect();
-        assert!(acoes.contains(&"refazer-a-varredura".to_string()), "{acoes:?}");
+        assert!(
+            acoes.contains(&"refazer-a-varredura".to_string()),
+            "{acoes:?}"
+        );
         assert!(!acoes.contains(&"prosseguir".to_string()), "{acoes:?}");
 
-        let ferramenta_fora = AnalysisRun { tool: "semgrep ausente".to_string(), ..base };
+        let ferramenta_fora = AnalysisRun {
+            tool: "semgrep ausente".to_string(),
+            ..base
+        };
         assert_eq!(
             classificar(&ferramenta_fora)["classificacao"].as_str(),
             Some("leitura-incompleta")
@@ -2829,7 +3284,11 @@ mod tests {
         // "barram 1.358" inventaria 682 avisos que ninguém pediu para barrar.
         let base = corrida("cheia");
         let mut conta = base.clone();
-        conta.counts = AnalysisCounts { error: 2, warning: 7, info: 3 };
+        conta.counts = AnalysisCounts {
+            error: 2,
+            warning: 7,
+            info: 3,
+        };
         let veredito = classificar(&conta);
         assert_eq!(veredito["contagem"]["noCorte"].as_i64(), Some(2));
         assert_eq!(veredito["contagem"]["total"].as_i64(), Some(12));
@@ -2840,15 +3299,25 @@ mod tests {
             Some("2 achado(s) no corte ERROR ou acima"),
             "{decisao}"
         );
-        assert_eq!(decisao["evidencia"].as_str(), Some("veredito.contagem.noCorte"));
+        assert_eq!(
+            decisao["evidencia"].as_str(),
+            Some("veredito.contagem.noCorte")
+        );
 
         // aviso acima de um corte que só barra erro continua barrando por erro
         let so_aviso = AnalysisRun {
-            counts: AnalysisCounts { error: 0, warning: 4, info: 0 },
+            counts: AnalysisCounts {
+                error: 0,
+                warning: 4,
+                info: 0,
+            },
             blocked: false,
             ..base
         };
-        assert_eq!(classificar(&so_aviso)["classificacao"].as_str(), Some("achados-abaixo-do-corte"));
+        assert_eq!(
+            classificar(&so_aviso)["classificacao"].as_str(),
+            Some("achados-abaixo-do-corte")
+        );
     }
 
     #[test]
@@ -2865,6 +3334,7 @@ mod tests {
             message: "m".to_string(),
             cwe: None,
             snippet: None,
+            fingerprint: String::new(),
         };
         let grupo = agrupar_por_regra(&[
             feito("dd-101-shell-true", "a.py"),
@@ -2891,20 +3361,23 @@ mod tests {
             message: "m".to_string(),
             cwe: Some("CWE-78".to_string()),
             snippet: Some("os.system(x)".to_string()),
+            fingerprint: String::new(),
         }];
         let grupo = agrupar_por_regra(&achados);
         let resultados: Vec<Value> = achados
             .iter()
-            .map(|a| json!({
-                "ruleId": a.rule_id,
-                "level": nivel_da_severidade(&a.severity),
-                "locations": [{
-                    "physicalLocation": {
-                        "artifactLocation": { "uri": a.file.replace('\\', "/") },
-                        "region": { "startLine": a.line_start },
-                    }
-                }],
-            }))
+            .map(|a| {
+                json!({
+                    "ruleId": a.rule_id,
+                    "level": nivel_da_severidade(&a.severity),
+                    "locations": [{
+                        "physicalLocation": {
+                            "artifactLocation": { "uri": a.file.replace('\\', "/") },
+                            "region": { "startLine": a.line_start },
+                        }
+                    }],
+                })
+            })
             .collect();
         assert_eq!(grupo[0]["severidade"].as_str(), Some("ERROR"));
         assert_eq!(resultados[0]["level"].as_str(), Some("error"));
@@ -2920,18 +3393,48 @@ mod tests {
     fn o_caminho_explicito_soe_existe_quando_existe() {
         let aqui = std::env::current_exe().unwrap();
         let nome = aqui.to_str().unwrap();
-        assert_eq!(resolver_explicito(nome).as_deref(), Some(nome));
-        assert!(resolver_explicito("C:\\não\\há\\nada\\aqui.exe").is_none());
-        assert!(resolver_explicito("").is_none());
+        assert_eq!(resolver_explicito_com(nome, no_path).as_deref(), Some(nome));
+        assert!(resolver_explicito_com("C:\\não\\há\\nada\\aqui.exe", no_path).is_none());
+        assert!(resolver_explicito_com("", no_path).is_none());
     }
 
     #[test]
     fn uma_ferramenta_ausente_e_dita_ausente_e_nao_sem_resposta() {
         // O nome não existe: `ausente`. É a diferença entre "instale" e "espere".
-        let ferramenta = localizar(Some("um-programa-que-nao-existe-em-lugar-nenhum"));
+        // Os buscadores vazios isolam a resposta do que está instalado na máquina.
+        let ferramenta = localizar_com(
+            Some("um-programa-que-nao-existe-em-lugar-nenhum"),
+            |_| None,
+            |_| None,
+        );
         assert_eq!(ferramenta.estado, "ausente");
         assert!(ferramenta.caminho.is_none());
         assert_eq!(ferramenta.regras, 19);
+        assert_eq!(
+            ferramenta.apontado,
+            "um-programa-que-nao-existe-em-lugar-nenhum"
+        );
+    }
+
+    #[test]
+    fn a_busca_automatica_vale_quando_o_caminho_apontado_nao_serve() {
+        // O caso real: a tela guardou uma pasta, e o semgrep está nos scripts do
+        // Python. O apontado não pode esconder a ferramenta que existe.
+        let (binario, origem) = procurar_binario(
+            Some(r"E:\projeto\dist\"),
+            |_| None,
+            |nome| {
+                (nome == "pysemgrep.exe").then(|| r"C:\Python\Scripts\pysemgrep.exe".to_string())
+            },
+        );
+        assert_eq!(binario.as_deref(), Some(r"C:\Python\Scripts\pysemgrep.exe"));
+        assert_eq!(origem, "python-scripts");
+
+        // Sem candidato em lugar nenhum, a resposta continua sendo ausente e sem
+        // origem inventada; o valor apontado é o que a tela mostra.
+        let (nenhum, vazia) = procurar_binario(Some(r"E:\projeto\dist\"), |_| None, |_| None);
+        assert!(nenhum.is_none());
+        assert!(vazia.is_empty());
     }
 
     #[test]
@@ -2959,7 +3462,15 @@ mod tests {
     }
 
     fn projeto_de_teste(conn: &Connection, pasta: &Path) -> Project {
-        db::insert_project(conn, "casa", &pasta.display().to_string(), false, None, None).unwrap()
+        db::insert_project(
+            conn,
+            "casa",
+            &pasta.display().to_string(),
+            false,
+            None,
+            None,
+        )
+        .unwrap()
     }
 
     fn pedido(project_id: i64, instrumento: &str, corte: &str) -> AnalysisInput {
@@ -2990,11 +3501,20 @@ mod tests {
         .unwrap();
         assert_eq!(corrida.status, "concluida");
         assert_eq!(corrida.analyzer, "embutido");
-        assert_eq!(corrida.project, "casa", "a corrida diz de quem é sem segunda consulta");
-        assert!(corrida.blocked, "o código plantado tem erro e o corte é ERROR");
+        assert_eq!(
+            corrida.project, "casa",
+            "a corrida diz de quem é sem segunda consulta"
+        );
+        assert!(
+            corrida.blocked,
+            "o código plantado tem erro e o corte é ERROR"
+        );
         assert!(corrida.counts.error > 0);
         assert!(!corrida.rules.is_empty());
-        assert!(corrida.tool_version.is_none(), "o embutido não tem versão de ferramenta");
+        assert!(
+            corrida.tool_version.is_none(),
+            "o embutido não tem versão de ferramenta"
+        );
         // a contagem dita pelo veredito é a contagem da tabela, não a promessa de
         // quem escreveu os achados
         let lidos = db::listar_achados(&conn, corrida.id, Some("ERROR"), 500).unwrap();
@@ -3082,6 +3602,21 @@ mod tests {
         .unwrap();
     }
 
+    /// A ausência fixada em teste: nem PATH nem scripts do Python desta máquina
+    /// entram na resposta.
+    fn localizador_ausente(_: Option<&str>) -> Ferramenta {
+        Ferramenta {
+            estado: "ausente".to_string(),
+            caminho: None,
+            versao: None,
+            duracao_ms: 0,
+            regras: contar_regras(REGRAS_YAML),
+            origem: String::new(),
+            apontado: String::new(),
+            resposta: String::new(),
+        }
+    }
+
     #[test]
     fn o_instrumento_pedido_que_nao_rodou_nao_conclui_a_corrida() {
         let casa = arvore_de_teste();
@@ -3090,13 +3625,14 @@ mod tests {
         let projeto = projeto_de_teste(&conn, &casa);
         let dados = pasta_de_teste("dados-ausente");
         let raiz = raiz_do_projeto(&projeto).unwrap();
-        let corrida = executar(
+        let corrida = executar_com(
             &conn,
             &dados,
             &projeto,
             &raiz,
             &pedido(projeto.id, "ambos", "ERROR"),
             &AtomicBool::new(false),
+            localizador_ausente,
         )
         .unwrap();
         // Medido: a corrida #17 foi pedida como `ambos`, o semgrep não estava no
@@ -3105,14 +3641,19 @@ mod tests {
         // um instrumento que não achou nada.
         assert_eq!(corrida.status, "falhou", "{:?}", corrida.note);
         assert!(corrida.tool.contains("semgrep ausente"), "{}", corrida.tool);
-        assert!(corrida.blocked, "corte declarado sem a leitura prometida barra");
+        assert!(
+            corrida.blocked,
+            "corte declarado sem a leitura prometida barra"
+        );
         let nota = corrida.note.clone().unwrap_or_default();
         assert!(nota.contains("instale-o ou aponte o caminho"), "{nota}");
         // o que foi lido continua gravado: é a nota que diz o que falta, não o
         // sumiço do que existe
         assert!(corrida.counts.error > 0);
         assert_eq!(
-            db::listar_achados(&conn, corrida.id, Some("ERROR"), 500).unwrap().len() as i64,
+            db::listar_achados(&conn, corrida.id, Some("ERROR"), 500)
+                .unwrap()
+                .len() as i64,
             corrida.counts.error
         );
         let pacote = self::pacote(&conn, corrida.id, None).unwrap();
@@ -3123,19 +3664,26 @@ mod tests {
             .iter()
             .map(|d| d["acao"].as_str().unwrap_or("").to_string())
             .collect();
-        assert!(acoes.contains(&"parar-a-publicacao".to_string()), "{acoes:?}");
-        assert!(acoes.contains(&"instalar-ou-apontar-a-ferramenta".to_string()), "{acoes:?}");
+        assert!(
+            acoes.contains(&"parar-a-publicacao".to_string()),
+            "{acoes:?}"
+        );
+        assert!(
+            acoes.contains(&"instalar-ou-apontar-a-ferramenta".to_string()),
+            "{acoes:?}"
+        );
         assert!(!acoes.contains(&"prosseguir".to_string()), "{acoes:?}");
 
         // sem corte declarado não há promessa de leitura a descumprir: a corrida é
         // dita falha pelo que aconteceu, mas nada barra por contagem
-        let sem_corte = executar(
+        let sem_corte = executar_com(
             &conn,
             &dados,
             &projeto,
             &raiz,
             &pedido(projeto.id, "ambos", ""),
             &AtomicBool::new(false),
+            localizador_ausente,
         )
         .unwrap();
         assert_eq!(sem_corte.status, "falhou");
@@ -3164,7 +3712,10 @@ mod tests {
         .unwrap();
         assert_eq!(corrida.files_scanned, 0);
         assert_eq!(corrida.status, "falhou", "{:?}", corrida.note);
-        assert!(corrida.blocked, "zero leitura com corte ERROR não é zero achados");
+        assert!(
+            corrida.blocked,
+            "zero leitura com corte ERROR não é zero achados"
+        );
         let nota = corrida.note.clone().unwrap_or_default();
         assert!(nota.contains("não leu arquivo nenhum"), "{nota}");
         let pacote = self::pacote(&conn, corrida.id, None).unwrap();
@@ -3182,13 +3733,28 @@ mod tests {
         let raiz = raiz_do_projeto(&projeto).unwrap();
         let mut dobrando = pedido(projeto.id, "embutido", "");
         dobrando.path = Some("../de-lado".to_string());
-        let err = executar(&conn, &dados, &projeto, &raiz, &dobrando, &AtomicBool::new(false))
-            .unwrap_err();
+        let err = executar(
+            &conn,
+            &dados,
+            &projeto,
+            &raiz,
+            &dobrando,
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
         assert!(err.contains("caminho relativo"), "{err}");
         // uma pasta que não existe no projeto também não varre nada
         let mut inexistente = pedido(projeto.id, "embutido", "");
         inexistente.path = Some("nao-existe".to_string());
-        assert!(executar(&conn, &dados, &projeto, &raiz, &inexistente, &AtomicBool::new(false)).is_err());
+        assert!(executar(
+            &conn,
+            &dados,
+            &projeto,
+            &raiz,
+            &inexistente,
+            &AtomicBool::new(false)
+        )
+        .is_err());
         let _ = std::fs::remove_dir_all(&casa);
         let _ = std::fs::remove_dir_all(&dados);
     }
@@ -3199,7 +3765,8 @@ mod tests {
         std::fs::create_dir_all(casa.join("src")).expect("criar a subpasta");
 
         // Pasta que está lá: a régua canônica responde, e vem sem o prefixo verbatim.
-        let alvo = alvo_da_varredura(&casa, &casa.join("src"), git_probe::PRAZO_SONDA).expect("a pasta respondeu");
+        let alvo = alvo_da_varredura(&casa, &casa.join("src"), git_probe::PRAZO_SONDA)
+            .expect("a pasta respondeu");
         assert!(!alvo.to_string_lossy().starts_with(r"\\?\"), "{alvo:?}");
 
         // Prazo menor que qualquer resposta de disco: o que a porta devolve é o
@@ -3207,7 +3774,10 @@ mod tests {
         // culparia o pedido quando quem não acordou foi o volume.
         let sem_resposta = alvo_da_varredura(&casa, &casa.join("src"), Duration::ZERO)
             .expect_err("0 ms é prazo, não resposta");
-        assert!(sem_resposta.contains("não respondeu em 0 ms"), "{sem_resposta}");
+        assert!(
+            sem_resposta.contains("não respondeu em 0 ms"),
+            "{sem_resposta}"
+        );
         assert!(!sem_resposta.contains("não existe"), "{sem_resposta}");
 
         // Subpasta que não está lá, com prazo de verdade: essa sim é ausência dita.
@@ -3341,24 +3911,42 @@ mod tests {
             sem_resposta,
             cancelado: false,
         };
-        assert_eq!(estado_da_conferencia(&chamada("", "", Some(0), false)), "validadas");
+        assert_eq!(
+            estado_da_conferencia(&chamada("", "", Some(0), false)),
+            "validadas"
+        );
         assert_eq!(
             estado_da_conferencia(&chamada("", "configuration error", Some(7), false)),
             "inválidas"
         );
         // quem não respondeu não é "inválidas" — e muito menos "validadas"
-        assert_eq!(estado_da_conferencia(&chamada("", "", None, true)), "sem-resposta");
-        assert_eq!(estado_da_conferencia(&chamada("", "", Some(0), true)), "sem-resposta");
+        assert_eq!(
+            estado_da_conferencia(&chamada("", "", None, true)),
+            "sem-resposta"
+        );
+        assert_eq!(
+            estado_da_conferencia(&chamada("", "", Some(0), true)),
+            "sem-resposta"
+        );
     }
 
-    fn sonda(estado: &str, apontado: &str, caminho: Option<&str>, versao: Option<&str>) -> Ferramenta {
+    fn sonda(
+        estado: &str,
+        apontado: &str,
+        caminho: Option<&str>,
+        versao: Option<&str>,
+    ) -> Ferramenta {
         Ferramenta {
             estado: estado.to_string(),
             caminho: caminho.map(str::to_string),
             versao: versao.map(str::to_string),
             duracao_ms: 2609,
             regras: 19,
-            origem: if caminho.is_some() { "configuração".to_string() } else { String::new() },
+            origem: if caminho.is_some() {
+                "configuração".to_string()
+            } else {
+                String::new()
+            },
             apontado: apontado.to_string(),
             resposta: "semgrep 1.181.0".to_string(),
         }
@@ -3372,7 +3960,11 @@ mod tests {
         let linha = linha_da_sonda(&sonda("ausente", r"C:\pasta\semgrep.exe", None, None));
         assert_eq!(linha.nivel, "warning");
         assert!(linha.operacao.contains("ausente"), "{}", linha.operacao);
-        assert!(linha.detalhe.contains(r#"“C:\pasta\semgrep.exe”"#), "{}", linha.detalhe);
+        assert!(
+            linha.detalhe.contains(r#"“C:\pasta\semgrep.exe”"#),
+            "{}",
+            linha.detalhe
+        );
         assert!(
             linha.detalhe.contains("nenhum binário resolvido"),
             "{}",
@@ -3389,17 +3981,65 @@ mod tests {
         assert!(nada.detalhe.contains("nada apontado"), "{}", nada.detalhe);
 
         // sem resposta não é ausente, e nunca é "encontrado"
-        let muda = linha_da_sonda(&sonda("sem-resposta", "semgrep", Some("/usr/bin/semgrep"), None));
+        let muda = linha_da_sonda(&sonda(
+            "sem-resposta",
+            "semgrep",
+            Some("/usr/bin/semgrep"),
+            None,
+        ));
         assert_eq!(muda.nivel, "error");
         assert!(muda.operacao.contains("sem resposta"), "{}", muda.operacao);
-        assert!(muda.detalhe.contains("/usr/bin/semgrep"), "{}", muda.detalhe);
+        assert!(
+            muda.detalhe.contains("/usr/bin/semgrep"),
+            "{}",
+            muda.detalhe
+        );
 
-        let achada = linha_da_sonda(&sonda("encontrado", "semgrep", Some("/usr/bin/semgrep"), Some("1.181.0")));
+        let achada = linha_da_sonda(&sonda(
+            "encontrado",
+            "semgrep",
+            Some("/usr/bin/semgrep"),
+            Some("1.181.0"),
+        ));
         assert_eq!(achada.nivel, "info");
-        assert!(achada.operacao.contains("19 regra(s) embarcada(s)"), "{}", achada.operacao);
-        assert!(achada.detalhe.contains("origem configuração"), "{}", achada.detalhe);
+        assert!(
+            achada.operacao.contains("19 regra(s) embarcada(s)"),
+            "{}",
+            achada.operacao
+        );
+        assert!(
+            achada.detalhe.contains("origem configuração"),
+            "{}",
+            achada.detalhe
+        );
         assert!(achada.detalhe.contains("1.181.0"), "{}", achada.detalhe);
         assert!(achada.detalhe.contains("2609 ms"), "{}", achada.detalhe);
+
+        // O apontado não serviu, mas a busca automática achou: a linha diz as duas
+        // coisas, sem transformar o achado em "configurado".
+        let mut alternativa = sonda(
+            "encontrado",
+            r"E:\projeto\dist\",
+            Some(r"C:\Python\Scripts\pysemgrep.exe"),
+            Some("1.182.1"),
+        );
+        alternativa.origem = "python-scripts".to_string();
+        let fallback = linha_da_sonda(&alternativa);
+        assert!(
+            fallback.detalhe.contains("(não serve)"),
+            "{}",
+            fallback.detalhe
+        );
+        assert!(
+            fallback.detalhe.contains("origem python-scripts"),
+            "{}",
+            fallback.detalhe
+        );
+        assert!(
+            fallback.detalhe.contains("pysemgrep.exe"),
+            "{}",
+            fallback.detalhe
+        );
     }
 
     #[test]
@@ -3411,8 +4051,16 @@ mod tests {
             mensagem: "Configuration is valid".to_string(),
         });
         assert_eq!(validadas.nivel, "info");
-        assert!(validadas.operacao.contains("validadas"), "{}", validadas.operacao);
-        assert!(validadas.detalhe.contains("código 0"), "{}", validadas.detalhe);
+        assert!(
+            validadas.operacao.contains("validadas"),
+            "{}",
+            validadas.operacao
+        );
+        assert!(
+            validadas.detalhe.contains("código 0"),
+            "{}",
+            validadas.detalhe
+        );
 
         let sem_ferramenta = linha_da_conferencia(&Validacao {
             estado: "sem-ferramenta".to_string(),
@@ -3420,8 +4068,15 @@ mod tests {
             codigo: None,
             mensagem: "nenhuma conferência externa".to_string(),
         });
-        assert_eq!(sem_ferramenta.nivel, "warning", "ausência de ferramenta não é verde");
-        assert!(sem_ferramenta.detalhe.contains("sem código de saída"), "{}", sem_ferramenta.detalhe);
+        assert_eq!(
+            sem_ferramenta.nivel, "warning",
+            "ausência de ferramenta não é verde"
+        );
+        assert!(
+            sem_ferramenta.detalhe.contains("sem código de saída"),
+            "{}",
+            sem_ferramenta.detalhe
+        );
 
         for estado in ["inválidas", "sem-resposta"] {
             let l = linha_da_conferencia(&Validacao {
@@ -3432,5 +4087,148 @@ mod tests {
             });
             assert_eq!(l.nivel, "error", "{estado}");
         }
+    }
+
+    // ---------- o SARIF e o pacote com identidade ----------
+
+    fn achado_sarif(regra: &str, arquivo: &str, linha: i64, trecho: &str) -> AnalysisFinding {
+        AnalysisFinding {
+            id: 0,
+            run_id: 0,
+            rule_id: regra.to_string(),
+            source: "embutido".to_string(),
+            severity: if regra.starts_with("dd-101") {
+                "ERROR"
+            } else {
+                "WARNING"
+            }
+            .to_string(),
+            file: arquivo.to_string(),
+            line_start: linha,
+            line_end: linha,
+            message: formato_da_regra(regra),
+            cwe: regra
+                .starts_with("dd-101")
+                .then(|| "CWE-78: OS Command Injection".to_string()),
+            snippet: Some(trecho.to_string()),
+            fingerprint: String::new(),
+        }
+    }
+
+    fn formato_da_regra(regra: &str) -> String {
+        REGRAS_EMBUTIDAS
+            .iter()
+            .find(|r| r.id == regra)
+            .map(|r| r.mensagem.to_string())
+            .unwrap_or_else(|| format!("mensagem de {regra}"))
+    }
+
+    fn corrida_para_exportar(
+        conn: &Connection,
+        project_id: i64,
+        inicio: &str,
+        achados: &[AnalysisFinding],
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO analysis_runs (project_id, analyzer, tool, tool_version, root, \
+             severity_gate, status, started_at, finished_at, files_scanned, counts) \
+             VALUES (?1, 'embutido', 'embutido', NULL, 'C:/projeto', 'ERROR', 'concluida', \
+             ?2, ?2, 10, ?3)",
+            rusqlite::params![
+                project_id,
+                inicio,
+                serde_json::to_string(&AnalysisCounts {
+                    error: achados.iter().filter(|a| a.severity == "ERROR").count() as i64,
+                    warning: achados.iter().filter(|a| a.severity == "WARNING").count() as i64,
+                    info: 0,
+                })
+                .unwrap()
+            ],
+        )
+        .unwrap();
+        let run_id = conn.last_insert_rowid();
+        db::gravar_achados(conn, run_id, achados).unwrap();
+        run_id
+    }
+
+    #[test]
+    fn o_sarif_leva_indice_de_regra_impressao_estado_de_base_e_invocacao() {
+        let conn = banco();
+        let projeto = projeto_de_teste(&conn, Path::new("C:/projeto"));
+        let primeira = corrida_para_exportar(
+            &conn,
+            projeto.id,
+            "2026-01-01T10:00:00Z",
+            &[achado_sarif(
+                "dd-101-shell-true",
+                "src/a.py",
+                3,
+                "os.system(x)",
+            )],
+        );
+        let primeiro = sarif(&conn, primeira).unwrap();
+        let driver = &primeiro["runs"][0]["tool"]["driver"];
+        assert_eq!(driver["version"].as_str(), Some("desconhecida"));
+        assert_eq!(driver["rules"][0]["id"].as_str(), Some("dd-101-shell-true"));
+        assert_eq!(
+            driver["rules"][0]["helpUri"].as_str(),
+            Some("https://cwe.mitre.org/data/definitions/78.html")
+        );
+        assert_eq!(
+            primeiro["runs"][0]["results"][0]["ruleIndex"].as_i64(),
+            Some(0)
+        );
+        assert!(
+            primeiro["runs"][0]["results"][0]["partialFingerprints"]["devopsFingerprint/v1"]
+                .as_str()
+                .is_some_and(|m| !m.is_empty())
+        );
+        assert_eq!(
+            primeiro["runs"][0]["invocations"][0]["executionSuccessful"].as_bool(),
+            Some(true)
+        );
+        assert!(
+            primeiro["runs"][0]["results"][0]
+                .get("baselineState")
+                .is_none(),
+            "sem base não se inventa estado"
+        );
+
+        let segunda = corrida_para_exportar(
+            &conn,
+            projeto.id,
+            "2026-01-02T10:00:00Z",
+            &[
+                achado_sarif("dd-101-shell-true", "src/a.py", 8, "os.system(x)"),
+                achado_sarif("dd-105-avaliacao-de-codigo", "src/b.py", 2, "eval(y)"),
+            ],
+        );
+        let segundo = sarif(&conn, segunda).unwrap();
+        let resultados = segundo["runs"][0]["results"].as_array().unwrap();
+        let estado = |regra: &str| {
+            resultados
+                .iter()
+                .find(|r| r["ruleId"] == regra)
+                .and_then(|r| r["baselineState"].as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        assert_eq!(estado("dd-101-shell-true"), "unchanged");
+        assert_eq!(estado("dd-105-avaliacao-de-codigo"), "new");
+        assert_eq!(
+            segundo["runs"][0]["properties"]["baselineRunId"].as_i64(),
+            Some(primeira)
+        );
+        assert_eq!(
+            segundo["runs"][0]["invocations"][0]["properties"]["fixed"].as_i64(),
+            Some(0)
+        );
+
+        let pacote = pacote(&conn, segunda, None).unwrap();
+        assert_eq!(pacote["comparacao"]["novos"].as_i64(), Some(1));
+        assert_eq!(pacote["comparacao"]["persistentes"].as_i64(), Some(1));
+        assert!(pacote["achados"][0]["impressao"]
+            .as_str()
+            .is_some_and(|m| !m.is_empty()));
     }
 }

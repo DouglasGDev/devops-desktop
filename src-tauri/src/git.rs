@@ -220,7 +220,11 @@ fn pela_rede(args: &[&str]) -> bool {
 }
 
 fn prazo_dos(args: &[&str]) -> Duration {
-    if pela_rede(args) { PRAZO_REDE } else { PRAZO_LOCAL }
+    if pela_rede(args) {
+        PRAZO_REDE
+    } else {
+        PRAZO_LOCAL
+    }
 }
 
 /// Texto do prazo que venceu, na unidade que faz sentido para o valor.
@@ -276,7 +280,12 @@ pub fn sonde(dir: &Path, args: &[&str], prazo: Duration) -> Result<Option<String
 /// Toda execução de git do aplicativo sai de `abrir` e é colhida com prazo: um
 /// processo que não termina é interrompido e devolvido como erro legível, nunca
 /// como tela girando para sempre.
-fn executar(dir: &Path, shown: &[&str], prazo: Duration, entrada: Option<&[u8]>) -> Result<String, String> {
+fn executar(
+    dir: &Path,
+    shown: &[&str],
+    prazo: Duration,
+    entrada: Option<&[u8]>,
+) -> Result<String, String> {
     let mut child = abrir(dir, shown, entrada.is_some())?;
     if let Some(dados) = entrada {
         let stdin = child
@@ -296,7 +305,11 @@ fn executar(dir: &Path, shown: &[&str], prazo: Duration, entrada: Option<&[u8]>)
     if feito.exit_code == Some(0) {
         return Ok(feito.stdout);
     }
-    Err(describe_failure(shown, feito.stderr.as_bytes(), feito.stdout.as_bytes()))
+    Err(describe_failure(
+        shown,
+        feito.stderr.as_bytes(),
+        feito.stdout.as_bytes(),
+    ))
 }
 
 /// Roda `git` na pasta e devolve stdout. Erro traz a mensagem do git traduzida.
@@ -322,7 +335,11 @@ fn describe_failure(args: &[&str], stderr: &[u8], stdout: &[u8]) -> String {
     let raw_err = String::from_utf8_lossy(stderr).trim().to_string();
     let raw_out = String::from_utf8_lossy(stdout).trim().to_string();
     let lower = format!("{raw_err}\n{raw_out}").to_lowercase();
-    let raw = if raw_err.is_empty() { raw_out.clone() } else { raw_err };
+    let raw = if raw_err.is_empty() {
+        raw_out.clone()
+    } else {
+        raw_err
+    };
     let command = args.first().copied().unwrap_or("");
     if lower.contains("nothing to commit")
         || lower.contains("no changes added to commit")
@@ -342,10 +359,14 @@ fn describe_failure(args: &[&str], stderr: &[u8], stdout: &[u8]) -> String {
             "autenticação remota necessária — use um remote com chave/SSH Agent ou um gerenciador de credenciais do git. Detalhe: {raw}"
         );
     }
-    if lower.contains("rejected") && (lower.contains("non-fast-forward") || lower.contains("fetch first")) {
+    if lower.contains("rejected")
+        && (lower.contains("non-fast-forward") || lower.contains("fetch first"))
+    {
         return "o remoto tem commits novos — faça o fetch/pull antes do push (o histórico não é reescrito automaticamente)".into();
     }
-    if lower.contains("would be overwritten by merge") || lower.contains("local changes would be overwritten") {
+    if lower.contains("would be overwritten by merge")
+        || lower.contains("local changes would be overwritten")
+    {
         return "alterações locais seriam perdidas — confirme e trate-as antes (a aplicação não descarta mudanças por conta própria)".into();
     }
     if lower.contains("is now empty") {
@@ -359,7 +380,10 @@ fn describe_failure(args: &[&str], stderr: &[u8], stdout: &[u8]) -> String {
     if lower.contains("not a git repository") {
         return "esta pasta não é um repositório Git".into();
     }
-    if lower.contains("no such ref was fetched") || lower.contains("unknown revision") || lower.contains("bad revision") {
+    if lower.contains("no such ref was fetched")
+        || lower.contains("unknown revision")
+        || lower.contains("bad revision")
+    {
         return format!("referência inválida para {command}. Detalhe: {raw}");
     }
     if raw.is_empty() {
@@ -483,17 +507,26 @@ fn ler_blob_com_prazo(dir: &Path, spec: &str, prazo: Duration) -> Result<Option<
 /// adicionado ou modificado entre a branch de rastreio e o HEAD. Sem branch
 /// de rastreio reconhecível, todo o conteúdo do HEAD está em jogo.
 pub fn push_risk_paths(dir: &Path) -> Result<Vec<String>, String> {
-    let upstream = run(dir, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && s != "@{u}")
-        .filter(|s| validate_id(s).is_ok());
+    let upstream = run(
+        dir,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    )
+    .ok()
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty() && s != "@{u}")
+    .filter(|s| validate_id(s).is_ok());
     if let Some(name) = upstream {
         let verify = format!("{name}^{{commit}}");
         if run(dir, &["rev-parse", "--verify", "--quiet", &verify]).is_ok() {
             let raw = run(
                 dir,
-                &["diff", "--name-only", "--diff-filter=AM", "-z", &format!("{name}..HEAD")],
+                &[
+                    "diff",
+                    "--name-only",
+                    "--diff-filter=AM",
+                    "-z",
+                    &format!("{name}..HEAD"),
+                ],
             )?;
             return Ok(split_z(&raw));
         }
@@ -535,7 +568,8 @@ pub fn ensure_ignored(dir: &Path, path: &str) -> Result<bool, String> {
     }
     text.push_str(&wanted);
     text.push('\n');
-    std::fs::write(&file, text).map_err(|e| format!("não foi possível escrever o .gitignore: {e}"))?;
+    std::fs::write(&file, text)
+        .map_err(|e| format!("não foi possível escrever o .gitignore: {e}"))?;
     Ok(true)
 }
 
@@ -595,10 +629,13 @@ pub fn status(dir: &Path) -> Result<RepoStatus, String> {
             .ok()
             .map(|s| s.trim().to_string())
     };
-    let upstream = run(dir, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && s != "@{u}");
+    let upstream = run(
+        dir,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    )
+    .ok()
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty() && s != "@{u}");
     let (ahead, behind) = match upstream.as_deref() {
         Some(_) => counts(dir).unwrap_or((0, 0)),
         None => (0, 0),
@@ -652,7 +689,11 @@ pub fn parse_status(raw: &str) -> Vec<StatusFile> {
                 let index_code = xy.chars().next().unwrap_or('.');
                 let worktree_code = xy.chars().nth(1).unwrap_or('.');
                 let path = fields[fixed].to_string();
-                let old_path = if tag == '2' { items.next().map(str::to_string) } else { None };
+                let old_path = if tag == '2' {
+                    items.next().map(str::to_string)
+                } else {
+                    None
+                };
                 out.push(make_status_file(
                     path,
                     old_path,
@@ -767,11 +808,7 @@ pub fn parse_diff(text: &str) -> Vec<FileDiff> {
     // remove o '\r' quando o git emite CRLF.
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("diff --git ") {
-            let path = rest
-                .split(" b/")
-                .nth(1)
-                .unwrap_or(rest.trim())
-                .to_string();
+            let path = rest.split(" b/").nth(1).unwrap_or(rest.trim()).to_string();
             files.push(FileDiff {
                 path,
                 old_path: None,
@@ -783,7 +820,9 @@ pub fn parse_diff(text: &str) -> Vec<FileDiff> {
             new_no = 0;
             continue;
         }
-        let Some(file) = files.last_mut() else { continue };
+        let Some(file) = files.last_mut() else {
+            continue;
+        };
         if let Some(rest) = line.strip_prefix("--- a/") {
             file.old_path = Some(rest.to_string());
             continue;
@@ -824,10 +863,13 @@ pub fn parse_diff(text: &str) -> Vec<FileDiff> {
             }
             continue;
         }
-        if line.starts_with("index ") || line.starts_with("similarity ") || line.starts_with("Mode") {
+        if line.starts_with("index ") || line.starts_with("similarity ") || line.starts_with("Mode")
+        {
             continue;
         }
-        let Some(h) = file.hunks.last_mut() else { continue };
+        let Some(h) = file.hunks.last_mut() else {
+            continue;
+        };
         let (kind, text_without_mark) = match line.chars().next() {
             Some('+') => ("add", &line[1..]),
             Some('-') => ("del", &line[1..]),
@@ -958,7 +1000,9 @@ pub fn commit(dir: &Path, message: &str, amend: bool) -> Result<String, String> 
 
 pub fn discard_file(dir: &Path, path: &str, staged: bool) -> Result<(), String> {
     if staged {
-        return Err("para desfazer um arquivo já enviado ao índice, remova do staging antes".into());
+        return Err(
+            "para desfazer um arquivo já enviado ao índice, remova do staging antes".into(),
+        );
     }
     run(dir, &["restore", "--worktree", "--", path])?;
     Ok(())
@@ -1021,7 +1065,11 @@ fn parse_commit_line(record: &str) -> Option<CommitInfo> {
         unix_date: fields[4].parse().unwrap_or(0),
         refs: parse_refs(fields[5]),
         subject: fields[6].to_string(),
-        parents: fields[7].split(' ').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect(),
+        parents: fields[7]
+            .split(' ')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect(),
         body: String::new(),
     })
 }
@@ -1040,11 +1088,23 @@ pub fn commit_detail(dir: &Path, id: &str) -> Result<CommitDetail, String> {
     validate_id(id)?;
     let single = run(
         dir,
-        &["show", "--no-patch", &format!("--pretty=format:{LOG_FORMAT}"), id],
+        &[
+            "show",
+            "--no-patch",
+            &format!("--pretty=format:{LOG_FORMAT}"),
+            id,
+        ],
     )?;
-    let mut commit = parse_commit_line(single.trim()).ok_or_else(|| "commit não reconhecido".to_string())?;
-    commit.body = run(dir, &["log", "-1", "--pretty=%B", id]).unwrap_or_default().trim().to_string();
-    let name_status = run(dir, &["show", "--pretty=format:", "--name-status", "-M", id])?;
+    let mut commit =
+        parse_commit_line(single.trim()).ok_or_else(|| "commit não reconhecido".to_string())?;
+    commit.body = run(dir, &["log", "-1", "--pretty=%B", id])
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let name_status = run(
+        dir,
+        &["show", "--pretty=format:", "--name-status", "-M", id],
+    )?;
     let files = parse_name_status(&name_status);
     let nums = run(dir, &["show", "--pretty=format:", "--numstat", "-M", id])?;
     let (additions, deletions) = sum_numstat(&nums);
@@ -1114,7 +1174,9 @@ fn validate_path(raw: &str) -> Result<(), String> {
         return Err("caminho de arquivo inválido".into());
     }
     if trimmed.starts_with('-') || trimmed.starts_with('/') || trimmed.starts_with('\\') {
-        return Err(format!("caminho fora do repositório ou opção indevida: {trimmed}"));
+        return Err(format!(
+            "caminho fora do repositório ou opção indevida: {trimmed}"
+        ));
     }
     if trimmed.contains('\0') || trimmed.contains('\n') {
         return Err("caminho com caractere de controle".into());
@@ -1133,7 +1195,11 @@ fn validate_id(raw: &str) -> Result<(), String> {
     if trimmed.starts_with('-') {
         return Err("referência não pode começar com '-'".into());
     }
-    if trimmed.contains("..") || trimmed.contains(' ') || trimmed.contains('\0') || trimmed.contains('\n') {
+    if trimmed.contains("..")
+        || trimmed.contains(' ')
+        || trimmed.contains('\0')
+        || trimmed.contains('\n')
+    {
         return Err("referência inválida".into());
     }
     Ok(())
@@ -1171,7 +1237,11 @@ fn parse_branch_line(line: &str, remoto: bool) -> Option<BranchInfo> {
     let name = cols[1].to_string();
     // apenas os refs remotos têm `origin/branch`; um branch local com barra
     // (feature/x) não pode ser confundido com um remoto.
-    let remote = if remoto { name.split('/').next().map(|s| s.to_string()) } else { None };
+    let remote = if remoto {
+        name.split('/').next().map(|s| s.to_string())
+    } else {
+        None
+    };
     let (ahead, behind) = parse_track(cols[2]);
     Some(BranchInfo {
         name,
@@ -1199,7 +1269,12 @@ fn parse_track(raw: &str) -> (i64, i64) {
     (ahead, behind)
 }
 
-pub fn checkout(dir: &Path, name: &str, create: bool, start_point: Option<&str>) -> Result<(), String> {
+pub fn checkout(
+    dir: &Path,
+    name: &str,
+    create: bool,
+    start_point: Option<&str>,
+) -> Result<(), String> {
     validate_id(name)?;
     if create {
         let mut args = vec!["checkout", "-b", name];
@@ -1264,7 +1339,9 @@ pub fn continue_operation(dir: &Path, kind: &str) -> Result<String, String> {
     let sub = operacao(kind)?;
     if sub == "merge" {
         // merge não tem "--continue": o que fecha a operação é o commit normal.
-        return Err("para concluir o merge, marque os conflitos como resolvidos e faça o commit".into());
+        return Err(
+            "para concluir o merge, marque os conflitos como resolvidos e faça o commit".into(),
+        );
     }
     run(dir, &["-c", "core.editor=true", sub, "--continue"])
 }
@@ -1388,7 +1465,11 @@ pub fn stash_list(dir: &Path) -> Result<Vec<StashEntry>, String> {
             if campo.len() < 4 {
                 return None;
             }
-            let indice = campo[0].strip_prefix("stash@{")?.strip_suffix('}')?.parse().ok()?;
+            let indice = campo[0]
+                .strip_prefix("stash@{")?
+                .strip_suffix('}')?
+                .parse()
+                .ok()?;
             Some(StashEntry {
                 index: indice,
                 selector: campo[0].to_string(),
@@ -1422,7 +1503,11 @@ fn stash_endereco(dir: &Path, index: usize) -> Result<String, String> {
 /// Guarda o trabalho em andamento e deixa a pasta limpa, para se poder trocar de
 /// ramo sem perder nada. `include_untracked` leva também os arquivos que o git
 /// ainda não conhece — sem essa opção eles ficam na pasta.
-pub fn stash_push(dir: &Path, message: Option<&str>, include_untracked: bool) -> Result<String, String> {
+pub fn stash_push(
+    dir: &Path,
+    message: Option<&str>,
+    include_untracked: bool,
+) -> Result<String, String> {
     let atual = status(dir)?;
     if atual.conflict_count > 0 {
         return Err(format!(
@@ -1506,8 +1591,9 @@ pub fn checkout_pull(dir: &Path, remote: &str, number: i64) -> Result<String, St
     let branch = format!("github/pr-{number}");
     run(dir, &["fetch", remote, &format!("refs/pull/{number}/head")])
         .map_err(|e| format!("não foi possível buscar o pull request #{number}: {e}"))?;
-    run(dir, &["checkout", "-B", &branch, "FETCH_HEAD"])
-        .map_err(|e| format!("o pull request #{number} foi buscado, mas a mudança para {branch} falhou: {e}"))?;
+    run(dir, &["checkout", "-B", &branch, "FETCH_HEAD"]).map_err(|e| {
+        format!("o pull request #{number} foi buscado, mas a mudança para {branch} falhou: {e}")
+    })?;
     Ok(branch)
 }
 
@@ -1522,7 +1608,12 @@ pub fn pull(dir: &Path, strategy: &str) -> Result<String, String> {
     run(dir, &["pull", flag])
 }
 
-pub fn push(dir: &Path, remote: Option<&str>, branch: Option<&str>, set_upstream: bool) -> Result<String, String> {
+pub fn push(
+    dir: &Path,
+    remote: Option<&str>,
+    branch: Option<&str>,
+    set_upstream: bool,
+) -> Result<String, String> {
     let mut args: Vec<String> = vec!["push".into()];
     if set_upstream {
         args.push("--set-upstream".into());
@@ -1537,7 +1628,9 @@ pub fn push(dir: &Path, remote: Option<&str>, branch: Option<&str>, set_upstream
         Some(b) => Some(b.to_string()),
         None if set_upstream => Some(
             run(dir, &["symbolic-ref", "--short", "-q", "HEAD"])
-                .map_err(|_| "a cabeça está destacada; escolha a branch antes de definir o rastreio")?
+                .map_err(|_| {
+                    "a cabeça está destacada; escolha a branch antes de definir o rastreio"
+                })?
                 .trim()
                 .to_string(),
         ),
@@ -1570,7 +1663,9 @@ pub fn default_remote(dir: &Path) -> Result<String, String> {
         .filter(|l| !l.is_empty())
         .collect();
     if nomes.is_empty() {
-        return Err("este repositório não tem remoto cadastrado — adicione um antes de publicar".into());
+        return Err(
+            "este repositório não tem remoto cadastrado — adicione um antes de publicar".into(),
+        );
     }
     Ok(nomes
         .iter()
@@ -1629,7 +1724,8 @@ fn describe_access(remote: &str, feito: &crate::sshexec::ExecResult) -> RemoteAc
             return RemoteAccess {
                 ok: true,
                 remote: remote.to_string(),
-                detail: "acesso liberado: o remoto está vazio — a primeira publicação cria a base.".into(),
+                detail: "acesso liberado: o remoto está vazio — a primeira publicação cria a base."
+                    .into(),
             };
         }
         return RemoteAccess {
@@ -1716,7 +1812,10 @@ fn short_ref(id: &str) -> String {
 
 pub fn tags(dir: &Path) -> Result<Vec<TagInfo>, String> {
     const FMT: &str = "%(refname:short)%1f%(objectname:short)%1f%(if)%(*objectname)%(then)%(contents:subject)%(else)%(contents:subject)%(end)";
-    let text = run(dir, &["for-each-ref", &format!("--format={FMT}"), "refs/tags"])?;
+    let text = run(
+        dir,
+        &["for-each-ref", &format!("--format={FMT}"), "refs/tags"],
+    )?;
     let mut out = Vec::new();
     for line in text.lines() {
         let cols: Vec<&str> = line.split(SEP).collect();
@@ -1732,7 +1831,12 @@ pub fn tags(dir: &Path) -> Result<Vec<TagInfo>, String> {
     Ok(out)
 }
 
-pub fn create_tag(dir: &Path, name: &str, target: Option<&str>, message: Option<&str>) -> Result<(), String> {
+pub fn create_tag(
+    dir: &Path,
+    name: &str,
+    target: Option<&str>,
+    message: Option<&str>,
+) -> Result<(), String> {
     validate_id(name)?;
     match message.filter(|m| !m.trim().is_empty()) {
         Some(m) => {
@@ -1780,7 +1884,9 @@ pub fn remotes(dir: &Path) -> Result<Vec<RemoteInfo>, String> {
     let names = run(dir, &["remote"])?;
     let mut out = Vec::new();
     for name in names.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
-        let fetch_url = run(dir, &["remote", "get-url", name]).ok().map(|s| s.trim().to_string());
+        let fetch_url = run(dir, &["remote", "get-url", name])
+            .ok()
+            .map(|s| s.trim().to_string());
         let push_url = run(dir, &["remote", "get-url", "--push", name])
             .ok()
             .map(|s| s.trim().to_string());
@@ -1827,14 +1933,22 @@ fn validate_url(url: &str) -> Result<(), String> {
         || u.starts_with("~/")
         || (u.as_bytes().get(1) == Some(&b':') && u.as_bytes()[0].is_ascii_alphabetic());
     if !(u.contains("://") || u.contains('@') || absolute) {
-        return Err("a URL deve começar com https://, ssh://, usuário@host ou ser um caminho absoluto".into());
+        return Err(
+            "a URL deve começar com https://, ssh://, usuário@host ou ser um caminho absoluto"
+                .into(),
+        );
     }
     Ok(())
 }
 
 // ---------- clone / identidade ----------
 
-pub fn clone(dir_parent: &Path, url: &str, target_name: Option<&str>, branch: Option<&str>) -> Result<String, String> {
+pub fn clone(
+    dir_parent: &Path,
+    url: &str,
+    target_name: Option<&str>,
+    branch: Option<&str>,
+) -> Result<String, String> {
     validate_url(url)?;
     // As opções vêm antes dos argumentos posicionais: `git clone <opções> <url> <pasta>`.
     let mut args: Vec<String> = vec!["clone".into()];
@@ -1869,14 +1983,22 @@ pub fn clone(dir_parent: &Path, url: &str, target_name: Option<&str>, branch: Op
         return Err(prazo_expirado(&refs, prazo_dos(&refs)));
     }
     if feito.exit_code != Some(0) {
-        return Err(describe_failure(&refs, feito.stderr.as_bytes(), feito.stdout.as_bytes()));
+        return Err(describe_failure(
+            &refs,
+            feito.stderr.as_bytes(),
+            feito.stdout.as_bytes(),
+        ));
     }
     Ok(feito.stderr.trim().to_string())
 }
 
 pub fn identity(dir: &Path) -> Result<(Option<String>, Option<String>), String> {
-    let name = run(dir, &["config", "--get", "user.name"]).ok().map(|s| s.trim().to_string());
-    let email = run(dir, &["config", "--get", "user.email"]).ok().map(|s| s.trim().to_string());
+    let name = run(dir, &["config", "--get", "user.name"])
+        .ok()
+        .map(|s| s.trim().to_string());
+    let email = run(dir, &["config", "--get", "user.email"])
+        .ok()
+        .map(|s| s.trim().to_string());
     Ok((
         name.filter(|s| !s.is_empty()),
         email.filter(|s| !s.is_empty()),
@@ -1888,7 +2010,11 @@ pub fn commit_parent(dir: &Path, id: &str) -> Option<String> {
     validate_id(id).ok()?;
     let text = run(dir, &["rev-parse", &format!("{id}^")]).ok()?;
     let parent = text.trim().to_string();
-    if parent.is_empty() { None } else { Some(parent) }
+    if parent.is_empty() {
+        None
+    } else {
+        Some(parent)
+    }
 }
 
 /// A pasta está dentro de um repositório Git? Os três estados de `sonde` valem
@@ -1947,16 +2073,27 @@ mod tests {
         // commit ficaria girando para sempre na tela; com prazo, a chamada
         // volta como erro e dentro de poucos segundos.
         let dir = temp_repo("prazo");
-        std::fs::write(dir.join(".git").join("hooks").join("pre-commit"), "#!/bin/sh\nsleep 60\n")
-            .expect("escrever o hook");
+        std::fs::write(
+            dir.join(".git").join("hooks").join("pre-commit"),
+            "#!/bin/sh\nsleep 60\n",
+        )
+        .expect("escrever o hook");
         write(&dir, "a.txt", &base_file());
         stage(&dir, &["a.txt".into()]).unwrap();
         let antes = std::time::Instant::now();
-        let erro = executar(&dir, &["commit", "-m", "nunca termina"], Duration::from_secs(3), None)
-            .expect_err("o hook travado deveria impedir o commit");
+        let erro = executar(
+            &dir,
+            &["commit", "-m", "nunca termina"],
+            Duration::from_secs(3),
+            None,
+        )
+        .expect_err("o hook travado deveria impedir o commit");
         let decorrido = antes.elapsed();
         assert!(erro.contains("não respondeu em 3 s"), "mensagem: {erro}");
-        assert!(decorrido < Duration::from_secs(20), "o prazo não valiu: {decorrido:?}");
+        assert!(
+            decorrido < Duration::from_secs(20),
+            "o prazo não valiu: {decorrido:?}"
+        );
     }
 
     #[test]
@@ -1981,7 +2118,9 @@ mod tests {
             .expect("o HEAD tem a.txt");
         assert_eq!(String::from_utf8_lossy(&conteudo), "conteúdo do a\n");
 
-        let no_indice = index_blob(&dir, "a.txt").expect("o git respondeu").expect("staged");
+        let no_indice = index_blob(&dir, "a.txt")
+            .expect("o git respondeu")
+            .expect("staged");
         assert_eq!(String::from_utf8_lossy(&no_indice), "conteúdo do a\n");
 
         assert!(blob_at(&dir, "HEAD", "nao-existe.txt")
@@ -1995,7 +2134,10 @@ mod tests {
         // em vez de deixar a chamada pendurada para sempre.
         let sem_resposta = ler_blob_com_prazo(&dir, "HEAD:a.txt", Duration::from_millis(1))
             .expect_err("1 ms não é resposta, é prazo");
-        assert!(sem_resposta.contains("não respondeu em 1 ms"), "{sem_resposta}");
+        assert!(
+            sem_resposta.contains("não respondeu em 1 ms"),
+            "{sem_resposta}"
+        );
         assert!(sem_resposta.contains("disco externo"), "{sem_resposta}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2036,7 +2178,10 @@ mod tests {
         // motivo, e a tela nunca lê isso como "sem branch".
         let sem_resposta = sonde(&dir, &["status", "--porcelain"], Duration::from_millis(1))
             .expect_err("1 ms não é resposta, é prazo");
-        assert!(sem_resposta.contains("não respondeu em 1 ms"), "{sem_resposta}");
+        assert!(
+            sem_resposta.contains("não respondeu em 1 ms"),
+            "{sem_resposta}"
+        );
         assert!(sem_resposta.contains("disco externo"), "{sem_resposta}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2046,7 +2191,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
             .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("devops-git-{tag}-{}-{nanos}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("devops-git-{tag}-{}-{nanos}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("criar pasta temporária");
         dir
@@ -2130,9 +2276,17 @@ mod tests {
         write(&dir, "a.txt", &edited_file());
         write(&dir, "novo.txt", "novo\n");
         let status = read_status(&dir).unwrap();
-        let a = status.files.iter().find(|f| f.path == "a.txt").expect("a.txt");
+        let a = status
+            .files
+            .iter()
+            .find(|f| f.path == "a.txt")
+            .expect("a.txt");
         assert!(a.unstaged && !a.staged);
-        let novo = status.files.iter().find(|f| f.path == "novo.txt").expect("novo.txt");
+        let novo = status
+            .files
+            .iter()
+            .find(|f| f.path == "novo.txt")
+            .expect("novo.txt");
         assert!(novo.untracked);
 
         stage(&dir, &["a.txt".into()]).unwrap();
@@ -2150,7 +2304,11 @@ mod tests {
         assert_eq!(rows[0].commit.subject, "terceiro commit");
         assert_eq!(rows[0].graph, "* ");
         assert_eq!(rows[1].graph, "* ");
-        assert!(rows[0].commit.parents.iter().any(|p| p == &rows[1].commit.id));
+        assert!(rows[0]
+            .commit
+            .parents
+            .iter()
+            .any(|p| p == &rows[1].commit.id));
         assert_eq!(rows[0].commit.refs, vec!["HEAD -> main".to_string()]);
 
         let detail = commit_detail(&dir, &rows[1].commit.id).unwrap();
@@ -2160,7 +2318,11 @@ mod tests {
         // o primeiro commit tem corpo; o log do gráfico só traz o assunto
         let inicial = commit_detail(&dir, &rows[2].commit.id).unwrap();
         assert_eq!(inicial.commit.subject, "primeiro commit");
-        assert!(inicial.commit.body.contains("corpo do commit"), "corpo: {:?}", inicial.commit.body);
+        assert!(
+            inicial.commit.body.contains("corpo do commit"),
+            "corpo: {:?}",
+            inicial.commit.body
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2196,11 +2358,23 @@ mod tests {
 
         let files = diff(&dir, Some("a.txt"), false, None).unwrap();
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0].hunks.len(), 2, "mudanças distantes geram dois hunks");
+        assert_eq!(
+            files[0].hunks.len(),
+            2,
+            "mudanças distantes geram dois hunks"
+        );
         let first = &files[0].hunks[0];
         assert_eq!(first.old_start, 1);
-        let del = first.lines.iter().find(|l| l.kind == "del").expect("linha removida");
-        let add = first.lines.iter().find(|l| l.kind == "add").expect("linha adicionada");
+        let del = first
+            .lines
+            .iter()
+            .find(|l| l.kind == "del")
+            .expect("linha removida");
+        let add = first
+            .lines
+            .iter()
+            .find(|l| l.kind == "add")
+            .expect("linha adicionada");
         assert_eq!(del.old_no, Some(2));
         assert_eq!(del.new_no, None);
         assert_eq!(add.new_no, Some(2));
@@ -2254,7 +2428,10 @@ mod tests {
 
         discard_file(&dir, "a.txt", false).unwrap();
         let status = read_status(&dir).unwrap();
-        assert!(status.files.is_empty(), "desfazer o trabalho limpa o arquivo");
+        assert!(
+            status.files.is_empty(),
+            "desfazer o trabalho limpa o arquivo"
+        );
         let err = discard_file(&dir, "a.txt", true).unwrap_err();
         assert!(err.contains("staging"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2275,10 +2452,17 @@ mod tests {
         // precisa ser limpo — é exatamente o que `untrack` faz sem apagar o
         // arquivo local.
         commit(&dir, "base", false).unwrap();
-        assert!(tracked_files(&dir).unwrap().contains(&"srv/.env".to_string()));
+        assert!(tracked_files(&dir)
+            .unwrap()
+            .contains(&"srv/.env".to_string()));
         untrack(&dir, "srv/.env").unwrap();
-        assert!(!tracked_files(&dir).unwrap().contains(&"srv/.env".to_string()));
-        assert!(dir.join("srv").join(".env").exists(), "o arquivo local fica intacto");
+        assert!(!tracked_files(&dir)
+            .unwrap()
+            .contains(&"srv/.env".to_string()));
+        assert!(
+            dir.join("srv").join(".env").exists(),
+            "o arquivo local fica intacto"
+        );
 
         let err = untrack(&dir, "../outra-pasta/.env").unwrap_err();
         assert!(err.contains(".."), "{err}");
@@ -2299,12 +2483,16 @@ mod tests {
             .expect("o git respondeu")
             .expect("blob do HEAD");
         assert!(String::from_utf8_lossy(&blob).contains("TOKEN=abc123"));
-        assert!(blob_at(&dir, "HEAD", "nao-existe.txt")
-            .unwrap()
-            .is_none());
+        assert!(blob_at(&dir, "HEAD", "nao-existe.txt").unwrap().is_none());
 
-        assert!(ensure_ignored(&dir, "srv/.env").unwrap(), "primeira vez escreve");
-        assert!(!ensure_ignored(&dir, "srv/.env").unwrap(), "segunda vez é no-op");
+        assert!(
+            ensure_ignored(&dir, "srv/.env").unwrap(),
+            "primeira vez escreve"
+        );
+        assert!(
+            !ensure_ignored(&dir, "srv/.env").unwrap(),
+            "segunda vez é no-op"
+        );
         let gitignore = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
         assert_eq!(gitignore.trim(), "srv/.env");
 
@@ -2315,7 +2503,10 @@ mod tests {
         let bare = bare_origin(&dir);
         add_remote(&dir, "origin", &url(&bare)).unwrap();
         push(&dir, Some("origin"), None, true).unwrap();
-        assert!(push_risk_paths(&dir).unwrap().is_empty(), "nada novo para publicar");
+        assert!(
+            push_risk_paths(&dir).unwrap().is_empty(),
+            "nada novo para publicar"
+        );
 
         std::fs::create_dir_all(dir.join("src")).expect("criar pasta src");
         write(&dir, "src/app.rs", "fn main() {}\n");
@@ -2343,7 +2534,10 @@ mod tests {
         let arvore = tracked_files(&dir).unwrap();
         assert!(arvore.contains(&"a.txt".to_string()), "{arvore:?}");
         assert!(arvore.contains(&"src/mod.rs".to_string()), "{arvore:?}");
-        assert!(!arvore.contains(&"so-no-disco.txt".to_string()), "{arvore:?}");
+        assert!(
+            !arvore.contains(&"so-no-disco.txt".to_string()),
+            "{arvore:?}"
+        );
 
         let texto = file_content(&dir, "a.txt").unwrap();
         assert_eq!(texto.text.as_deref(), Some("linha 1\n"));
@@ -2352,7 +2546,10 @@ mod tests {
 
         // o que muda no disco não troca o conteúdo lido do HEAD
         write(&dir, "a.txt", "linha 1\nlinha 2 na mão\n");
-        assert_eq!(file_content(&dir, "a.txt").unwrap().text.as_deref(), Some("linha 1\n"));
+        assert_eq!(
+            file_content(&dir, "a.txt").unwrap().text.as_deref(),
+            Some("linha 1\n")
+        );
 
         // binário é dito como binário, não como texto vazio
         std::fs::write(dir.join("b.png"), [72u8, 73, 0, 255, 1]).expect("escrever binário");
@@ -2360,14 +2557,18 @@ mod tests {
         commit(&dir, "binário", false).unwrap();
         let bin = file_content(&dir, "b.png").unwrap();
         assert_eq!(bin.text, None);
-        assert_eq!(bin.note.as_deref(), Some("arquivo binário — não há texto para mostrar"));
+        assert_eq!(
+            bin.note.as_deref(),
+            Some("arquivo binário — não há texto para mostrar")
+        );
 
         // caminho que o HEAD não tem devolve a resposta do git, não um vazio
         let erro = file_content(&dir, "nao-existe.txt").unwrap_err();
         assert!(erro.contains("não tem"), "{erro}");
 
         // sem NUL mas fora de UTF-8: a tela recebe o motivo, não bytes trocados
-        std::fs::write(dir.join("latin.txt"), [b'o', b'l', 0xE1, b'\n']).expect("escrever não-UTF-8");
+        std::fs::write(dir.join("latin.txt"), [b'o', b'l', 0xE1, b'\n'])
+            .expect("escrever não-UTF-8");
         stage(&dir, &["latin.txt".into()]).unwrap();
         commit(&dir, "texto em outra codificação", false).unwrap();
         let erro = file_content(&dir, "latin.txt").unwrap_err();
@@ -2407,11 +2608,22 @@ mod tests {
         assert_eq!(head.remote, None);
 
         rename_branch(&dir, "feature", "feature-2").unwrap();
-        let names: Vec<String> = branches(&dir).unwrap().into_iter().map(|b| b.name).collect();
+        let names: Vec<String> = branches(&dir)
+            .unwrap()
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
         assert!(names.iter().any(|n| n == "feature-2"));
         delete_branch(&dir, "feature-2", true).unwrap();
-        let names: Vec<String> = branches(&dir).unwrap().into_iter().map(|b| b.name).collect();
-        assert!(!names.iter().any(|n| n == "feature-2"), "branch some da lista");
+        let names: Vec<String> = branches(&dir)
+            .unwrap()
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        assert!(
+            !names.iter().any(|n| n == "feature-2"),
+            "branch some da lista"
+        );
 
         create_tag(&dir, "v1.0.0", None, Some("primeira versão")).unwrap();
         create_tag(&dir, "v0.9.0", Some("HEAD"), None).unwrap();
@@ -2424,7 +2636,9 @@ mod tests {
 
         // histórico com todos os refs mostra as tags no gráfico
         let rows = graph(&dir, 10, true).unwrap();
-        assert!(rows.iter().any(|r| r.commit.refs.iter().any(|x| x == "v1.0.0")));
+        assert!(rows
+            .iter()
+            .any(|r| r.commit.refs.iter().any(|x| x == "v1.0.0")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2445,7 +2659,10 @@ mod tests {
 
         let merge_err = merge(&dir, "outra").unwrap_err();
         let status = read_status(&dir).unwrap();
-        assert!(status.conflict_count >= 1, "conflito detectado: {merge_err}");
+        assert!(
+            status.conflict_count >= 1,
+            "conflito detectado: {merge_err}"
+        );
         let conflicted = status.files.iter().find(|f| f.conflict).unwrap();
         resolve_conflict(&dir, &conflicted.path, "ours").unwrap();
         let status = read_status(&dir).unwrap();
@@ -2497,14 +2714,26 @@ mod tests {
         commit(&dir, "no main", false).unwrap();
         merge(&dir, "paralelo").unwrap();
 
-        let cabeca = run(&dir, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let cabeca = run(&dir, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
         assert_eq!(parent_count(&dir, &cabeca), 2, "o merge deve ter dois pais");
         let erro = revert(&dir, &cabeca, None).unwrap_err();
         assert!(erro.contains("merge com 2 pais"), "mensagem útil: {erro}");
-        assert!(revert(&dir, &cabeca, Some(3)).is_err(), "pai inexistente é recusado");
+        assert!(
+            revert(&dir, &cabeca, Some(3)).is_err(),
+            "pai inexistente é recusado"
+        );
         revert(&dir, &cabeca, Some(1)).unwrap();
-        assert!(!dir.join("c.txt").exists(), "revert do merge tira o que o paralelo trouxe");
-        assert!(dir.join("d.txt").exists(), "o trabalho do ramo principal permanece");
+        assert!(
+            !dir.join("c.txt").exists(),
+            "revert do merge tira o que o paralelo trouxe"
+        );
+        assert!(
+            dir.join("d.txt").exists(),
+            "o trabalho do ramo principal permanece"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2519,7 +2748,10 @@ mod tests {
         stage(&dir, &["a.txt".into()]).unwrap();
         commit(&dir, "base", false).unwrap();
 
-        assert!(stash_list(&dir).unwrap().is_empty(), "repositório novo não tem guardado");
+        assert!(
+            stash_list(&dir).unwrap().is_empty(),
+            "repositório novo não tem guardado"
+        );
 
         write(&dir, "a.txt", "um\ndois\n");
         write(&dir, "novo.txt", "ainda não entra no git\n");
@@ -2527,14 +2759,22 @@ mod tests {
 
         // o modificado voltou ao commit; o não rastreado ficou na pasta, porque
         // sem `include_untracked` é isso que o git faz.
-        assert!(read_status(&dir).unwrap().files.iter().all(|f| f.path != "a.txt"));
+        assert!(read_status(&dir)
+            .unwrap()
+            .files
+            .iter()
+            .all(|f| f.path != "a.txt"));
         assert!(dir.join("novo.txt").exists());
 
         let lista = stash_list(&dir).unwrap();
         assert_eq!(lista.len(), 1, "{lista:?}");
         assert_eq!(lista[0].index, 0);
         assert_eq!(lista[0].selector, "stash@{0}");
-        assert!(lista[0].subject.contains("tentativa do a"), "{:?}", lista[0].subject);
+        assert!(
+            lista[0].subject.contains("tentativa do a"),
+            "{:?}",
+            lista[0].subject
+        );
         assert!(!lista[0].sha.is_empty());
 
         // nada alterado: o git avisa no stdout com código 0, e nada entra na lista.
@@ -2545,7 +2785,10 @@ mod tests {
         // apply copia para a pasta e mantém a entrada.
         let aplicado = stash_apply(&dir, 0, false).unwrap();
         assert!(aplicado.contains("continua na lista"), "{aplicado}");
-        assert!(blob_at(&dir, "stash@{0}", "a.txt").unwrap().is_some(), "o guardado tem o arquivo");
+        assert!(
+            blob_at(&dir, "stash@{0}", "a.txt").unwrap().is_some(),
+            "o guardado tem o arquivo"
+        );
 
         // para o `pop` valer, a pasta precisa estar limpa de novo.
         reset(&dir, "hard", "HEAD").unwrap();
@@ -2554,7 +2797,10 @@ mod tests {
         assert!(stash_list(&dir).unwrap().is_empty());
 
         stash_push(&dir, Some("segunda"), true).unwrap();
-        assert!(!dir.join("novo.txt").exists(), "com -u o não rastreado também sai da pasta");
+        assert!(
+            !dir.join("novo.txt").exists(),
+            "com -u o não rastreado também sai da pasta"
+        );
         // índice que a lista não tem é recusado antes de falar com o git.
         let erro = stash_apply(&dir, 4, false).unwrap_err();
         assert!(erro.contains("não existe mais"), "{erro}");
@@ -2578,11 +2824,20 @@ mod tests {
         let _ = merge(&dir, "paralelo");
         let meio = read_status(&dir).unwrap();
         assert!(meio.conflict_count > 0, "o merge deveria estar em conflito");
-        assert_eq!(meio.operation.as_deref(), Some("merge"), "{:?}", meio.operation);
+        assert_eq!(
+            meio.operation.as_deref(),
+            Some("merge"),
+            "{:?}",
+            meio.operation
+        );
         let erro = stash_push(&dir, Some("no meio do conflito"), false).unwrap_err();
         assert!(erro.contains("em conflito"), "{erro}");
         abort_operation(&dir, "merge").unwrap();
-        assert_eq!(read_status(&dir).unwrap().operation, None, "cancelou, acabou");
+        assert_eq!(
+            read_status(&dir).unwrap().operation,
+            None,
+            "cancelou, acabou"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2661,7 +2916,10 @@ mod tests {
         // um commit já aplicado não sobra: o git avisa e o passo pode ser pulado.
         let repetido = cherry_pick(&dir, &conflitante, None);
         assert!(repetido.is_err(), "não há o que aplicar de novo");
-        assert_eq!(read_status(&dir).unwrap().operation.as_deref(), Some("cherry-pick"));
+        assert_eq!(
+            read_status(&dir).unwrap().operation.as_deref(),
+            Some("cherry-pick")
+        );
         skip_operation(&dir, "cherry-pick").unwrap();
         assert_eq!(read_status(&dir).unwrap().operation, None);
 
@@ -2675,9 +2933,16 @@ mod tests {
         stage(&dir, &["d.txt".into()]).unwrap();
         commit(&dir, "no main", false).unwrap();
         merge(&dir, "para-merge").unwrap();
-        let cabeca = run(&dir, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
-        assert!(cherry_pick(&dir, &cabeca, None).unwrap_err().contains("merge com 2 pais"));
-        assert!(cherry_pick(&dir, &cabeca, Some(7)).unwrap_err().contains("pai inválido"));
+        let cabeca = run(&dir, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+        assert!(cherry_pick(&dir, &cabeca, None)
+            .unwrap_err()
+            .contains("merge com 2 pais"));
+        assert!(cherry_pick(&dir, &cabeca, Some(7))
+            .unwrap_err()
+            .contains("pai inválido"));
 
         // operação que não existe não é mandada ao git.
         assert!(continue_operation(&dir, "inventada").is_err());
@@ -2707,7 +2972,11 @@ mod tests {
             ("REVERT_HEAD", "revert"),
         ] {
             std::fs::write(git.join(marca), "deadbeef\n").expect("escrever a marca");
-            assert_eq!(operation_in_progress(&dir).as_deref(), Some(nome), "{marca}");
+            assert_eq!(
+                operation_in_progress(&dir).as_deref(),
+                Some(nome),
+                "{marca}"
+            );
             std::fs::remove_file(git.join(marca)).unwrap();
         }
         std::fs::create_dir_all(git.join("rebase-merge")).unwrap();
@@ -2733,10 +3002,20 @@ mod tests {
         stage(&dir, &["b.txt".into()]).unwrap();
 
         let saida = reset(&dir, "soft", &primeiro).unwrap();
-        assert!(saida.contains("cabeça agora em"), "a saída diz onde a cabeça ficou: {saida}");
+        assert!(
+            saida.contains("cabeça agora em"),
+            "a saída diz onde a cabeça ficou: {saida}"
+        );
         let status = read_status(&dir).unwrap();
-        assert_eq!(status.files.iter().filter(|f| f.path == "b.txt" && f.staged).count(), 1,
-            "soft mantém o índice");
+        assert_eq!(
+            status
+                .files
+                .iter()
+                .filter(|f| f.path == "b.txt" && f.staged)
+                .count(),
+            1,
+            "soft mantém o índice"
+        );
 
         reset(&dir, "mixed", &primeiro).unwrap();
         let status = read_status(&dir).unwrap();
@@ -2748,12 +3027,24 @@ mod tests {
 
         write(&dir, "a.txt", "sujo\n");
         reset(&dir, "hard", &primeiro).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "um\n",
-            "hard descarta o conteúdo em trabalho");
-        assert!(dir.join("b.txt").exists(), "hard não apaga arquivo que o git não rastreia");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "um\n",
+            "hard descarta o conteúdo em trabalho"
+        );
+        assert!(
+            dir.join("b.txt").exists(),
+            "hard não apaga arquivo que o git não rastreia"
+        );
 
-        assert!(reset(&dir, "esquisito", &primeiro).is_err(), "modo fora da lista é recusado");
-        assert!(reset(&dir, "soft", "-hard").is_err(), "referência começando com '-' é recusada");
+        assert!(
+            reset(&dir, "esquisito", &primeiro).is_err(),
+            "modo fora da lista é recusado"
+        );
+        assert!(
+            reset(&dir, "soft", "-hard").is_err(),
+            "referência começando com '-' é recusada"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2796,7 +3087,10 @@ mod tests {
         let pais = temp_dir("clonede");
         let destino = pais.join("work");
         clone(&pais, &url(&origem), Some("work"), None).unwrap();
-        assert!(is_repo(&destino).unwrap(), "o clone produziu um repositório");
+        assert!(
+            is_repo(&destino).unwrap(),
+            "o clone produziu um repositório"
+        );
         let rows = graph(&destino, 10, false).unwrap();
         assert_eq!(rows[0].commit.subject, "primeiro");
 
@@ -2836,7 +3130,11 @@ mod tests {
         let erro = checkout_pull(&destino, "origin", 7).unwrap_err();
         assert!(erro.contains("pull request #7"), "mensagem: {erro}");
         assert!(
-            run(&destino, &["show-ref", "--verify", "refs/heads/github/pr-7"]).is_err(),
+            run(
+                &destino,
+                &["show-ref", "--verify", "refs/heads/github/pr-7"]
+            )
+            .is_err(),
             "criou a branch mesmo com o fetch tendo falhado"
         );
         assert!(checkout_pull(&destino, "origin", 0).is_err());
@@ -2857,7 +3155,11 @@ mod tests {
         let pais = temp_dir("pub-clone");
         let destino = pais.join("work");
         clone(&pais, &url(&remoto), Some("work"), None).unwrap();
-        assert_eq!(default_remote(&destino).unwrap(), "origin", "o clone traz origin");
+        assert_eq!(
+            default_remote(&destino).unwrap(),
+            "origin",
+            "o clone traz origin"
+        );
 
         write(&destino, "b.txt", "b\n");
         stage(&destino, &["b.txt".into()]).unwrap();
@@ -2891,8 +3193,14 @@ mod tests {
             "despublicar a tag não mexe no ramo do remoto"
         );
 
-        assert!(push_tag(&destino, "-x", "v1").is_err(), "remoto começando com '-' é recusado");
-        assert!(delete_remote_tag(&destino, "origin", "..").is_err(), "nome com .. é recusado");
+        assert!(
+            push_tag(&destino, "-x", "v1").is_err(),
+            "remoto começando com '-' é recusado"
+        );
+        assert!(
+            delete_remote_tag(&destino, "origin", "..").is_err(),
+            "nome com .. é recusado"
+        );
 
         let _ = std::fs::remove_dir_all(&pais);
         let _ = std::fs::remove_dir_all(&origem);
@@ -2911,21 +3219,37 @@ mod tests {
         let destino = pais.join("work");
         clone(&pais, &url(&remoto), Some("work"), None).unwrap();
         let status = read_status(&destino).unwrap();
-        assert!(status.upstream.is_some(), "clone define upstream: {:?}", status.upstream);
+        assert!(
+            status.upstream.is_some(),
+            "clone define upstream: {:?}",
+            status.upstream
+        );
         assert_eq!((status.ahead, status.behind), (0, 0));
 
         write(&destino, "b.txt", "b\n");
         stage(&destino, &["b.txt".into()]).unwrap();
         commit(&destino, "c2 local", false).unwrap();
         let status = read_status(&destino).unwrap();
-        assert_eq!((status.ahead, status.behind), (1, 0), "commit local fica à frente");
+        assert_eq!(
+            (status.ahead, status.behind),
+            (1, 0),
+            "commit local fica à frente"
+        );
 
         push(&destino, None, None, false).unwrap();
         let status = read_status(&destino).unwrap();
-        assert_eq!((status.ahead, status.behind), (0, 0), "push alinha com o remoto");
+        assert_eq!(
+            (status.ahead, status.behind),
+            (0, 0),
+            "push alinha com o remoto"
+        );
         let id_local = run(&destino, &["rev-parse", "HEAD"]).unwrap();
         let id_remoto = run(&remoto, &["rev-parse", "main"]).unwrap();
-        assert_eq!(id_local.trim(), id_remoto.trim(), "o remoto recebeu o commit");
+        assert_eq!(
+            id_local.trim(),
+            id_remoto.trim(),
+            "o remoto recebeu o commit"
+        );
 
         // um segundo clone avança o remoto e o primeiro fica atrás
         let pais2 = temp_dir("upstream-outro");
@@ -2938,13 +3262,23 @@ mod tests {
 
         fetch(&destino, None).unwrap();
         let status = read_status(&destino).unwrap();
-        assert_eq!((status.ahead, status.behind), (0, 1), "fetch revela o commit novo");
+        assert_eq!(
+            (status.ahead, status.behind),
+            (0, 1),
+            "fetch revela o commit novo"
+        );
 
         let msg = pull(&destino, "ff-only").unwrap();
-        assert!(msg.contains("Fast-forward") || msg.contains("c.txt"), "pull: {msg}");
+        assert!(
+            msg.contains("Fast-forward") || msg.contains("c.txt"),
+            "pull: {msg}"
+        );
         let status = read_status(&destino).unwrap();
         assert_eq!((status.ahead, status.behind), (0, 0));
-        assert!(destino.join("c.txt").exists(), "o fast-forward trouxe o arquivo");
+        assert!(
+            destino.join("c.txt").exists(),
+            "o fast-forward trouxe o arquivo"
+        );
 
         let _ = std::fs::remove_dir_all(&pais);
         let _ = std::fs::remove_dir_all(&pais2);
@@ -2977,7 +3311,10 @@ mod tests {
         assert!(espaco.kind == "não rastreado", "kind: {}", espaco.kind);
         let novo = files.iter().find(|f| f.path == "novo.txt").unwrap();
         assert!(novo.staged && novo.kind == "adicionado");
-        let modificado = files.iter().find(|f| f.path == "a.txt" && !f.conflict).unwrap();
+        let modificado = files
+            .iter()
+            .find(|f| f.path == "a.txt" && !f.conflict)
+            .unwrap();
         assert!(!modificado.staged && modificado.unstaged);
         let ren = files.iter().find(|f| f.path == "moved.txt").unwrap();
         assert_eq!(ren.old_path.as_deref(), Some("kept.txt"));
@@ -3038,7 +3375,8 @@ mod tests {
 
     #[test]
     fn name_status_e_numstat_do_commit() {
-        let files = parse_name_status("A\tnovo.txt\nM\ta.txt\nR100\tvelho.txt\tnovo.txt\nT\tlink\n");
+        let files =
+            parse_name_status("A\tnovo.txt\nM\ta.txt\nR100\tvelho.txt\tnovo.txt\nT\tlink\n");
         assert_eq!(files.len(), 4);
         assert_eq!(files[0].kind, "adicionado");
         assert_eq!(files[0].path, "novo.txt");
@@ -3061,7 +3399,10 @@ mod tests {
         commit(&dir, "primeiro", false).unwrap();
 
         // primeiro commit: não tem pai, então a base é a árvore vazia
-        let root = run(&dir, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let root = run(&dir, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
         assert!(commit_parent(&dir, &root).is_none());
         let raiz = diff(&dir, None, false, Some(&root)).unwrap();
         assert_eq!(raiz.len(), 1);
@@ -3072,7 +3413,10 @@ mod tests {
         write(&dir, "b.txt", "novo\n");
         stage(&dir, &["a.txt".into(), "b.txt".into()]).unwrap();
         commit(&dir, "segundo", false).unwrap();
-        let head = run(&dir, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let head = run(&dir, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
         assert_eq!(commit_parent(&dir, &head).as_deref(), Some(root.as_str()));
 
         let depois = diff(&dir, None, false, Some(&head)).unwrap();
@@ -3081,10 +3425,10 @@ mod tests {
         let modificado = depois.iter().find(|f| f.path == "a.txt").unwrap();
         assert_eq!(modificado.status_char, 'M');
         assert!(
-            modificado
-                .hunks
+            modificado.hunks.iter().any(|h| h
+                .lines
                 .iter()
-                .any(|h| h.lines.iter().any(|l| l.kind == "add" && l.text.contains("dois"))),
+                .any(|l| l.kind == "add" && l.text.contains("dois"))),
             "diff do commit: {:?}",
             modificado.hunks
         );
@@ -3119,29 +3463,42 @@ mod tests {
 
     #[test]
     fn erros_conhecidos_tem_mensagem_util() {
-        assert!(describe_failure(&["commit"], b"nothing to commit, working tree clean", b"").contains("nada para fazer"));
+        assert!(
+            describe_failure(&["commit"], b"nothing to commit, working tree clean", b"")
+                .contains("nada para fazer")
+        );
         // `git commit` sem staging falha com o texto no STDOUT
+        assert!(describe_failure(
+            &["commit"],
+            b"",
+            b"nothing added to commit but untracked files present (use \"git add\" to track)"
+        )
+        .contains("nada para fazer"));
+        assert!(describe_failure(
+            &["push"],
+            b"! [rejected] main -> main (non-fast-forward)",
+            b""
+        )
+        .contains("histórico"));
+        assert!(describe_failure(
+            &["pull"],
+            b"fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+            b""
+        )
+        .contains("autenticação"));
         assert!(
-            describe_failure(
-                &["commit"],
-                b"",
-                b"nothing added to commit but untracked files present (use \"git add\" to track)"
-            )
-            .contains("nada para fazer")
+            describe_failure(&["log"], b"fatal: not a git repository", b"")
+                .contains("não é um repositório")
         );
-        assert!(describe_failure(&["push"], b"! [rejected] main -> main (non-fast-forward)", b"").contains("histórico"));
         assert!(
-            describe_failure(
-                &["pull"],
-                b"fatal: could not read Username for 'https://github.com': terminal prompts disabled",
-                b""
-            )
-            .contains("autenticação")
+            describe_failure(&["config"], b"fatal: please tell me who you are", b"")
+                .contains("user.name")
         );
-        assert!(describe_failure(&["log"], b"fatal: not a git repository", b"").contains("não é um repositório"));
-        assert!(describe_failure(&["config"], b"fatal: please tell me who you are", b"").contains("user.name"));
         // sem tradução conhecida, o texto do git volta sem ser cortado
-        assert!(describe_failure(&["apply"], b"error: patch failed: a.txt:1", b"").contains("patch failed"));
+        assert!(
+            describe_failure(&["apply"], b"error: patch failed: a.txt:1", b"")
+                .contains("patch failed")
+        );
     }
 
     #[test]
@@ -3155,7 +3512,12 @@ mod tests {
 
     /// ExecResult fabricado só para exercitar a tradução do veredito, sem
     /// depender de rede.
-    fn feito(exit: Option<i32>, stdout: &str, stderr: &str, timed_out: bool) -> crate::sshexec::ExecResult {
+    fn feito(
+        exit: Option<i32>,
+        stdout: &str,
+        stderr: &str,
+        timed_out: bool,
+    ) -> crate::sshexec::ExecResult {
         crate::sshexec::ExecResult {
             exit_code: exit,
             stdout: stdout.into(),
@@ -3168,9 +3530,16 @@ mod tests {
     #[test]
     fn veredito_de_acesso_libera_o_que_responde_e_recusa_o_que_nao_pode() {
         // remoto alcançável com commits
-        let vivo = describe_access("origin", &feito(Some(0), "abc1234567890\tHEAD\n", "", false));
+        let vivo = describe_access(
+            "origin",
+            &feito(Some(0), "abc1234567890\tHEAD\n", "", false),
+        );
         assert!(vivo.ok);
-        assert!(vivo.detail.contains("abc1234"), "mostra o HEAD curto: {}", vivo.detail);
+        assert!(
+            vivo.detail.contains("abc1234"),
+            "mostra o HEAD curto: {}",
+            vivo.detail
+        );
 
         // remoto recém-criado: vazio é sucesso, não falha
         let vazio = describe_access("origin", &feito(Some(0), "", "", false));
@@ -3180,10 +3549,19 @@ mod tests {
         // chave não aceita
         let negado = describe_access(
             "origin",
-            &feito(Some(128), "", "git@github.com: Permission denied (publickey).", false),
+            &feito(
+                Some(128),
+                "",
+                "git@github.com: Permission denied (publickey).",
+                false,
+            ),
         );
         assert!(!negado.ok);
-        assert!(negado.detail.contains("sem liberação"), "mensagem: {}", negado.detail);
+        assert!(
+            negado.detail.contains("sem liberação"),
+            "mensagem: {}",
+            negado.detail
+        );
 
         // credencial pedida na hora (jamais acontece: o prompt está desativado)
         let sem_credencial = describe_access(
@@ -3201,15 +3579,29 @@ mod tests {
         // endereço errado
         let endereco = describe_access(
             "origin",
-            &feito(Some(128), "", "fatal: 'x' does not appear to be a git repository", false),
+            &feito(
+                Some(128),
+                "",
+                "fatal: 'x' does not appear to be a git repository",
+                false,
+            ),
         );
         assert!(!endereco.ok);
-        assert!(endereco.detail.contains("endereço"), "mensagem: {}", endereco.detail);
+        assert!(
+            endereco.detail.contains("endereço"),
+            "mensagem: {}",
+            endereco.detail
+        );
 
         // rede
         let rede = describe_access(
             "origin",
-            &feito(Some(128), "", "ssh: connect to host github.com port 22: Connection timed out", false),
+            &feito(
+                Some(128),
+                "",
+                "ssh: connect to host github.com port 22: Connection timed out",
+                false,
+            ),
         );
         assert!(!rede.ok);
         assert!(rede.detail.contains("rede"), "mensagem: {}", rede.detail);
@@ -3220,9 +3612,16 @@ mod tests {
         assert!(lento.detail.contains("não respondeu"));
 
         // sem tradução conhecida, o texto do git volta como detalhe
-        let outro = describe_access("origin", &feito(Some(128), "", "error: RPC failed; HTTP 500", false));
+        let outro = describe_access(
+            "origin",
+            &feito(Some(128), "", "error: RPC failed; HTTP 500", false),
+        );
         assert!(!outro.ok);
-        assert!(outro.detail.contains("RPC failed"), "mensagem: {}", outro.detail);
+        assert!(
+            outro.detail.contains("RPC failed"),
+            "mensagem: {}",
+            outro.detail
+        );
     }
 
     #[test]
@@ -3260,8 +3659,14 @@ mod tests {
         assert!(ruim.detail.contains("origin"));
 
         // nome inválido nem chega a executar o git
-        assert!(remote_access(&destino, "-x").is_err(), "remoto começando com '-' é recusado");
-        assert!(remote_access(&destino, "../outro").is_err(), "referência com .. é recusada");
+        assert!(
+            remote_access(&destino, "-x").is_err(),
+            "remoto começando com '-' é recusado"
+        );
+        assert!(
+            remote_access(&destino, "../outro").is_err(),
+            "referência com .. é recusada"
+        );
 
         let _ = std::fs::remove_dir_all(&pais);
         let _ = std::fs::remove_dir_all(&origem);
@@ -3271,7 +3676,11 @@ mod tests {
     #[test]
     fn head_sha_e_o_commit_atual_e_none_onde_nao_ha_repo() {
         let dir = temp_repo("head-sha");
-        assert_eq!(head_sha(&dir), None, "repositório recém-iniciado não tem HEAD");
+        assert_eq!(
+            head_sha(&dir),
+            None,
+            "repositório recém-iniciado não tem HEAD"
+        );
         write(&dir, "a.txt", &base_file());
         stage(&dir, &["a.txt".into()]).unwrap();
         run(&dir, &["commit", "-q", "-m", "primeiro"]).unwrap();
@@ -3280,9 +3689,12 @@ mod tests {
         assert!(sha.chars().all(|c| c.is_ascii_hexdigit()), "{sha}");
 
         let solto = temp_dir("head-sha-sem-repo");
-        assert_eq!(head_sha(&solto), None, "pasta que não é repositório não tem commit");
+        assert_eq!(
+            head_sha(&solto),
+            None,
+            "pasta que não é repositório não tem commit"
+        );
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&solto);
     }
 }
-

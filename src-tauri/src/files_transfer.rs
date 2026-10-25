@@ -91,7 +91,10 @@ pub fn parse_human_size(text: &str) -> Result<u64, String> {
     } else {
         (t, 1.0)
     };
-    let value: f64 = num_str.trim().parse().map_err(|_| format!("tamanho inválido: {text}"))?;
+    let value: f64 = num_str
+        .trim()
+        .parse()
+        .map_err(|_| format!("tamanho inválido: {text}"))?;
     Ok((value * mul).round() as u64)
 }
 
@@ -100,8 +103,12 @@ fn parse_mm_ss(text: &str) -> Result<u64, String> {
     let (m, s) = cleaned
         .split_once(':')
         .ok_or_else(|| format!("tempo inválido: {text}"))?;
-    let mm: u64 = m.parse().map_err(|_| format!("minutos inválidos: {text}"))?;
-    let ss: u64 = s.parse().map_err(|_| format!("segundos inválidos: {text}"))?;
+    let mm: u64 = m
+        .parse()
+        .map_err(|_| format!("minutos inválidos: {text}"))?;
+    let ss: u64 = s
+        .parse()
+        .map_err(|_| format!("segundos inválidos: {text}"))?;
     Ok(mm * 60 + ss)
 }
 
@@ -260,13 +267,16 @@ struct Attempt {
     message: String,
 }
 
-fn run_worker(
-    app: AppHandle,
-    handles: Arc<Mutex<HashMap<i64, Handle>>>,
-    id: i64,
-    job: Job,
-) {
-    let Job { db, server, kind, remote, local, recursive, askpass } = job;
+fn run_worker(app: AppHandle, handles: Arc<Mutex<HashMap<i64, Handle>>>, id: i64, job: Job) {
+    let Job {
+        db,
+        server,
+        kind,
+        remote,
+        local,
+        recursive,
+        askpass,
+    } = job;
     let src = transfer_src(kind, &remote, &local);
     let dst = transfer_dst(kind, &remote, &local);
     // Retomada só faz sentido em arquivo único; recursivo já é put/get -r.
@@ -298,7 +308,13 @@ fn run_worker(
     }
     if attempt.cancelled {
         // `run_once` já emitiu o evento de cancelamento; aqui só registramos.
-        finish(&app, &handles, &db, id, Some("transferência cancelada pelo usuário"));
+        finish(
+            &app,
+            &handles,
+            &db,
+            id,
+            Some("transferência cancelada pelo usuário"),
+        );
         return;
     }
     emit(&app, final_event(id, false, Some(attempt.message.clone())));
@@ -316,17 +332,36 @@ fn run_once(
     let (cancel, child_slot) = {
         let guard = match handles.lock() {
             Ok(g) => g,
-            Err(_) => return Attempt { resume_unsupported: false, cancelled: false, ok: false, message: "gerenciador de transferências indisponível".into() },
+            Err(_) => {
+                return Attempt {
+                    resume_unsupported: false,
+                    cancelled: false,
+                    ok: false,
+                    message: "gerenciador de transferências indisponível".into(),
+                }
+            }
         };
         let Some(h) = guard.get(&id) else {
-            return Attempt { resume_unsupported: false, cancelled: false, ok: false, message: "transferência removida".into() };
+            return Attempt {
+                resume_unsupported: false,
+                cancelled: false,
+                ok: false,
+                message: "transferência removida".into(),
+            };
         };
         (Arc::clone(&h.cancel), Arc::clone(&h.child))
     };
 
     let mut cmd = match sftp_cmd(server, false, askpass) {
         Ok(c) => c,
-        Err(e) => return Attempt { resume_unsupported: false, cancelled: false, ok: false, message: e },
+        Err(e) => {
+            return Attempt {
+                resume_unsupported: false,
+                cancelled: false,
+                ok: false,
+                message: e,
+            }
+        }
     };
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -340,18 +375,38 @@ fn run_once(
         }
     };
     let Some(mut stdin) = child.stdin.take() else {
-        return Attempt { resume_unsupported: false, cancelled: false, ok: false, message: "falha ao abrir a entrada do sftp".into() };
+        return Attempt {
+            resume_unsupported: false,
+            cancelled: false,
+            ok: false,
+            message: "falha ao abrir a entrada do sftp".into(),
+        };
     };
     let Some(mut stdout) = child.stdout.take() else {
-        return Attempt { resume_unsupported: false, cancelled: false, ok: false, message: "falha ao abrir a saída do sftp".into() };
+        return Attempt {
+            resume_unsupported: false,
+            cancelled: false,
+            ok: false,
+            message: "falha ao abrir a saída do sftp".into(),
+        };
     };
     let Some(mut stderr) = child.stderr.take() else {
-        return Attempt { resume_unsupported: false, cancelled: false, ok: false, message: "falha ao abrir o erro do sftp".into() };
+        return Attempt {
+            resume_unsupported: false,
+            cancelled: false,
+            ok: false,
+            message: "falha ao abrir o erro do sftp".into(),
+        };
     };
 
     {
         let Ok(mut guard) = child_slot.lock() else {
-            return Attempt { resume_unsupported: false, cancelled: false, ok: false, message: "gerenciador de transferências indisponível".into() };
+            return Attempt {
+                resume_unsupported: false,
+                cancelled: false,
+                ok: false,
+                message: "gerenciador de transferências indisponível".into(),
+            };
         };
         *guard = Some(child);
     }
@@ -384,7 +439,13 @@ fn run_once(
                         b'\r' | b'\n' => {
                             if !line.is_empty() {
                                 if let Some(p) = parse_progress_line(&line) {
-                                    emit(app, TransferProgress { transfer_id: id, ..p });
+                                    emit(
+                                        app,
+                                        TransferProgress {
+                                            transfer_id: id,
+                                            ..p
+                                        },
+                                    );
                                 }
                             }
                             line.clear();
@@ -397,11 +458,18 @@ fn run_once(
     }
 
     let cancelled = cancel.load(Ordering::SeqCst);
-    let err = err_rx.recv_timeout(Duration::from_secs(3)).unwrap_or_default();
+    let err = err_rx
+        .recv_timeout(Duration::from_secs(3))
+        .unwrap_or_default();
 
     let status = {
         let Ok(mut guard) = child_slot.lock() else {
-            return Attempt { resume_unsupported: false, cancelled, ok: false, message: "gerenciador de transferências indisponível".into() };
+            return Attempt {
+                resume_unsupported: false,
+                cancelled,
+                ok: false,
+                message: "gerenciador de transferências indisponível".into(),
+            };
         };
         let code = guard.as_mut().and_then(|c| {
             wait_deadline(c, Duration::from_millis(500))
@@ -418,11 +486,24 @@ fn run_once(
     };
 
     if cancelled {
-        emit(app, final_event(id, false, Some("transferência cancelada".into())));
-        return Attempt { resume_unsupported: false, cancelled: true, ok: false, message: "cancelada".into() };
+        emit(
+            app,
+            final_event(id, false, Some("transferência cancelada".into())),
+        );
+        return Attempt {
+            resume_unsupported: false,
+            cancelled: true,
+            ok: false,
+            message: "cancelada".into(),
+        };
     }
     if status == Some(0) {
-        return Attempt { resume_unsupported: false, cancelled: false, ok: true, message: String::new() };
+        return Attempt {
+            resume_unsupported: false,
+            cancelled: false,
+            ok: true,
+            message: String::new(),
+        };
     }
 
     let lower = err.to_lowercase();
@@ -434,12 +515,19 @@ fn run_once(
     let message = if err.trim().is_empty() {
         format!(
             "a transferência falhou{}",
-            status.map(|c| format!(" (sftp código {c})")).unwrap_or_default()
+            status
+                .map(|c| format!(" (sftp código {c})"))
+                .unwrap_or_default()
         )
     } else {
         classify(&err)
     };
-    Attempt { resume_unsupported, cancelled: false, ok: false, message }
+    Attempt {
+        resume_unsupported,
+        cancelled: false,
+        ok: false,
+        message,
+    }
 }
 
 /// Espera o filho terminar por até `deadline`, sem `wait_timeout`
@@ -483,7 +571,13 @@ fn classify(err: &str) -> String {
 
 /// Auditoria do desfecho + remoção do handle. O handle precisa existir para
 /// lermos `server_name/kind/remote/local` — por isso ele só sai do mapa aqui.
-fn finish(_app: &AppHandle, handles: &Arc<Mutex<HashMap<i64, Handle>>>, db: &DbHandle, id: i64, error: Option<&str>) {
+fn finish(
+    _app: &AppHandle,
+    handles: &Arc<Mutex<HashMap<i64, Handle>>>,
+    db: &DbHandle,
+    id: i64,
+    error: Option<&str>,
+) {
     let meta = {
         let Ok(map) = handles.lock() else { return };
         let Some(h) = map.get(&id) else { return };
@@ -497,7 +591,11 @@ fn finish(_app: &AppHandle, handles: &Arc<Mutex<HashMap<i64, Handle>>>, db: &DbH
     };
     let Ok(conn) = db.lock() else { return };
     let (server_name, kind, remote, local, secs) = meta;
-    let operation = if kind == "upload" { "Upload" } else { "Download" };
+    let operation = if kind == "upload" {
+        "Upload"
+    } else {
+        "Download"
+    };
     let _ = match error {
         None => crate::audit::log(
             &conn,
@@ -607,7 +705,8 @@ mod tests {
 
     #[test]
     fn parseia_nome_com_espacos() {
-        let p = parse_progress_line("pasta meu arquivo.bin 100% 2.0KB 500B/s 00:00").expect("linha válida");
+        let p = parse_progress_line("pasta meu arquivo.bin 100% 2.0KB 500B/s 00:00")
+            .expect("linha válida");
         assert_eq!(p.file_name, "pasta meu arquivo.bin");
         assert_eq!(p.transferred, 2048);
     }
@@ -630,12 +729,27 @@ mod tests {
 
     #[test]
     fn script_de_upload_e_download() {
-        assert!(script_for("upload", false, false, "/local/a.txt", "/remote/a.txt").starts_with("put "));
-        assert!(script_for("upload", true, false, "/local/a.txt", "/remote/a.txt").starts_with("reput "));
-        assert!(script_for("upload", false, true, "/local/dir", "/remote/dir").starts_with("put -r "));
-        assert!(script_for("download", false, false, "/remote/a.txt", "/local/a.txt").starts_with("get "));
-        assert!(script_for("download", true, false, "/remote/a.txt", "/local/a.txt").starts_with("reget "));
-        assert!(script_for("download", false, true, "/remote/dir", "/local/dir").starts_with("get -r "));
+        assert!(
+            script_for("upload", false, false, "/local/a.txt", "/remote/a.txt").starts_with("put ")
+        );
+        assert!(
+            script_for("upload", true, false, "/local/a.txt", "/remote/a.txt")
+                .starts_with("reput ")
+        );
+        assert!(
+            script_for("upload", false, true, "/local/dir", "/remote/dir").starts_with("put -r ")
+        );
+        assert!(
+            script_for("download", false, false, "/remote/a.txt", "/local/a.txt")
+                .starts_with("get ")
+        );
+        assert!(
+            script_for("download", true, false, "/remote/a.txt", "/local/a.txt")
+                .starts_with("reget ")
+        );
+        assert!(
+            script_for("download", false, true, "/remote/dir", "/local/dir").starts_with("get -r ")
+        );
     }
 
     #[test]

@@ -1,17 +1,18 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { api } from "../lib/api";
 import { CORTES, INSTRUMENTOS } from "../lib/analysis";
-import { formatDateTime, formatDuration } from "../lib/format";
+import { formatDateTime, formatDuration, formatElapsed } from "../lib/format";
 import { useApp } from "../store/AppContext";
 import type {
   AnalysisCheck,
+  AnalysisComparison,
   AnalysisCounts,
-  AnalysisFinding,
   AnalysisPackage,
   AnalysisRule,
   AnalysisRun,
   AnalysisTool,
+  FindingsPage,
   NodeAnalyzer,
   SeverityGate,
 } from "../types";
@@ -37,11 +38,14 @@ import {
   Modal,
   SectionTitle,
   Select,
+  Spinner,
   type BadgeTone,
 } from "../components/ui";
 
 /** A mesma chave que `analysis::CHAVE_CONFIG` lê no backend. */
 const CHAVE_SEMGREP = "analise.semgrep.caminho";
+/** O tamanho de uma página de achados; o backend aceita até 1000. */
+const PAGINA_ACHADOS = 200;
 
 const SEVERIDADE_TOM: Record<string, BadgeTone> = { ERROR: "error", WARNING: "warning", INFO: "info" };
 const STATUS_TOM: Record<string, BadgeTone> = {
@@ -83,9 +87,17 @@ export function AnalysisView() {
 
   const [corridas, setCorridas] = useState<AnalysisRun[]>([]);
   const [selecionada, setSelecionada] = useState<number | null>(null);
-  const [achados, setAchados] = useState<AnalysisFinding[]>([]);
-  const [filtro, setFiltro] = useState<"" | "ERROR" | "WARNING" | "INFO">("");
+  const [pagina, setPagina] = useState<FindingsPage | null>(null);
+  const [comparacao, setComparacao] = useState<AnalysisComparison | null>(null);
+  const [filtro, setFiltro] = useState("");
+  const [origem, setOrigem] = useState("");
+  const [regra, setRegra] = useState("");
+  const [estado, setEstado] = useState("");
+  const [busca, setBusca] = useState("");
+  const [carregandoAchados, setCarregandoAchados] = useState(false);
+  const [mostrarCorrigidos, setMostrarCorrigidos] = useState(false);
   const [varrendo, setVarrendo] = useState<number[]>([]);
+  const [agora, setAgora] = useState(() => Date.now());
   const [pedido, setPedido] = useState(false);
   const [conferindo, setConferindo] = useState(false);
   const [instalando, setInstalando] = useState(false);
@@ -95,6 +107,10 @@ export function AnalysisView() {
 
   const corrida = corridas.find((c) => c.id === selecionada) ?? null;
   const emVarredura = varrendo.includes(projectId);
+  const projeto = projects.find((p) => p.id === projectId);
+  const rodando = emVarredura ? corridas.find((c) => c.status === "rodando") ?? null : null;
+  const inicio = rodando ? new Date(rodando.startedAt).getTime() : NaN;
+  const decorrido = Number.isFinite(inicio) ? agora - inicio : null;
 
   const sondar = useCallback(async () => {
     try {
@@ -143,21 +159,120 @@ export function AnalysisView() {
     void carregarCorridas();
   }, [carregarCorridas, emVarredura, pedido]);
 
+  // Enquanto a varredura corre, a lista é relida: a corrida em andamento e o
+  // tempo dela vêm do banco, não do pedido que só esta janela conhece.
+  useEffect(() => {
+    if (!emVarredura) return;
+    void carregarCorridas();
+    const timer = setInterval(() => void carregarCorridas(), 3000);
+    return () => clearInterval(timer);
+  }, [carregarCorridas, emVarredura]);
+
+  useEffect(() => {
+    if (!emVarredura) return;
+    setAgora(Date.now());
+    const timer = setInterval(() => setAgora(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [emVarredura]);
+
+  // O `--version` é um processo Python: sob a carga de uma varredura ele pode
+  // estourar o prazo e ficar "sem-resposta". Quando a máquina fica livre, a
+  // sonda é refeita — o estado da ferramenta não pode herdar o timeout.
+  const haviaVarredura = useRef(false);
+  useEffect(() => {
+    const ocupada = varrendo.length > 0;
+    if (haviaVarredura.current && !ocupada) void sondar();
+    haviaVarredura.current = ocupada;
+  }, [varrendo, sondar]);
+
+  // A triagem é feita no banco: filtro, busca e diff viram parâmetros, e a
+  // página diz quantos existem além dos que vieram. A espera curta na busca
+  // evita uma consulta por tecla sem mudar o resultado.
   useEffect(() => {
     if (!selecionada) {
-      setAchados([]);
+      setPagina(null);
       return;
     }
     let vivo = true;
-    api.analysisAchados(selecionada, filtro || null, 500)
-      .then((lista) => {
-        if (vivo) setAchados(lista);
+    const timer = setTimeout(() => {
+      setCarregandoAchados(true);
+      api
+        .analysisAchados(selecionada, {
+          severidade: filtro || null,
+          origem: origem || null,
+          regra: regra || null,
+          busca: busca.trim() || null,
+          estado: estado === "novo" || estado === "persistente" ? estado : null,
+          limite: PAGINA_ACHADOS,
+          deslocamento: 0,
+        })
+        .then((lida) => {
+          if (vivo) setPagina(lida);
+        })
+        .catch((e) => {
+          if (vivo) pushToast("error", String(e));
+        })
+        .finally(() => {
+          if (vivo) setCarregandoAchados(false);
+        });
+    }, 220);
+    return () => {
+      vivo = false;
+      clearTimeout(timer);
+    };
+  }, [selecionada, filtro, origem, regra, estado, busca, pushToast]);
+
+  useEffect(() => {
+    if (!selecionada) {
+      setComparacao(null);
+      return;
+    }
+    let vivo = true;
+    api
+      .analysisComparar(selecionada)
+      .then((lida) => {
+        if (vivo) setComparacao(lida);
       })
-      .catch((e) => pushToast("error", String(e)));
+      .catch((e) => {
+        if (vivo) pushToast("error", String(e));
+      });
     return () => {
       vivo = false;
     };
-  }, [selecionada, filtro, pushToast]);
+  }, [selecionada, pushToast]);
+
+  const selecionarCorrida = (id: number) => {
+    setSelecionada(id);
+    setDestino(null);
+    setFiltro("");
+    setOrigem("");
+    setRegra("");
+    setEstado("");
+    setBusca("");
+  };
+
+  const carregarMais = async () => {
+    if (!selecionada || !pagina || pagina.itens.length >= pagina.total) return;
+    setCarregandoAchados(true);
+    try {
+      const proxima = await api.analysisAchados(selecionada, {
+        severidade: filtro || null,
+        origem: origem || null,
+        regra: regra || null,
+        busca: busca.trim() || null,
+        estado: estado === "novo" || estado === "persistente" ? estado : null,
+        limite: pagina.limite,
+        deslocamento: pagina.deslocamento + pagina.limite,
+      });
+      setPagina((atual) =>
+        atual ? { ...proxima, itens: [...atual.itens, ...proxima.itens] } : proxima,
+      );
+    } catch (e) {
+      pushToast("error", String(e));
+    } finally {
+      setCarregandoAchados(false);
+    }
+  };
 
   const varrer = async () => {
     if (!projectId) return;
@@ -172,7 +287,7 @@ export function AnalysisView() {
         timeoutSecs: prazo,
       });
       setCorridas((atual) => [nova, ...atual.filter((c) => c.id !== nova.id)]);
-      setSelecionada(nova.id);
+      selecionarCorrida(nova.id);
       pushToast(
         nova.blocked ? "info" : "success",
         `Corrida #${nova.id}: ${nova.counts.error} erro, ${nova.counts.warning} aviso, ${nova.counts.info} info em ${nova.filesScanned} arquivo(s)${nova.note ? ` · ${nova.note}` : ""}`,
@@ -181,7 +296,6 @@ export function AnalysisView() {
       pushToast("error", String(e));
     } finally {
       setPedido(false);
-      void sondar();
     }
   };
 
@@ -248,7 +362,16 @@ export function AnalysisView() {
     });
     if (!escolha) return;
     try {
-      setDestino(await api.analysisExportar(selecionada, formato, escolha));
+      // O pacote exportado é o arquivo inteiro: o corte da prévia na tela é para
+      // leitura, não para entregar a alguém uma lista pela metade.
+      setDestino(
+        await api.analysisExportar(
+          selecionada,
+          formato,
+          escolha,
+          formato === "pacote" ? 5000 : null,
+        ),
+      );
     } catch (e) {
       pushToast("error", String(e));
     }
@@ -361,6 +484,23 @@ export function AnalysisView() {
           </Button>
         </div>
 
+        {emVarredura ? (
+          <div
+            className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-teal-600/30 bg-teal-600/[0.06] px-3 py-2 text-xs dark:border-teal-400/30 dark:bg-teal-400/[0.08]"
+            role="status"
+            aria-live="polite"
+          >
+            <Spinner className="size-4 text-teal-700 dark:text-teal-300" />
+            <span className="font-medium">
+              Varrendo {projeto?.name ?? "o projeto"} · {rodando?.analyzer ?? analyzer}
+            </span>
+            {rodando ? <Badge tone="accent">#{rodando.id}</Badge> : null}
+            {decorrido !== null ? (
+              <span className="tabular-nums text-zinc-600 dark:text-zinc-300">{formatElapsed(decorrido)}</span>
+            ) : null}
+          </div>
+        ) : null}
+
         {analyzer !== "embutido" && (
           <div className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
             A primeira varredura com Semgrep pode demorar alguns minutos para baixar as regras padrão (p/default).
@@ -374,6 +514,22 @@ export function AnalysisView() {
               <Badge tone={FERRAMENTA_TOM[ferramenta.estado] ?? "neutral"}>semgrep: {ferramenta.estado}</Badge>
               {ferramenta.versao ? <Badge>v {ferramenta.versao}</Badge> : null}
               {ferramenta.origem ? <Badge>origem: {ferramenta.origem}</Badge> : null}
+              {ferramenta.apontado.trim() !== "" && ferramenta.origem !== "configuração" && ferramenta.origem !== "" ? (
+                <Badge
+                  tone="warning"
+                  title={`O caminho apontado “${ferramenta.apontado}” não resolveu; a varredura usa ${ferramenta.caminho ?? "a busca automática"}.`}
+                >
+                  caminho apontado não serve
+                </Badge>
+              ) : null}
+              {ferramenta.caminho ? (
+                <span
+                  className="max-w-[28rem] truncate font-mono text-zinc-500 dark:text-zinc-400"
+                  title={ferramenta.caminho}
+                >
+                  {ferramenta.caminho}
+                </span>
+              ) : null}
               <span className="text-zinc-500 dark:text-zinc-400">sonda {formatDuration(ferramenta.duracaoMs)}</span>
             </>
           ) : (
@@ -445,7 +601,7 @@ export function AnalysisView() {
                 {corridas.map((c) => (
                   <li key={c.id}>
                     <button
-                      onClick={() => (setSelecionada(c.id), setDestino(null))}
+                      onClick={() => selecionarCorrida(c.id)}
                       className={`w-full rounded-lg px-2.5 py-2 text-left text-xs transition ${
                         selecionada === c.id
                           ? "bg-teal-600/10 dark:bg-teal-400/10"
@@ -454,6 +610,9 @@ export function AnalysisView() {
                     >
                       <span className="flex items-center gap-1.5">
                         <span className="font-medium">#{c.id}</span>
+                        {c.status === "rodando" ? (
+                          <Spinner className="size-3 text-teal-600 dark:text-teal-300" />
+                        ) : null}
                         <Badge tone={STATUS_TOM[c.status] ?? "neutral"}>{c.status}</Badge>
                         {c.blocked ? <Badge tone="error">barra</Badge> : null}
                         <span className="ml-auto text-zinc-400">{formatDateTime(c.startedAt)}</span>
@@ -485,7 +644,7 @@ export function AnalysisView() {
                 {corrida.toolVersion ? <Badge>v {corrida.toolVersion}</Badge> : null}
                 <Badge>corte {corrida.severityGate || "nada"}</Badge>
                 <span className="ml-auto text-xs text-zinc-500 dark:text-zinc-400">
-                  {formatDuration(corrida.durationMs)}
+                  {corrida.status === "rodando" ? "em andamento" : formatDuration(corrida.durationMs)}
                 </span>
               </div>
 
@@ -528,50 +687,147 @@ export function AnalysisView() {
                 ) : null}
               </div>
 
-              <div className="mt-4 flex items-center gap-2">
+              <div className="mt-4 flex flex-wrap items-center gap-2">
                 <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">Achados</span>
-                <Select
-                  className="max-w-40"
-                  value={filtro}
-                  onChange={(e) => setFiltro(e.target.value as typeof filtro)}
-                >
+                <Input
+                  className="max-w-56"
+                  value={busca}
+                  placeholder="arquivo, regra, mensagem…"
+                  onChange={(e) => setBusca(e.target.value)}
+                  spellCheck={false}
+                />
+                <Select className="max-w-40" value={filtro} onChange={(e) => setFiltro(e.target.value)}>
                   <option value="">Todas as severidades</option>
-                  <option value="ERROR">Só ERROR</option>
-                  <option value="WARNING">Só WARNING</option>
-                  <option value="INFO">Só INFO</option>
+                  <option value="ERROR">
+                    ERROR · {pagina?.facetas.severidades.find((f) => f.valor === "ERROR")?.quantidade ?? 0}
+                  </option>
+                  <option value="WARNING">
+                    WARNING · {pagina?.facetas.severidades.find((f) => f.valor === "WARNING")?.quantidade ?? 0}
+                  </option>
+                  <option value="INFO">
+                    INFO · {pagina?.facetas.severidades.find((f) => f.valor === "INFO")?.quantidade ?? 0}
+                  </option>
                 </Select>
-                <span className="text-[11px] text-zinc-400">
-                  {achados.length} de {total(corrida.counts)}
+                <Select className="max-w-40" value={origem} onChange={(e) => setOrigem(e.target.value)}>
+                  <option value="">Toda origem</option>
+                  {(pagina?.facetas.origens ?? []).map((f) => (
+                    <option key={f.valor} value={f.valor}>
+                      {f.valor} · {f.quantidade}
+                    </option>
+                  ))}
+                </Select>
+                <Select className="max-w-64" value={regra} onChange={(e) => setRegra(e.target.value)}>
+                  <option value="">Toda regra</option>
+                  {(pagina?.facetas.regras ?? []).map((f) => (
+                    <option key={f.valor} value={f.valor}>
+                      {f.valor} · {f.quantidade}
+                    </option>
+                  ))}
+                </Select>
+                <Select
+                  className="max-w-44"
+                  value={estado}
+                  onChange={(e) => setEstado(e.target.value)}
+                  disabled={!comparacao?.baseline}
+                  title={
+                    comparacao?.baseline
+                      ? "Filtra pelo que mudou desde a corrida anterior"
+                      : "Sem corrida anterior comparável, não existe novo nem persistente"
+                  }
+                >
+                  <option value="">Todo o diff</option>
+                  <option value="novo">Só novos</option>
+                  <option value="persistente">Só persistentes</option>
+                </Select>
+                <span className="ml-auto text-[11px] tabular-nums text-zinc-400">
+                  {pagina ? `${pagina.itens.length} de ${pagina.total}` : "lendo…"}
                 </span>
               </div>
 
-              {achados.length === 0 ? (
+              {comparacao?.baseline ? (
+                <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50/70 px-2.5 py-1.5 text-[11px] dark:border-zinc-800 dark:bg-zinc-900/40">
+                  <span className="text-zinc-500 dark:text-zinc-400">
+                    Comparado com a corrida #{comparacao.baseline.id} · {formatDateTime(comparacao.baseline.startedAt)}
+                  </span>
+                  <Badge tone={comparacao.novos > 0 ? "warning" : "neutral"}>{comparacao.novos} novo(s)</Badge>
+                  <Badge tone="info">{comparacao.persistentes} persistente(s)</Badge>
+                  <Badge tone={comparacao.corrigidos > 0 ? "success" : "neutral"}>
+                    {comparacao.corrigidos} corrigido(s)
+                  </Badge>
+                  {!comparacao.corrigidosConclusivos ? (
+                    <Badge
+                      tone="warning"
+                      title="A corrida atual não concluiu com leitura efetiva; o que sumiu pode não ter sido lido."
+                    >
+                      correções não comprovadas
+                    </Badge>
+                  ) : null}
+                  {comparacao.corrigidos > 0 ? (
+                    <Button size="sm" variant="ghost" onClick={() => setMostrarCorrigidos(true)}>
+                      Ver corrigidos
+                    </Button>
+                  ) : null}
+                </div>
+              ) : comparacao ? (
+                <p className="mt-2 text-[11px] text-zinc-500 dark:text-zinc-400">
+                  Sem corrida anterior concluída do mesmo instrumento — o que está aqui não é chamado de novo nem de
+                  persistente.
+                </p>
+              ) : null}
+
+              {pagina === null ? (
                 <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
-                  {total(corrida.counts) === 0 ? "Nenhum achado nesta corrida." : "Nenhum achado com este filtro."}
+                  {carregandoAchados ? "Lendo os achados…" : "Nenhum achado para mostrar."}
+                </p>
+              ) : pagina.total === 0 ? (
+                <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+                  {pagina.totalGeral === 0
+                    ? "Nenhum achado nesta corrida."
+                    : "Nenhum achado com estes filtros."}
                 </p>
               ) : (
-                <ul className="mt-2 divide-y divide-zinc-100 dark:divide-zinc-800">
-                  {achados.map((a) => (
-                    <li key={a.id} className="px-1 py-2 text-xs">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Badge tone={SEVERIDADE_TOM[a.severity] ?? "neutral"}>{a.severity}</Badge>
-                        <span className="font-mono">{a.ruleId}</span>
-                        <span className="text-zinc-400">{a.source}</span>
-                        {a.cwe ? <span className="font-mono text-[11px] text-zinc-400">{a.cwe}</span> : null}
-                      </div>
-                      <p className="mt-1 text-zinc-700 dark:text-zinc-200">{a.message}</p>
-                      <p className="mt-0.5 font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
-                        {a.file}:{a.lineStart}
-                        {a.lineEnd > a.lineStart ? `-${a.lineEnd}` : ""}
-                      </p>
-                      {a.snippet ? (
-                        <pre className="mt-1 overflow-x-auto rounded-md bg-zinc-50 px-2 py-1 font-mono text-[11px] text-zinc-700 dark:bg-zinc-950 dark:text-zinc-300">
-                          {a.snippet}
-                        </pre>
-                      ) : null}
-                    </li>
-                  ))}
-                </ul>
+                <>
+                  <ul className="mt-2 divide-y divide-zinc-100 dark:divide-zinc-800">
+                    {pagina.itens.map((a) => (
+                      <li key={a.id} className="px-1 py-2 text-xs">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Badge tone={SEVERIDADE_TOM[a.severity] ?? "neutral"}>{a.severity}</Badge>
+                          <span className="font-mono">{a.ruleId}</span>
+                          <span className="text-zinc-400">{a.source}</span>
+                          {a.baseline === "novo" ? <Badge tone="warning">novo</Badge> : null}
+                          {a.baseline === "persistente" ? <Badge>persistente</Badge> : null}
+                          {a.cwe ? <span className="font-mono text-[11px] text-zinc-400">{a.cwe}</span> : null}
+                          <span
+                            className="ml-auto font-mono text-[10px] text-zinc-300 dark:text-zinc-600"
+                            title="Impressão digital do achado: estável entre corridas"
+                          >
+                            {a.fingerprint.slice(0, 8)}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-zinc-700 dark:text-zinc-200">{a.message}</p>
+                        <p className="mt-0.5 font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
+                          {a.file}:{a.lineStart}
+                          {a.lineEnd > a.lineStart ? `-${a.lineEnd}` : ""}
+                        </p>
+                        {a.snippet ? (
+                          <pre className="mt-1 overflow-x-auto rounded-md bg-zinc-50 px-2 py-1 font-mono text-[11px] text-zinc-700 dark:bg-zinc-950 dark:text-zinc-300">
+                            {a.snippet}
+                          </pre>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                  {pagina.itens.length < pagina.total ? (
+                    <div className="mt-2 flex items-center gap-2">
+                      <Button size="sm" loading={carregandoAchados} onClick={() => void carregarMais()}>
+                        Carregar mais
+                      </Button>
+                      <span className="text-[11px] text-zinc-400">
+                        faltam {pagina.total - pagina.itens.length}
+                      </span>
+                    </div>
+                  ) : null}
+                </>
               )}
             </Card>
           ) : (
@@ -599,6 +855,21 @@ export function AnalysisView() {
                   {d.acao}
                 </Badge>
               ))}
+              {pacote.comparacao.base ? (
+                <>
+                  <Badge tone="accent">base #{pacote.comparacao.base.id}</Badge>
+                  <Badge tone={pacote.comparacao.novos > 0 ? "warning" : "neutral"}>
+                    {pacote.comparacao.novos} novo(s)
+                  </Badge>
+                  <Badge tone="info">{pacote.comparacao.persistentes} persistente(s)</Badge>
+                  <Badge tone={pacote.comparacao.corrigidos > 0 ? "success" : "neutral"}>
+                    {pacote.comparacao.corrigidos} corrigido(s)
+                  </Badge>
+                  {!pacote.comparacao.corrigidosConclusivos ? (
+                    <Badge tone="warning">correções não comprovadas</Badge>
+                  ) : null}
+                </>
+              ) : null}
               {pacote.truncado ? <Badge tone="warning">achados truncados</Badge> : null}
               <Button size="sm" className="ml-auto" onClick={() => void copiarPacote()}>
                 <CopyIcon /> Copiar
@@ -608,6 +879,43 @@ export function AnalysisView() {
               {JSON.stringify(pacote, null, 2)}
             </pre>
           </>
+        ) : null}
+      </Modal>
+
+      <Modal
+        open={mostrarCorrigidos}
+        onClose={() => setMostrarCorrigidos(false)}
+        title={`Corrigidos desde a corrida #${comparacao?.baseline?.id ?? ""}`}
+        width="max-w-3xl"
+      >
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          Estes achados existiam na base e não aparecem nesta corrida. A comparação é pela impressão digital, não pela
+          linha: mover o arquivo não conta como correção.
+        </p>
+        {comparacao && comparacao.corrigidosItens.length > 0 ? (
+          <ul className="mt-3 divide-y divide-zinc-100 dark:divide-zinc-800">
+            {comparacao.corrigidosItens.map((a) => (
+              <li key={a.id} className="px-1 py-2 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge tone={SEVERIDADE_TOM[a.severity] ?? "neutral"}>{a.severity}</Badge>
+                  <span className="font-mono">{a.ruleId}</span>
+                  <span className="text-zinc-400">{a.source}</span>
+                  <span className="ml-auto font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
+                    {a.file}:{a.lineStart}
+                  </span>
+                </div>
+                <p className="mt-1 text-zinc-700 dark:text-zinc-200">{a.message}</p>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-400">Nenhum achado corrigido nesta comparação.</p>
+        )}
+        {comparacao && comparacao.corrigidos > comparacao.corrigidosItens.length ? (
+          <p className="mt-2 text-[11px] text-zinc-400">
+            Mostrando os {comparacao.corrigidosItens.length} primeiros de {comparacao.corrigidos}. O total acima é a
+            contagem inteira.
+          </p>
         ) : null}
       </Modal>
 

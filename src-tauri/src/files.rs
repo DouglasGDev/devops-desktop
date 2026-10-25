@@ -52,7 +52,8 @@ pub(crate) fn sftp_cmd(
     batch: bool,
     askpass: Option<&AskPass>,
 ) -> Result<Command, String> {
-    if server.host.trim().is_empty() && server.ssh_alias.as_deref().unwrap_or("").trim().is_empty() {
+    if server.host.trim().is_empty() && server.ssh_alias.as_deref().unwrap_or("").trim().is_empty()
+    {
         return Err("servidor sem host ou alias — cadastre um destino válido".into());
     }
     let mut cmd = crate::proc::command("sftp");
@@ -156,15 +157,13 @@ fn run_batch_cancel(
     timeout: Duration,
     cancel: &AtomicBool,
 ) -> Result<String, String> {
-    let mut child = sftp_cmd(server, true, askpass)?
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                "cliente sftp não encontrado no PATH (OpenSSH)".to_string()
-            } else {
-                format!("não foi possível iniciar o sftp: {e}")
-            }
-        })?;
+    let mut child = sftp_cmd(server, true, askpass)?.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            "cliente sftp não encontrado no PATH (OpenSSH)".to_string()
+        } else {
+            format!("não foi possível iniciar o sftp: {e}")
+        }
+    })?;
     {
         let stdin = child
             .stdin
@@ -294,11 +293,20 @@ pub fn set_perms(
     if mode.len() != 4 || !mode.chars().all(|c| c.is_ascii_digit()) {
         return Err("modo de permissão inválido (use 4 dígitos, ex.: 0644)".into());
     }
-    run_batch(server, &format!("chmod {} {}\n", mode, sftp_quote(path)), askpass).map(|_| ())
+    run_batch(
+        server,
+        &format!("chmod {} {}\n", mode, sftp_quote(path)),
+        askpass,
+    )
+    .map(|_| ())
 }
 
 /// Lê um arquivo de texto remoto baixando para um temporário local.
-pub fn read_text(server: &Server, remote: &str, askpass: Option<&AskPass>) -> Result<String, String> {
+pub fn read_text(
+    server: &Server,
+    remote: &str,
+    askpass: Option<&AskPass>,
+) -> Result<String, String> {
     let tmp = temp_path("devops-read");
     let script = format!("get {} {}\n", sftp_quote(remote), sftp_quote(&tmp));
     let r = run_batch(server, &script, askpass);
@@ -325,7 +333,8 @@ pub fn write_text(
     askpass: Option<&AskPass>,
 ) -> Result<(), String> {
     let tmp = temp_path("devops-write");
-    std::fs::write(&tmp, content.as_bytes()).map_err(|e| format!("falha ao preparar o upload: {e}"))?;
+    std::fs::write(&tmp, content.as_bytes())
+        .map_err(|e| format!("falha ao preparar o upload: {e}"))?;
     let part = format!("{remote}.devops-tmp");
     let script = format!(
         "put {} {}\nrename {} {}\n",
@@ -355,10 +364,7 @@ fn temp_path(prefix: &str) -> String {
 fn looks_like_perms(col: &str) -> bool {
     let chars: Vec<char> = col.chars().collect();
     matches!(chars.len(), 10 | 11)
-        && matches!(
-            chars[0],
-            'd' | '-' | 'l' | 's' | 'S' | 'c' | 'b' | 'p'
-        )
+        && matches!(chars[0], 'd' | '-' | 'l' | 's' | 'S' | 'c' | 'b' | 'p')
 }
 
 fn month_num(name: &str) -> Option<u32> {
@@ -383,7 +389,9 @@ fn parse_ls_date(a: &str, b: &str, c: &str) -> Option<String> {
         if month > current_m || (month == current_m && day > current_d) {
             year -= 1;
         }
-        Some(format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:00"))
+        Some(format!(
+            "{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:00"
+        ))
     } else {
         let year: i32 = c.parse().ok()?;
         Some(format!("{year:04}-{month:02}-{day:02}T00:00:00"))
@@ -495,13 +503,22 @@ lrwxrwxrwx 1 root root 11 Sep 30 09:00 link -> current/rel\nd\n\
 -rwxr-xr-x 1 root root 0 Oct 01 08:00 bin\run.exe\n";
         let entries = parse_ls(raw, "/srv/app");
         assert_eq!(entries.len(), 3);
-        let doc = entries.iter().find(|e| e.name == "notas do dia.txt").expect("nome com espaço");
+        let doc = entries
+            .iter()
+            .find(|e| e.name == "notas do dia.txt")
+            .expect("nome com espaço");
         assert_eq!(doc.size, Some(1234));
         assert_eq!(doc.modified.as_deref(), Some("2024-01-02T00:00:00"));
-        let link = entries.iter().find(|e| e.name == "link").expect("link simbólico");
+        let link = entries
+            .iter()
+            .find(|e| e.name == "link")
+            .expect("link simbólico");
         assert!(link.is_symlink);
         assert_eq!(link.path, "/srv/app/link");
-        let exe = entries.iter().find(|e| e.name.contains("bin")).expect("caractere estranho");
+        let exe = entries
+            .iter()
+            .find(|e| e.name.contains("bin"))
+            .expect("caractere estranho");
         assert_eq!(exe.perms.as_deref(), Some("-rwxr-xr-x"));
     }
 
@@ -513,7 +530,10 @@ lrwxrwxrwx 1 root root 11 Sep 30 09:00 link -> current/rel\nd\n\
         // nunca uma falha na listagem.
         let entries = parse_ls(raw, "/home/deploy");
         assert_eq!(entries.len(), 2);
-        let dir = entries.iter().find(|e| e.name == "publica").expect("diretório");
+        let dir = entries
+            .iter()
+            .find(|e| e.name == "publica")
+            .expect("diretório");
         assert!(dir.is_dir);
         assert_eq!(dir.path, "/home/deploy/publica");
         assert_eq!(dir.modified, None);
@@ -539,11 +559,17 @@ drwxr-xr-x 2 u g 4096 Jan 1 10:00 z-dir\n";
 -rw-r--r-- 1 root root 1234 Oct  8 14:32 /var/www/index.php\n";
         let entries = parse_ls(raw, "/var/www");
         assert_eq!(entries.len(), 2);
-        let dir = entries.iter().find(|e| e.name == "html").expect("nome reduzido");
+        let dir = entries
+            .iter()
+            .find(|e| e.name == "html")
+            .expect("nome reduzido");
         assert!(dir.is_dir);
         assert_eq!(dir.path, "/var/www/html");
         assert_eq!(entries[1].path, "/var/www/index.php");
-        assert!(!entries.iter().any(|e| e.path.contains("//")), "barra dobrada");
+        assert!(
+            !entries.iter().any(|e| e.path.contains("//")),
+            "barra dobrada"
+        );
     }
 
     #[test]
@@ -600,7 +626,9 @@ drwxr-xr-x 2 u g 4096 Jan 1 10:00 z-dir\n";
     }
 
     fn args(cmd: &Command) -> Vec<String> {
-        cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect()
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect()
     }
 
     #[test]
@@ -617,12 +645,17 @@ drwxr-xr-x 2 u g 4096 Jan 1 10:00 z-dir\n";
         let pass = crate::auth::AskPass::new("senha-de-teste").unwrap();
         let cmd = sftp_cmd(&server("password"), true, Some(&pass)).unwrap();
         let argv = args(&cmd);
-        assert!(!argv.contains(&"BatchMode=yes".to_string()), "senha não pode bloquear o prompt");
+        assert!(
+            !argv.contains(&"BatchMode=yes".to_string()),
+            "senha não pode bloquear o prompt"
+        );
         assert!(argv.contains(&"BatchMode=no".to_string()));
         assert!(argv.contains(&"NumberOfPasswordPrompts=1".to_string()));
         // A checagem de host continua estrita em qualquer modo de autenticação.
         assert!(argv.contains(&"StrictHostKeyChecking=yes".to_string()));
-        assert!(cmd.get_envs().any(|(k, v)| k == "SSH_ASKPASS" && v == Some(pass.script_path().as_os_str())));
+        assert!(cmd
+            .get_envs()
+            .any(|(k, v)| k == "SSH_ASKPASS" && v == Some(pass.script_path().as_os_str())));
     }
 
     #[test]

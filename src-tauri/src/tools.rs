@@ -85,7 +85,11 @@ fn extract_login(line: &str) -> Option<String> {
         .unwrap_or("")
         .trim()
         .to_string();
-    if login.is_empty() { None } else { Some(login) }
+    if login.is_empty() {
+        None
+    } else {
+        Some(login)
+    }
 }
 
 /// Saída de `gh auth status` → nome da conta ativa, ou `None` quando não há
@@ -115,7 +119,9 @@ fn count_agent_keys(stdout: &str) -> i64 {
     stdout
         .lines()
         .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.contains("no identities") && !l.contains("The agent has no"))
+        .filter(|l| {
+            !l.is_empty() && !l.contains("no identities") && !l.contains("The agent has no")
+        })
         .count() as i64
 }
 
@@ -174,7 +180,12 @@ fn versao_git(r: &Sonda) -> Option<String> {
 fn versao_gh(r: &Sonda) -> Option<String> {
     let (out, _) = r.saida()?;
     let primeira = out.trim().lines().next().unwrap_or("");
-    Some(primeira.strip_prefix("gh version ").unwrap_or(primeira).to_string())
+    Some(
+        primeira
+            .strip_prefix("gh version ")
+            .unwrap_or(primeira)
+            .to_string(),
+    )
 }
 
 /// Valor de um `git config --get`: vazio quando o git não respondeu com sucesso,
@@ -203,9 +214,11 @@ fn estado_agente(r: &Sonda) -> (Option<String>, Option<bool>, Option<i64>) {
 fn conta_gh(r: &Sonda) -> Option<String> {
     match r {
         // o texto vai para stdout e para stderr dependendo da versão do gh
-        Sonda::Respondeu { stdout, stderr, code: Some(0) } => {
-            parse_gh_account(stdout).or_else(|| parse_gh_account(stderr))
-        }
+        Sonda::Respondeu {
+            stdout,
+            stderr,
+            code: Some(0),
+        } => parse_gh_account(stdout).or_else(|| parse_gh_account(stderr)),
         _ => None,
     }
 }
@@ -240,7 +253,10 @@ const CANDIDATOS: &[Candidato] = &[
         id: "vscode",
         nome: "Visual Studio Code",
         no_path: &["Code.exe", "code.exe", "code.cmd", "code"],
-        em_base: &["Programs/Microsoft VS Code/Code.exe", "Microsoft VS Code/Code.exe"],
+        em_base: &[
+            "Programs/Microsoft VS Code/Code.exe",
+            "Microsoft VS Code/Code.exe",
+        ],
         absolutos: &[
             "/usr/share/code/code",
             "/usr/bin/code",
@@ -264,7 +280,12 @@ const CANDIDATOS: &[Candidato] = &[
 /// as variáveis que têm valor: ambiente vazio não inventa caminho.
 fn bases_de_instalacao(ler: &dyn Fn(&str) -> Option<String>) -> Vec<PathBuf> {
     let mut bases = Vec::new();
-    for chave in ["LOCALAPPDATA", "ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
+    for chave in [
+        "LOCALAPPDATA",
+        "ProgramFiles",
+        "ProgramW6432",
+        "ProgramFiles(x86)",
+    ] {
         if let Some(valor) = ler(chave) {
             let valor = valor.trim();
             if !valor.is_empty() {
@@ -425,9 +446,15 @@ mod tests {
         let saida = "github.com\n  ✓ Logged in to github.com as octocat\n";
         assert_eq!(parse_gh_account(saida).as_deref(), Some("octocat"));
         // sem linha de sessão não há conta
-        assert_eq!(parse_gh_account("Please run `gh auth login` to get started.\n"), None);
+        assert_eq!(
+            parse_gh_account("Please run `gh auth login` to get started.\n"),
+            None
+        );
         // só o host, sem afirmar login, não vira conta
-        assert_eq!(parse_gh_account("github.com\n  - Active account: true\n"), None);
+        assert_eq!(
+            parse_gh_account("github.com\n  - Active account: true\n"),
+            None
+        );
     }
 
     #[test]
@@ -438,7 +465,8 @@ mod tests {
 
     #[test]
     fn contagem_de_chaves_do_agente() {
-        let duas = "/c/Users/dou/.ssh/id_ed25519 (ecdsa-sha2-nistp256)\n/home/u/.ssh/id_rsa (RSA)\n";
+        let duas =
+            "/c/Users/dou/.ssh/id_ed25519 (ecdsa-sha2-nistp256)\n/home/u/.ssh/id_rsa (RSA)\n";
         assert_eq!(count_agent_keys(duas), 2);
         assert_eq!(count_agent_keys("The agent has no identities.\n"), 0);
         assert_eq!(count_agent_keys(""), 0);
@@ -447,8 +475,12 @@ mod tests {
     #[test]
     fn agente_parado_e_reconhecido_pelo_texto_das_duas_builds() {
         // respostas reais capturadas nesta máquina (código 1 ou 2 conforme a build)
-        assert!(sem_agente("could not open a connection to your authentication agent."));
-        assert!(sem_agente("error connecting to agent: no such file or directory"));
+        assert!(sem_agente(
+            "could not open a connection to your authentication agent."
+        ));
+        assert!(sem_agente(
+            "error connecting to agent: no such file or directory"
+        ));
         // uma listagem verdadeira não é confundida com agente ausente
         assert!(!sem_agente("256 sha256:abc… douglas@notebook (ed25519)\n"));
         assert!(!sem_agente("the agent has no identities."));
@@ -472,7 +504,10 @@ mod tests {
             panic!("o git desta máquina deveria responder: {r:?}");
         };
         assert_eq!(*code, Some(0));
-        assert!(stdout.starts_with("git version"), "saída inesperada: {stdout}");
+        assert!(
+            stdout.starts_with("git version"),
+            "saída inesperada: {stdout}"
+        );
         // nome que não existe no PATH é dito ausente, e não sem resposta
         assert_eq!(
             sonda("devops-desktop-sem-essa-ferramenta", &["--version"]),
@@ -509,7 +544,10 @@ mod tests {
             ("gh", &travado),
             ("ssh", &mudo),
         ];
-        assert_eq!(sem_resposta_de(&probes), vec!["git".to_string(), "gh".to_string()]);
+        assert_eq!(
+            sem_resposta_de(&probes),
+            vec!["git".to_string(), "gh".to_string()]
+        );
         // nada travado e a lista fica vazia: a tela não inventa problema
         assert!(sem_resposta_de(&[("git", &mudo), ("ssh", &mudo)]).is_empty());
     }
@@ -554,7 +592,10 @@ mod tests {
 
     #[test]
     fn configuracao_do_git_so_vale_com_codigo_zero() {
-        assert_eq!(configurado(&respondeu("  DouglasGDev \n", "", Some(0))), "DouglasGDev");
+        assert_eq!(
+            configurado(&respondeu("  DouglasGDev \n", "", Some(0))),
+            "DouglasGDev"
+        );
         // chave inexistente: o git sai com 1 e não há identidade a reportar
         assert_eq!(configurado(&respondeu("", "", Some(1))), "");
     }
@@ -583,11 +624,23 @@ mod tests {
     #[test]
     fn sessao_do_gh_exige_codigo_zero_e_linha_de_login() {
         assert_eq!(
-            conta_gh(&respondeu("", "  ✓ Logged in to github.com account dou (keyring)\n", Some(0))).as_deref(),
+            conta_gh(&respondeu(
+                "",
+                "  ✓ Logged in to github.com account dou (keyring)\n",
+                Some(0)
+            ))
+            .as_deref(),
             Some("dou")
         );
         // sem código zero a leitura não afirma nada
-        assert_eq!(conta_gh(&respondeu("Logged in to github.com account dou\n", "", Some(1))), None);
+        assert_eq!(
+            conta_gh(&respondeu(
+                "Logged in to github.com account dou\n",
+                "",
+                Some(1)
+            )),
+            None
+        );
     }
 
     #[test]
@@ -616,14 +669,20 @@ mod tests {
             Some(exe.display().to_string().as_str())
         );
         // pasta vazia e nome que não está nela não produzem caminho
-        assert_eq!(no_path(&format!("{separador}{separador}"), &["Code.exe"]), None);
+        assert_eq!(
+            no_path(&format!("{separador}{separador}"), &["Code.exe"]),
+            None
+        );
         assert_eq!(no_path(&raiz.display().to_string(), &["cursor"]), None);
         // o shim de shell sem extensão que o instalador põe no PATH não é
         // executável no Windows, então não pode virar escolha na tela
         #[cfg(windows)]
         {
             std::fs::write(raiz.join("code"), "#!/bin/sh\n").unwrap();
-            assert_eq!(no_path(&raiz.display().to_string(), &["code", "code.cmd"]), None);
+            assert_eq!(
+                no_path(&raiz.display().to_string(), &["code", "code.cmd"]),
+                None
+            );
         }
         let _ = std::fs::remove_dir_all(&raiz);
     }
@@ -670,7 +729,13 @@ mod tests {
 
     #[test]
     fn sem_ambiente_nenhum_editor_e_oferecido() {
-        let achados = localizar(&|chave| if chave == "PATH" { Some(String::new()) } else { None });
+        let achados = localizar(&|chave| {
+            if chave == "PATH" {
+                Some(String::new())
+            } else {
+                None
+            }
+        });
         // os caminhos absolutos do candidato só entram se existirem de verdade
         assert!(achados.iter().all(|e| Path::new(&e.caminho).is_file()));
     }

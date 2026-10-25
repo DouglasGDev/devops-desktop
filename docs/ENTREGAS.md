@@ -21,14 +21,18 @@ Fecha a lista a rodada seguinte, aberta pelo pedido **"revisar e validar a próp
 deixou de poder escapar de uma linha e o veredito da análise deixou de poder inventar leitura — os dois defeitos
 reproduzidos antes de corrigir, com o texto cru da reprodução no §5, itens **38** e **39**. Nada desta rodada foi visto
 na janela; o que lá está é medido por teste, por sonda de linha de comando e pelo banco, e o que não foi medido continua
-dito como não medido.
+dito como não medido. Fecha a lista a rodada de **2026-10-24**, pedida com "pegue o que eu subi no Git e atualize aqui e
+melhore muito mais a ferramenta, 100% foco em melhorar o que existe": o remoto foi integrado (`0e63261` sobre
+`0cf82e0`) e, sem módulo novo, entraram a triagem e a comparação de varreduras, o SARIF de CI, a saúde da frota com
+leitura em lote e a correção do registro do semgrep — o que foi medido, o que ficou fora da janela e onde está cada
+arquivo estão no §1.2, nos itens 42/43 do §5 e na pendência 17.
 
 ## 1. Retomar em três passos
 
 ```bash
 node ./node_modules/typescript/bin/tsc --noEmit     # tipos do frontend
 npm run build                                        # tsc + bundle
-(cd src-tauri && cargo test)                         # 336 testes de backend
+(cd src-tauri && cargo test)                         # 346 testes de backend
 (cd src-tauri && cargo clippy --all-targets -- -D warnings)
 node scripts/confira-repo.ts                         # o comparador remoto↔pasta, 9 formas reais de URL
 node scripts/sonda-mascara.mjs                       # 24 linhas da máscara, reproduzidas fora do app (21×3 + 3 da cauda)
@@ -58,7 +62,7 @@ Armadilhas já conhecidas nesta máquina:
   anterior acabou.
 - `cargo fmt` **não** é usado neste projeto — o formato é o do próprio autor, e `cargo fmt` reorganiza tudo.
 
-### 1.1 Estado em um parágrafo (2026-10-21, 22:17; a posição do Git relida às 22:51, depois do push; a superfície e o Git relidos de novo às 00:0x de 2026-10-22, depois da rodada de revisão)
+### 1.1 Estado em um parágrafo (2026-10-21, 22:17; a posição do Git relida às 22:51, depois do push; a superfície e o Git relidos de novo às 00:0x de 2026-10-22, depois da rodada de revisão) — retrato daquele dia; o estado atual está no §1.2
 
 Tela e backend: **148** `#[tauri::command]`, 24 arquivos Rust, 11 telas, **336** testes de backend (relidos às 00:0x:
 `test result: ok. 336 passed; 0 failed; 0 ignored; 0 measured`), SQLite em
@@ -192,6 +196,48 @@ histórico → Saída da etapa** e julgar se os blocos por tentativa e a busca s
 Deploy **#45/#46** e a corrida travada pelo gate **#47/#48**. As pendências do plano (triggers, ambientes com aprovação
 registrada, retry configurável, revalidação SSH e os executores Docker/Compose/PM2 contra um daemon/host real) estão em
 §6; as lacunas honestas do "canivete", em §7.
+
+### 1.2 Estado relido em 2026-10-24 — o que veio do remoto e a rodada de análise e frota
+
+O que ele subiu está nesta árvore: `git ls-remote origin refs/heads/main` devolve `0cf82e0dd90aabbc612d6000bdfccea4140ca8d5`,
+e o merge local `0e632611af945bf4c0626b19b16c5a9d5f58644e` trouxe `fe8d106` (o pool de conexões), `799251b` (o semgrep com
+`p/default`) e `0cf82e0` (o registro deles). Sobre esse merge está a rodada desta seção, **ainda não commitada**: onze arquivos de
+código (seis Rust, cinco TS/TSX) e `src/lib/infraMonitor.ts` novo — `Python/` continua fora, por ser venv não rastreado.
+
+O que foi medido agora, nesta árvore e sem janela: `cargo test` → `test result: ok. **346 passed; 0 failed; 0 ignored; 0
+measured**`; `cargo clippy --all-targets -- -D warnings` → `Finished`, **0** avisos, depois de corrigir dois lints que o
+clippy 1.96 expos em código anterior (`useless_format` em `analysis.rs:306`, `let_unit_value` em `db.rs:123`); `tsc
+--noEmit` → saída vazia; `npm run build` → **87** módulos, bundle principal **899,84 kB** (gzip **244,14 kB**), 7,44 s;
+`node scripts/confira-repo.ts` → **9/9** formas; `node scripts/sonda-mascara.mjs` → **24 PASS**,
+`falhas_reproduzidas=0`. O banco vai a `user_version` **12** — a migração 12 reconstrói `analysis_findings` com
+`fingerprint` e recalcula as impressões antigas —, **14** tabelas; a superfície está em **150** `#[tauri::command]`, **24**
+arquivos Rust, **11** telas e **48.950** linhas TS/TSX/Rust em **77** arquivos (`find src src-tauri/src scripts`, sem
+`node_modules`, `dist`, `target` nem `Python/`). **O binário não foi recompilado nesta rodada e nada da interface nova foi
+visto na janela**: o que está abaixo é provado por teste, tipo e build, não por tela.
+
+A rodada de análise (arquivos da coluna esquerda são os que mudaram) entrega: impressão digital estável por achado
+(`rule_id + arquivo + mensagem + trecho`, com ordinal por corrida) e comparação contra a última corrida **concluída e com
+leitura** do mesmo projeto e instrumento (`db.rs:2178` em diante, `db.rs:2396`, `db.rs:2433`); a ausência de um achado só
+conta como correção quando a corrida atual concluiu com arquivos lidos (`corrigidos_conclusivos`), e "sem base" nunca vira
+"tudo novo". A triagem passou a ser feita no banco — severidade, origem, regra, texto e estado novo/persistente, com
+paginação e facetas (`db.rs:2498`, `db.rs:2526`, `db.rs:2554`), servida por `analysis_achados` com filtro e
+`analysis_comparar` (`commands.rs:3352`, `commands.rs:3364`) e pela tela `AnalysisView` com contador, "carregar mais",
+faixa de diferença e lista de corrigidos. O SARIF virou 2.1.0 de CI: `driver.rules` com descrição, CWE e
+`security-severity`, `ruleIndex`, `partialFingerprints`, `baselineState` (`new`/`unchanged`) e `invocations` com
+`executionSuccessful` (`analysis.rs:2039`); o pacote para IA ganhou `comparacao` e cada achado ganhou `impressao`
+(`analysis.rs:1819`). Duas correções de fundo: a cobertura de `ambos` deixou de somar o mesmo arquivo duas vezes (`max`);
+e `percorrer` canonicaliza a raiz, não segue link que escapa dela e não entra em ciclo (`analysis.rs:1044`). O mesmo
+cuidado chegou à varredura de segredo: `scan_tree` não escapa por link nem gira em ciclo, e quando o teto de arquivos é
+atingido grava um achado `cobertura` em vez de parecer uma árvore limpa (`security.rs:543`).
+
+A rodada de frota: as leituras de métricas vivem em `src/lib/infraMonitor.ts` e **sobrevivem à troca de tela**; **Ler
+frota** lê os servidores em sequência com progresso e parada, e deixa de fora os que usam senha — a leitura em lote não
+abre prompt sem a pessoa pedir aquele servidor, e o resumo diz quantos ficaram fora. O painel ganhou "só problemas",
+ordenação por alerta ou leitura mais antiga, idade/desatualização de cada leitura, chips de pior disco, memória e carga
+(limiares iguais aos do backend: 85%, 90% e 1,5× núcleos) e serviços com os fora do ar primeiro. No dashboard, as
+leituras viram alertas com atalho para a frota, e o cartão de servidores mostra quantos têm métrica e quantos estão em
+alerta. No backend, `infra.rs` passou a descartar sistemas de arquivos temporários (`tmpfs`, `/proc`, `/sys`, `cgroup`…)
+da lista de discos, com nota do que ficou fora (`infra.rs:124`), para um `tmpfs` de 100% não parecer disco cheio.
 
 ## 2. Estado verificado em 2026-10-10 … 15 (resultado lido, não presumido)
 
@@ -452,9 +498,10 @@ node scripts/ponte-cdp.mjs --drag-node publicar 48 16   # arrasta e devolve o tr
   (`barra_o_corte`), nunca o código de saída da ferramenta: `codigoDeSaidaEProva: false` está dentro do pacote por
   escrito. O instrumento **embutido** são 19 regras em YAML (`dd-101`…`dd-111`, Python/JS+TS/PHP/genéricas) lidas pelo
   próprio app, sem dependência nova; o instrumento **semgrep** adapta o executável do projeto
-  [semgrep/semgrep](https://github.com/semgrep/semgrep) chamando `scan --config p/default` — as regras padrão dele,
-  multi-linguagem, baixadas do registry na primeira execução e cacheadas depois, saída `--json` convertida em achados
-  nossos. As 19 embarcadas **não** vão por essa porta (§5, item 39); o caminho continua configurável em
+  [semgrep/semgrep](https://github.com/semgrep/semgrep) chamando `scan --config <YAML da casa> --config p/default` — as
+  19 embarcadas cobrem o domínio e as regras padrão dele cobrem as linguagens que o YAML não olha, baixadas do registry
+  na primeira execução e cacheadas depois, saída `--json` convertida em achados nossos. As duas fontes vão na **mesma**
+  chamada (§5, item 41); o caminho continua configurável em
   `analise.semgrep.caminho`, e quem aponta um caminho manda nele — a busca automática e a instalação (`pip install
   --user semgrep`, com `pipx` de recurso) só rodam com o campo vazio. A sonda da ferramenta tem
   **prazo próprio** e distingue `encontrado` / `ausente` / `sem-resposta`, porque "não respondeu" não é "não existe".
@@ -467,7 +514,12 @@ node scripts/ponte-cdp.mjs --drag-node publicar 48 16   # arrasta e devolve o tr
   `veredito` (classificação em palavras de ação: `barra`, `cobertura-nula`, `revalidar-varredura`, `sem-achados`,
   `achados-abaixo-do-corte`, `varredura-interrompida`), `decisoes` (cada uma com `acao`/`motivo`/`evidencia` apontando
   campo do próprio pacote — quem decide é quem recebe), `porRegra`, `achados`, `truncado`, `nota` e `observacao`; e
-  **Exportar SARIF** fala com o que já existe fora do app. No grafo, o quinto tipo de nó (`kind "analise"`, migração 10
+  **Exportar SARIF** fala com o que já existe fora do app. A rodada de 2026-10-24 levou para o SARIF o que um CI lê:
+  `driver.rules` com descrição, CWE e `security-severity`, `ruleIndex`, `partialFingerprints`, `baselineState`
+  (`new`/`unchanged`) e `invocations` com `executionSuccessful`; o pacote ganhou `comparacao` (base, novos, persistentes,
+  corrigidos e se a correção é comprovada) e cada achado ganhou `impressao`. A comparação usa como base só a última corrida
+  **concluída e com leitura** do mesmo projeto e instrumento, e a tela filtra no banco por severidade, origem, regra,
+  texto e estado novo/persistente, com facetas e páginas (§1.2). No grafo, o quinto tipo de nó (`kind "analise"`, migração 10
   com `analyzer`/`severity_gate` nas colunas de `pipeline_nodes`) é validado pelo mesmo `checar_grafo`, desenhado na
   mesma tela, e executado pelo **mesmo** `deploy::start` — não há segundo motor nem segunda fila.
   Medido na janela real (§2): a sonda achando o semgrep **1.181.0** fora do `PATH` pelo caminho configurado, as 19 regras
@@ -927,28 +979,62 @@ leitura dela devolveu
     arquivo não tem o que reabrir. O que **não** está medido aqui: duas escritas grandes brigando pelo mesmo arquivo ao
     mesmo tempo — a guarda delas é o `busy_timeout` de 5 s, provada só por construção, e uma varredura contra a outra
     continua recusada pelo registro (`Estado::iniciar`), não pelo banco.
-41. **O instrumento externo varre com as regras padrão do semgrep — a casa não entrega regra nenhuma por essa porta.**
-    O pedido era de alcance, não de regra, e a resposta não era escrever mais YAML: `varredura_semgrep` chama
-    `scan --config p/default --json-output …` e deixa o registry da ferramenta decidir o que cobrir, em qualquer
-    linguagem. As 19 embarcadas saíram desse caminho — continuam no analisador embutido, que lê o YAML no processo
-    (`REGRAS_YAML`, sem arquivo), e na conferência `--validate` da tela. O prazo padrão subiu de **180 s** para **600 s**
-    porque a primeira execução baixa as regras: é margem escolhida, não medida, e quem quiser o número lido na janela tem
-    de rodar uma varredura real. Duas coisas caíram junto e ficariam piores sem elas. **Ausência de ferramenta deixou de
-    ser resposta final**: `instalar_semgrep` roda `pip install --user semgrep` e, se não der, `pipx install semgrep`, e
-    `localizar` procura `pysemgrep.exe` antes de `semgrep.exe` — aqui, lido com `ls`, os dois arquivos existem em
-    `%APPDATA%\Python\Python310\Scripts` e nenhum dos dois está no `PATH` desta janela; a versão é **1.182.1**, lida de
-    `pysemgrep --version`. A busca automática só roda com `analise.semgrep.caminho` vazio, porque quem apontou um caminho
-    manda nele. **E o resultado era descartado por um byte**: `read_to_string` exigia UTF-8 de um JSON que ecoa a linha
-    varrida, e arquivo em `latin-1` não é UTF-8 — `ler_resultado` insiste por até 2 s (o filho devolve 0 antes de os
-    trabalhadores dele largarem o `--json-output`) e decodifica com `from_utf8_lossy`. Travado por
-    `um_resultado_fora_de_utf8_e_lido_do_mesmo_modo` e `um_envelope_sem_achados_com_semgrep_puro_declara_p_default`, que
-    é a linha que diz "p/default" em vez de "zero regras". A reversão registrada aqui é minha: o `canonicalize()` que eu
-    tinha posto no caminho do TEMP **quebra** a varredura — medido, com o prefixo `\\?\` o semgrep 1.182 sai com código
-    **2** sem escrever arquivo nenhum, enquanto o caminho curto (`DOUGLA~1.GRO`) e o comprido funcionam igual; o arquivo
-    volta a ser o `temp_dir()` como veio, e a linha 27 do §5 continua sendo a régua que aquilo não leu. O que **não** está
-    medido: nenhuma varredura `p/default` rodou na janela desde a mudança, o botão **Instalar Semgrep** nunca foi clicado
-    aqui (o que se tem dele é a leitura do `spawn` e dos dois comandos, não uma instalação real), e a primeira varredura
-    dele depende de rede — o `--metrics=off` desliga a telemetria, não o download das regras.
+41. **O instrumento externo varre com as regras da casa E com as padrão do semgrep — esta linha estava errada.**
+    Correção de 2026-10-24, depois de puxar o remoto: o texto anterior dizia que "a casa não entrega regra nenhuma por
+    essa porta". O código que veio no `799251b` e sobreviveu ao merge `0e63261` monta
+    `let configs = vec![regras.display().to_string(), "p/default".to_string()]` (`analysis.rs:1656`) e passa **dois**
+    `--config` na mesma chamada (`analysis.rs:1226`–`:1229`, chamada em `:1657`): as 19 embarcadas cobrem o domínio que o
+    registry não conhece e `p/default` cobre as linguagens que o YAML da casa não olha. O relatório nomeia as fontes em
+    vigor; quando não há achado e o envelope não nomeia nenhuma, `efetivamente_lidos` lê o arquivo da casa
+    (`analysis.rs:1417`) e `varredura_semgrep` acrescenta `p/default` à lista (`:1267`), em vez de dizer "zero regras".
+    O prazo padrão de **600 s** continua sendo margem escolhida, não medida: a primeira execução baixa o registry, e quem
+    quiser o número lido tem de rodar a varredura real (pendência 16). Seguem valendo as duas correções que vieram junto:
+    **ausência de ferramenta não é resposta final** (`instalar_semgrep` tenta `pip install --user semgrep` e depois
+    `pipx install semgrep`; `localizar` procura `pysemgrep.exe` antes de `semgrep.exe`) e **o resultado não é descartado
+    por um byte** (`ler_resultado` insiste por até 2 s e decodifica com `from_utf8_lossy`). A reversão do `canonicalize()`
+    no caminho do TEMP também continua registrada: medido no semgrep 1.182, o prefixo `\\?\` faz o processo sair com
+    código **2** sem escrever arquivo, enquanto o caminho curto e o comprido funcionam. O que **não** está medido desde a
+    mudança: nenhuma varredura `p/default` foi lida na janela, o botão **Instalar Semgrep** nunca foi clicado aqui, e a
+    primeira varredura dele depende de rede — `--metrics=off` desliga a telemetria, não o download das regras.
+
+42. **A corrida anterior é régua, não chute — e a triagem acontece no banco.** A comparação entre varreduras não existe
+    para dizer "melhorou": existe para dizer **o que mudou**, e só pode dizer isso quando a base é comparável. Cada achado
+    ganhou uma impressão estável (`FNV-1a` de `rule_id`, arquivo, mensagem e trecho sem espaços nas pontas), com ordinal
+    por corrida para dois achados idênticos no mesmo arquivo; a linha **não** entra na impressão, porque um `import`
+    novo no topo não pode transformar todos os achados em novos (`db.rs:2178`). A migração 12 reconstrói
+    `analysis_findings` com a coluna e recalcula as impressões antigas em Rust, com o ordinal reiniciado a cada corrida;
+    as corridas antigas continuam comparáveis sem reescrever o histórico. A base é a última corrida **concluída e com
+    `files_scanned > 0`** do mesmo projeto e instrumento, anterior por `started_at`/`id` — corrida interrompida ou sem
+    leitura **nunca** vira base (`db.rs:2396`). E a correção só é contada quando a corrida atual concluiu **com leitura**
+    (`corrigidos_conclusivos`, `db.rs:2433`): sem isso, "o achado sumiu porque a varredura não abriu o arquivo" seria
+    chamado de conserto — o mesmo defeito que o item 39 fechou do lado do veredito. A tela não baixa a corrida inteira e
+    filtra em memória: filtro de severidade, origem, regra, texto e estado novo/persistente, contagem total do filtro,
+    facetas e `LIMIT/OFFSET` são resolvidos em SQL (`db.rs:2498`, `db.rs:2526`, `db.rs:2554`). O SARIF ganhou os campos
+    que um CI usa (`ruleIndex`, `partialFingerprints`, `baselineState`, `invocations`) e o pacote ganhou `comparacao`;
+    o modal de corrigidos diz que mostra os **100 primeiros** quando a lista é amostra, em vez de sugerir que são todos.
+    Travado por `a_impressao_ignora_a_linha_e_a_comparacao_diz_o_que_mudou`,
+    `a_triagem_filtra_no_banco_e_a_pagina_conta_o_total_do_filtro`,
+    `sem_corrida_anterior_nao_existe_novo_nem_persistente`, `a_base_antiga_recebe_a_mesma_impressao_que_uma_corrida_nova`
+    e `o_sarif_leva_indice_de_regra_impressao_estado_de_base_e_invocacao`. No caminho, duas correções de contenção:
+    `percorrer` não segue link que sai da raiz nem entra em ciclo (`analysis.rs:1044`), e a varredura de segredo, quando
+    cortada pelo teto, **declara a cobertura incompleta** em vez de parecer limpa (`security.rs:543`).
+
+43. **Saúde da frota: leitura que sobrevive à tela, e nenhum prompt que a pessoa não pediu.** As métricas de servidor
+    já existiam, mas viviam no estado do painel: sair do Dashboard e voltar apagava tudo, e cada servidor era uma leitura
+    individual. Agora as leituras ficam em `src/lib/infraMonitor.ts` — fora da árvore React, assinadas por
+    `useSyncExternalStore` (`:66`) — e **Ler frota** (`:95`) percorre os servidores em sequência, mostra progresso e
+    permite parar depois da leitura em curso. Servidores com `authMethod === "password"` ficam **fora** do lote: a coleta
+    em frota não abre prompt sem a pessoa ter pedido aquele servidor; o resumo diz quantos ficaram fora e a leitura
+    individual continua abrindo o prompt. O painel (`InfraPanel.tsx:231`) ganhou "só problemas", ordenação por alerta ou
+    leitura mais antiga, idade e marca de leitura antiga, chips de pior disco, memória e carga, e serviços com os fora do
+    ar primeiro. Os limiares da tela são os mesmos do backend (85% de disco, 90% de memória, 1,5× núcleos) e a barra de
+    carga deixou de usar o limiar de disco. O dashboard passou a transformar as leituras em alertas com atalho para a
+    frota (`DashboardView.tsx:74`, `:282`). No backend, `infra.rs` descarta sistemas de arquivos temporários da lista de
+    discos e **diz quantos ficaram fora** (`infra.rs:124`), para um `tmpfs` de 100% não parecer disco cheio; disco real
+    com `overlay` na raiz de um contêiner continua na lista. Travado por
+    `disco_temporario_nao_entra_como_disco_nem_gera_alerta` e `uma_arvore_cortada_diz_que_parou_em_vez_de_parecer_limpa`.
+    O que **não** está medido: esta rodada não abriu a janela nem recompilou o binário, então o comportamento visual do
+    painel e dos alertas novos continua sendo promessa de tipo/build, não tela (pendência 17).
 
 ## 6. Pendências assumidas (com o primeiro passo de cada)
 
@@ -1004,6 +1090,7 @@ distintas" é julgamento dele, não meu |
 | 14 | **O escopo da varredura: nada na tela diz o que ela deve ignorar, e numa pasta com distribuição Python dentro ela varre a distribuição** | Achado lido nesta rodada, a partir do pacote que ele exportou da corrida **#18** e do disco: `filesScanned` **2.306** (e **2.305** na #17, que rodou com instrumento `ambos`) contra **154** entradas de `git_tree` no projeto 2 e **0** arquivos `.py` rastreados — a `Python\` da raiz, a distribuição CPython portável de **136 MB**, é o grosso da varredura, e é ela que empurra a contagem para **676 erros / 42 avisos / 640 infos**, igual nas cinco corridas lidas (`#9`, `#10`, `#15`, `#17`, `#18`), todas com veredito `barra`. Não é um defeito do motor: `security::pular_dir` (`security.rs:86`) é a dona única da regra de "não é código do projeto" e lista `.git` + 12 nomes (`node_modules`, `target`, `dist`, `build`, `vendor`, `__pycache__`, `.venv`, `venv`, `.next`, `.cache`, `coverage`, `.terraform`) — `Python` não está entre eles, e `git check-ignore Python/` devolve código **1**, então ela não é ignorada, só nunca foi rastreada. O que falta é **porta**, não regra: não há nenhum ajuste que chegue a `analysis::percorrer` para dizer o que ficar de fora, e a pessoa hoje só tem o campo **Pasta no projeto** (subpasta), que estreita por dentro em vez de excluir. Primeiro passo: um `analise.ignorar` por projeto (lista de pastas/arquivos) **alimentando a mesma `pular_dir`**, não uma segunda lista dentro da análise — a casa tem uma mecânica por responsabilidade, e as duas portas (tela + nó do grafo) têm de concordar com o que está fora. Duas coisas não foram presumidas e continuam em aberto: **não medi na porta do semgrep**, e a lista fixa **não** é compartilhada com ela como eu escrevi nesta linha na primeira versão — lida de novo, `security::pular_dir` é consultada pelo laço embutido (`analysis.rs:1053`) e pela checagem de segredo (`security.rs:425`), enquanto `varredura_semgrep` (`analysis.rs:1176`–`:1186`) monta `scan --metrics=off --json-output … --config … .` e **não passa `--exclude` nenhum**, ficando o que for ignorado por conta dos padrões da própria ferramenta; se um `analise.ignorar` entrar, ele tem de virar as duas coisas (a lista da `pular_dir` **e** o `--exclude` do semgrep) porque é uma mecânica com duas portas, e o primeiro passo é conferir o que o semgrep 1.181 já pula sozinho antes de somar qualquer coisa. E o número que faltava saiu do pacote que ele exportou da corrida **#21** (`dist\analise-corrida-21.json`, lido campo a campo): cobertura **2.306 arquivos lidos**, **167 pulados**, **1.358 achados guardados**, veredito `barra` com 676/42/640 — e dos **300** achados que o pacote carrega (`truncado true`, o teto do pacote), **300** estão sob `Python/`; as **4** regras que aparecem somam 300 e **nenhum** exemplo de arquivo é do código do projeto. O que isso **não** diz: os outros **1.058** achados não vêm no pacote e só estão no banco, então "quanto do projeto próprio acha" continua sem número — e o caminho barato para obtê-lo hoje é o que já existe: rodar a varredura com **Pasta no projeto** = `src` (ou `src-tauri`), que estreita por dentro em vez de excluir. Alternativa descartada de propósito: acrescentar `python` em `NOISE_DIRS`, porque ignoraria a pasta de quem tem Python **como** projeto |
 | 15 | **Provar na janela que a varredura e o terminal não se esperam mais** | O pool (§5, item 38) tem prova de unidade — `uma_conexao_em_uso_nao_obriga_a_segunda_a_esperar` segura uma conexão, pede a segunda e grava pelas duas — e o sintoma que ele descreveu («vou conectar no terminal e a conexão não executa, fica ali carregando o tempo todo») é exatamente a leitura que **só a janela** faz. Primeiro passo: no `npm run tauri dev` dele, **Análise** → projeto 2 → **Semgrep** → Rodar varredura, e **enquanto gira**, **Terminal** → conectar no servidor cadastrado, conferindo duas coisas: que o PTY abre (o prompt aparece, um `echo ok` responde) e que a varredura continua e termina com o veredito gravado. O que falta como número: os segundos que a conexão levou **com** a varredura rodando, contra os que leva com ela interrompida — é o par que fecha a linha 12 do lado de cá do teste. Se ele abrir o Git durante a mesma varredura, anotar também: a lista de arquivos é outra leitura do mesmo banco e não tinha fila antes da mesma forma |
 | 16 | **Rodar uma varredura `p/default` de verdade, e clicar em Instalar Semgrep** | Desde a mudança do item 39 nenhuma varredura externa saiu nesta máquina — o que existe é o teste de unidade do envelope e o `ls` dos dois executáveis em `%APPDATA%\Python\Python310\Scripts` (`pysemgrep.exe` e `semgrep.exe`, versão **1.182.1**), não um resultado lido na tela. E o botão de instalação nunca foi clicado: `analysis_instalar_semgrep` está registrado e vai pela thread bloqueante, mas `pip install --user semgrep` contra o registry não foi exercido aqui. Primeiro passo: varrer o projeto 2 com **Semgrep**, **Pasta no projeto** `src` (a régua da linha 14, para o número que sair ser do código e não da distribuição), e ler **quanto levou**, **quantos arquivos** e **de quais regras** vieram os achados — os 600 s do prazo são margem escolhida, e só uma corrida grande diz se ela é curta. Depois, com `analise.semgrep.caminho` **vazio**, conferir que a sonda acha o binário sem o PATH (`origem "python-scripts"`) e, se ele sumir da máquina, clicar **Instalar Semgrep** e ler a nota que a tela devolve — instalação real, não a leitura do `spawn` |
+| 17 | **Ver na janela a triagem/comparação e a frota — nada desta rodada de 2026-10-24 foi visto em tela** | O binário em `src-tauri/target/release` é anterior a esta árvore; o que existe é `cargo test` **346**, clippy, `tsc` e `npm run build` verdes. Primeiro passo: `npm run tauri build` e abrir o exe novo. Em **Análise**, projeto 2, pasta `src`: rodar o **embutido** duas vezes e conferir na segunda a faixa de diferença (novos/persistentes/corrigidos e o aviso de correção não comprovada quando a corrida não leu), os filtros de severidade/origem/regra/texto/estado, as facetas com contagem, "carregar mais" e a lista de corrigidos; exportar SARIF da mesma corrida e abrir o arquivo para ver `ruleIndex`, `partialFingerprints`, `baselineState` e `invocations`. No **Dashboard**, com um servidor de chave e um de senha: clicar **Ler frota** e conferir que o de senha **não** abre prompt, que o progresso anda, que **Parar** encerra depois da leitura em curso, que trocar de tela e voltar mantém as leituras e que os chips/barras e os alertas de métricas apontam o mesmo servidor. O que ainda não tem número: o tempo de uma frota real e a diferença visual entre "sem alerta" e "leitura antiga" depois de 10 min |
 
 ## 7. Lacunas honestas do "canivete suíço" (ainda NÃO existe)
 

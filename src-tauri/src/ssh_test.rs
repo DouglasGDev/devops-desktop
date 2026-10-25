@@ -41,9 +41,12 @@ pub fn test(
             cmd.arg("-o").arg("BatchMode=yes");
         }
     }
-    cmd.arg("-o").arg("StrictHostKeyChecking=yes")
-        .arg("-o").arg(format!("ConnectTimeout={CONNECT_TIMEOUT_SECS}"))
-        .arg("-o").arg("LogLevel=ERROR")
+    cmd.arg("-o")
+        .arg("StrictHostKeyChecking=yes")
+        .arg("-o")
+        .arg(format!("ConnectTimeout={CONNECT_TIMEOUT_SECS}"))
+        .arg("-o")
+        .arg("LogLevel=ERROR")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -79,7 +82,8 @@ pub fn test(
         }
     };
 
-    let (status, _stdout, stderr) = wait_with_deadline(child, Duration::from_secs(HARD_DEADLINE_SECS));
+    let (status, _stdout, stderr) =
+        wait_with_deadline(child, Duration::from_secs(HARD_DEADLINE_SECS));
     let duration_ms = start.elapsed().as_millis() as u64;
     let stderr_text = String::from_utf8_lossy(&stderr).trim().to_string();
 
@@ -130,7 +134,9 @@ fn stderr_suffix(stderr: &str) -> String {
 
 fn classify(stderr: &str, exit_code: Option<i64>) -> (String, String) {
     let lower = stderr.to_lowercase();
-    if lower.contains("permission denied") || lower.contains("no more authentication methods available") {
+    if lower.contains("permission denied")
+        || lower.contains("no more authentication methods available")
+    {
         return (
             "auth".into(),
             format!(
@@ -139,7 +145,10 @@ fn classify(stderr: &str, exit_code: Option<i64>) -> (String, String) {
             ),
         );
     }
-    if lower.contains("could not resolve hostname") || lower.contains("name or service not known") || lower.contains("no such host") {
+    if lower.contains("could not resolve hostname")
+        || lower.contains("name or service not known")
+        || lower.contains("no such host")
+    {
         return (
             "dns".into(),
             format!("host não resolvido (DNS){}", stderr_suffix(stderr)),
@@ -148,7 +157,10 @@ fn classify(stderr: &str, exit_code: Option<i64>) -> (String, String) {
     if lower.contains("connection refused") {
         return (
             "refused".into(),
-            format!("conexão recusada — a porta pode estar fechada ou o serviço sshd não está ativo{}", stderr_suffix(stderr)),
+            format!(
+                "conexão recusada — a porta pode estar fechada ou o serviço sshd não está ativo{}",
+                stderr_suffix(stderr)
+            ),
         );
     }
     if lower.contains("timed out") || lower.contains("timeout") {
@@ -170,7 +182,10 @@ fn classify(stderr: &str, exit_code: Option<i64>) -> (String, String) {
             ),
         );
     }
-    if lower.contains("no route to host") || lower.contains("network is unreachable") || lower.contains("network is down") {
+    if lower.contains("no route to host")
+        || lower.contains("network is unreachable")
+        || lower.contains("network is down")
+    {
         return (
             "network".into(),
             format!("sem rota para o host{}", stderr_suffix(stderr)),
@@ -179,13 +194,19 @@ fn classify(stderr: &str, exit_code: Option<i64>) -> (String, String) {
     if lower.contains("connection reset") || lower.contains("connection closed") {
         return (
             "refused".into(),
-            format!("conexão encerrada pelo servidor durante o handshake{}", stderr_suffix(stderr)),
+            format!(
+                "conexão encerrada pelo servidor durante o handshake{}",
+                stderr_suffix(stderr)
+            ),
         );
     }
     match exit_code {
         Some(255) => (
             "other".into(),
-            format!("falha na conexão (ssh retornou 255){}", stderr_suffix(stderr)),
+            format!(
+                "falha na conexão (ssh retornou 255){}",
+                stderr_suffix(stderr)
+            ),
         ),
         Some(c) => (
             "other".into(),
@@ -249,7 +270,10 @@ mod tests {
 
     #[test]
     fn classifica_dns() {
-        let (kind, _) = classify("ssh: Could not resolve hostname nada: Name or service not known", Some(255));
+        let (kind, _) = classify(
+            "ssh: Could not resolve hostname nada: Name or service not known",
+            Some(255),
+        );
         assert_eq!(kind, "dns");
     }
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, onTransferProgress } from "../lib/api";
-import { formatBytes, formatDateTime, formatEta, formatRate, remoteBasename } from "../lib/format";
+import { formatBytes, formatDateTime, formatEta, formatRate, formatRelative, remoteBasename } from "../lib/format";
+import { useInfraMonitor, type Leitura } from "../lib/infraMonitor";
 import type {
   AuditEntry,
   DeployActive,
@@ -59,13 +60,24 @@ const RUN_LABELS: Record<DeployRun["status"], string> = {
   cancelled: "cancelado",
 };
 
-type Alerta = { nivel: "error" | "warning" | "info"; texto: string; acao?: { label: string; view: ViewId } };
+type Alerta = {
+  nivel: "error" | "warning" | "info";
+  texto: string;
+  acao?: { label: string; view?: ViewId; anchor?: string };
+};
 
 /**
- * Alertas derivados do que já está no banco local e das ferramentas realmente
- * detectadas. Nada aqui é suposição: cada linha aponta um estado verificável.
+ * Alertas derivados do que já está no banco local, das ferramentas realmente
+ * detectadas e das leituras de métricas desta sessão. Nada aqui é suposição:
+ * cada linha aponta um estado verificável.
  */
-function montarAlertas(servers: Server[], tools: ToolVersions | null, runs: DeployRun[] | null, projects: Project[]): Alerta[] {
+function montarAlertas(
+  servers: Server[],
+  tools: ToolVersions | null,
+  runs: DeployRun[] | null,
+  projects: Project[],
+  readings: Record<number, Leitura>,
+): Alerta[] {
   const alertas: Alerta[] = [];
 
   if (servers.length === 0) {
@@ -141,6 +153,22 @@ function montarAlertas(servers: Server[], tools: ToolVersions | null, runs: Depl
         acao: { label: "Rever acesso", view: "servers" },
       });
     }
+
+    const leitura = readings[s.id];
+    if (leitura?.error) {
+      alertas.push({
+        nivel: "warning",
+        texto: `A leitura de métricas de "${s.name}" não concluiu: ${leitura.error}`,
+        acao: { label: "Ver leitura", anchor: "infra" },
+      });
+    } else if (leitura?.metrics && leitura.metrics.warnings.length > 0) {
+      const extras = leitura.metrics.warnings.length - 1;
+      alertas.push({
+        nivel: "warning",
+        texto: `"${s.name}": ${leitura.metrics.warnings[0]}${extras > 0 ? ` (+${extras} outro(s) alerta(s))` : ""}.`,
+        acao: { label: "Ver leitura", anchor: "infra" },
+      });
+    }
   }
 
   for (const p of projects) {
@@ -179,11 +207,15 @@ function montarAlertas(servers: Server[], tools: ToolVersions | null, runs: Depl
     });
   }
 
-  return alertas;
+  // O painel mostra os primeiros: o que é erro precisa vir antes de aviso e de
+  // informação, sem perder a ordem em que os fatos foram verificados.
+  const peso: Record<Alerta["nivel"], number> = { error: 0, warning: 1, info: 2 };
+  return alertas.sort((a, b) => peso[a.nivel] - peso[b.nivel]);
 }
 
 export function DashboardView({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
   const { servers, projects, pushToast } = useApp();
+  const { readings } = useInfraMonitor();
   const [recent, setRecent] = useState<AuditEntry[] | null>(null);
   const [failures, setFailures] = useState<AuditEntry[] | null>(null);
   const [runs, setRuns] = useState<DeployRun[] | null>(null);
@@ -247,9 +279,12 @@ export function DashboardView({ onNavigate }: { onNavigate: (v: ViewId) => void 
   const okCount = servers.filter((s) => s.lastStatus === "ok").length;
   const failedCount = servers.filter((s) => s.lastStatus === "failed").length;
   const gitCount = projects.filter((p) => p.isGitRepo).length;
-  const alertas = montarAlertas(servers, tools, runs, projects);
+  const alertas = montarAlertas(servers, tools, runs, projects, readings);
   const ultimo = runs?.[0] ?? null;
   const rodando = transfers.length + inFlight.length;
+  const lidosMetricas = servers.filter((s) => readings[s.id]?.metrics).length;
+  const emAlertaMetricas = servers.filter((s) => (readings[s.id]?.metrics?.warnings.length ?? 0) > 0).length;
+  const ultimaLeitura = Math.max(0, ...Object.values(readings).map((l) => l.readAt ?? 0)) || null;
 
   return (
     <div className="space-y-4">
@@ -259,6 +294,11 @@ export function DashboardView({ onNavigate }: { onNavigate: (v: ViewId) => void 
           <p className="mt-1 text-2xl font-semibold tabular-nums">{servers.length}</p>
           <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
             {okCount} com teste bem-sucedido · {failedCount} com falha
+          </p>
+          <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+            {lidosMetricas > 0
+              ? `${lidosMetricas} com métricas · ${emAlertaMetricas} em alerta`
+              : "Nenhuma leitura de métricas nesta sessão"}
           </p>
         </Card>
         <Card className="p-4">
@@ -280,7 +320,9 @@ export function DashboardView({ onNavigate }: { onNavigate: (v: ViewId) => void 
                 )}
           </p>
           <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
-            Métricas de CPU, memória e disco são lidas do servidor quando você pedir.
+            {ultimaLeitura
+              ? `Métricas lidas ${formatRelative(Math.floor(ultimaLeitura / 1000))} · nada é consultado sozinho.`
+              : "Métricas de CPU, memória e disco são lidas do servidor quando você pedir."}
           </p>
         </Card>
         <Card className="p-4">
@@ -400,7 +442,12 @@ export function DashboardView({ onNavigate }: { onNavigate: (v: ViewId) => void 
                       <button
                         type="button"
                         className="mt-0.5 text-[11px] font-medium text-teal-700 underline-offset-2 hover:underline dark:text-teal-300"
-                        onClick={() => onNavigate(acao.view)}
+                        onClick={() => {
+                          if (acao.view) onNavigate(acao.view);
+                          if (acao.anchor) {
+                            document.getElementById(acao.anchor)?.scrollIntoView({ behavior: "smooth", block: "start" });
+                          }
+                        }}
                       >
                         {acao.label}
                       </button>

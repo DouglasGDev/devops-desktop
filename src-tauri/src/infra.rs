@@ -84,7 +84,7 @@ pub fn metrics_script() -> String {
         "echo \"memavail $(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)\"",
         "echo \"swaptotal $(awk '/^SwapTotal:/{print $2}' /proc/meminfo 2>/dev/null)\"",
         "echo \"swapfree $(awk '/^SwapFree:/{print $2}' /proc/meminfo 2>/dev/null)\"",
-        "df -Pk 2>/dev/null | awk 'NR>1 && $2>0 {out=\"disk \"$2\" \"$3\" \"$4; for (i=6;i<=NF;i++) out=out\" \"$i; print out}'",
+        "df -Pk 2>/dev/null | awk 'NR>1 && $2>0 {out=\"disk \"$1\" \"$2\" \"$3\" \"$4; for (i=6;i<=NF;i++) out=out\" \"$i; print out}'",
         "if command -v docker >/dev/null 2>&1; then",
         "  echo \"docker presente\"",
         "  docker ps --format 'ctr {{.Names}}|{{.Status}}' 2>/dev/null",
@@ -117,13 +117,55 @@ fn decimal(map: &std::collections::HashMap<String, String>, key: &str) -> Option
     field(map, key)?.parse().ok()
 }
 
+/// Sistemas de arquivos do próprio núcleo (tmpfs, devtmpfs, cgroup…) não são
+/// discos do servidor: listá-los enche a tela de barras que não representam
+/// armazenamento e pode gerar alerta falso. `overlay` fica de fora da lista de
+/// descartados porque, dentro de um contêiner, ele é o sistema de arquivos real.
+fn sistema_efemero(source: &str, mount: &str) -> bool {
+    if mount == "/" {
+        return false;
+    }
+    let fonte = source.trim();
+    matches!(
+        fonte,
+        "tmpfs"
+            | "devtmpfs"
+            | "none"
+            | "udev"
+            | "ramfs"
+            | "shm"
+            | "proc"
+            | "sysfs"
+            | "cgroup"
+            | "cgroup2"
+            | "devpts"
+            | "mqueue"
+            | "hugetlbfs"
+            | "debugfs"
+            | "tracefs"
+            | "securityfs"
+            | "pstore"
+            | "bpf"
+            | "configfs"
+            | "fusectl"
+            | "binfmt_misc"
+            | "autofs"
+            | "nsfs"
+    ) || mount == "/dev"
+        || mount == "/proc"
+        || mount == "/sys"
+        || mount.starts_with("/proc/")
+        || mount.starts_with("/sys/")
+}
+
 /// Interpreta a saída do script de métricas. `disk` é o único caso com campos
-/// variáveis: três números e o ponto de montagem no resto da linha.
+/// variáveis: origem, três números e o ponto de montagem no resto da linha.
 pub fn parse_metrics(server_id: i64, server_name: &str, raw: &str) -> ServerMetrics {
     let mut fields: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut disks = Vec::new();
     let mut services = Vec::new();
     let mut notes = Vec::new();
+    let mut discos_omitidos = 0usize;
 
     for line in raw.lines() {
         let line = line.trim_end();
@@ -132,21 +174,33 @@ pub fn parse_metrics(server_id: i64, server_name: &str, raw: &str) -> ServerMetr
         }
         let mut parts = line.split_whitespace();
         let Some(key) = parts.next() else { continue };
-        let rest = line[line.find(key).unwrap_or(0) + key.len()..].trim().to_string();
+        let rest = line[line.find(key).unwrap_or(0) + key.len()..]
+            .trim()
+            .to_string();
         match key {
             "disk" => {
-                let mut nums = rest.splitn(4, ' ');
-                let (Some(total), Some(used), Some(avail), Some(mount)) =
-                    (nums.next(), nums.next(), nums.next(), nums.next())
-                else {
+                let mut cols = rest.splitn(5, ' ');
+                let (Some(source), Some(total), Some(used), Some(avail), Some(mount)) = (
+                    cols.next(),
+                    cols.next(),
+                    cols.next(),
+                    cols.next(),
+                    cols.next(),
+                ) else {
                     continue;
                 };
-                let (Ok(total), Ok(used), Ok(avail)) =
-                    (total.parse::<u64>(), used.parse::<u64>(), avail.parse::<u64>())
-                else {
+                let (Ok(total), Ok(used), Ok(avail)) = (
+                    total.parse::<u64>(),
+                    used.parse::<u64>(),
+                    avail.parse::<u64>(),
+                ) else {
                     continue;
                 };
                 if total == 0 {
+                    continue;
+                }
+                if sistema_efemero(source, mount) {
+                    discos_omitidos += 1;
                     continue;
                 }
                 disks.push(DiskUsage {
@@ -190,7 +244,9 @@ pub fn parse_metrics(server_id: i64, server_name: &str, raw: &str) -> ServerMetr
                 _ => "Docker disponível; a lista acima é a dos containers em execução.".to_string(),
             }),
             "systemd" => notes.push(match rest.as_str() {
-                "ausente" => "systemd não está disponível; serviços não puderam ser listados.".to_string(),
+                "ausente" => {
+                    "systemd não está disponível; serviços não puderam ser listados.".to_string()
+                }
                 _ => String::new(),
             }),
             _ => {
@@ -199,6 +255,11 @@ pub fn parse_metrics(server_id: i64, server_name: &str, raw: &str) -> ServerMetr
         }
     }
     notes.retain(|n| !n.is_empty());
+    if discos_omitidos > 0 {
+        notes.push(format!(
+            "{discos_omitidos} sistema(s) de arquivos temporário(s) do host (tmpfs, /proc, /sys…) ficaram fora da lista de discos."
+        ));
+    }
 
     let cpu_count = number(&fields, "cpus").map(|v| v as u32);
     let load1 = decimal(&fields, "load1");
@@ -219,7 +280,10 @@ pub fn parse_metrics(server_id: i64, server_name: &str, raw: &str) -> ServerMetr
         }
     }
     if let (Some(total), Some(avail)) = (mem_total_kb, mem_available_kb) {
-        let percentual = total.saturating_sub(avail).checked_mul(100).and_then(|v| v.checked_div(total));
+        let percentual = total
+            .saturating_sub(avail)
+            .checked_mul(100)
+            .and_then(|v| v.checked_div(total));
         if let Some(used_percent) = percentual {
             if used_percent >= MEM_WARN_PERCENT {
                 warnings.push(format!(
@@ -237,7 +301,12 @@ pub fn parse_metrics(server_id: i64, server_name: &str, raw: &str) -> ServerMetr
         }
     }
     if disks.is_empty() {
-        warnings.push("o servidor não informou nenhum sistema de arquivos legível via df".to_string());
+        warnings.push(if discos_omitidos > 0 {
+            "o servidor só informou sistemas de arquivos temporários; nenhum disco de armazenamento foi listado"
+                .to_string()
+        } else {
+            "o servidor não informou nenhum sistema de arquivos legível via df".to_string()
+        });
     }
 
     ServerMetrics {
@@ -282,10 +351,7 @@ pub fn human_kb(kb: u64) -> String {
 }
 
 /// Roda a leitura no servidor e interpreta a saída.
-pub fn collect(
-    server: &Server,
-    askpass: Option<&AskPass>,
-) -> Result<ServerMetrics, String> {
+pub fn collect(server: &Server, askpass: Option<&AskPass>) -> Result<ServerMetrics, String> {
     let never = AtomicBool::new(false);
     let result = sshexec::run_script(
         server,
@@ -303,7 +369,10 @@ pub fn collect(
         ));
     }
     if result.cancelled {
-        return Err(format!("a leitura de métricas em “{}” foi interrompida", server.name));
+        return Err(format!(
+            "a leitura de métricas em “{}” foi interrompida",
+            server.name
+        ));
     }
     if !result.ok() {
         return Err(format!(
@@ -331,8 +400,9 @@ memtotal 7984124
 memavail 2013456
 swaptotal 2097148
 swapfree 2097148
-disk 8120852 6123400 1564320 /
-disk 5120852 123400 4765320 /var/log
+disk /dev/sda1 8120852 6123400 1564320 /
+disk /dev/sdb1 5120852 123400 4765320 /var/log
+disk tmpfs 65536 0 65536 /dev/shm
 ctr api|Up 3 hours
 ctr worker|Up 12 minutes
 docker presente
@@ -365,37 +435,102 @@ svc ssh.service
         assert_eq!(m.disks[1].mount, "/var/log");
         assert_eq!(m.disks[1].use_percent, 2);
         // 75% não passa do limite de 85%: nenhum alerta de disco aqui.
-        assert!(!m.warnings.iter().any(|w| w.starts_with("disco / ")), "{:?}", m.warnings);
+        assert!(
+            !m.warnings.iter().any(|w| w.starts_with("disco / ")),
+            "{:?}",
+            m.warnings
+        );
+        assert!(
+            m.notes.iter().any(|n| n.contains("1 sistema")),
+            "o tmpfs omitido precisa aparecer como nota: {:?}",
+            m.notes
+        );
+    }
+
+    #[test]
+    fn disco_temporario_nao_entra_como_disco_nem_gera_alerta() {
+        let raw = "\
+host container
+disk overlay 1000 100 900 /
+disk tmpfs 65536 65536 0 /dev/shm
+disk proc 1024 0 1024 /proc
+disk sysfs 1024 0 1024 /sys
+disk cgroup2 1024 0 1024 /sys/fs/cgroup
+";
+        let m = parse_metrics(9, "container", raw);
+        assert_eq!(m.disks.len(), 1, "{:?}", m.disks);
+        assert_eq!(
+            m.disks[0].mount, "/",
+            "o overlay da raiz é o disco real do contêiner"
+        );
+        assert!(
+            !m.warnings.iter().any(|w| w.starts_with("disco ")),
+            "{:?}",
+            m.warnings
+        );
+        assert!(
+            m.notes.iter().any(|n| n.contains("4 sistema")),
+            "quatro sistemas temporários foram omitidos: {:?}",
+            m.notes
+        );
     }
 
     #[test]
     fn containers_e_servicos_sao_lidos_por_linha() {
         let m = parse_metrics(1, "web", SAMPLE);
-        let api = m.services.iter().find(|s| s.name == "api").expect("container api");
+        let api = m
+            .services
+            .iter()
+            .find(|s| s.name == "api")
+            .expect("container api");
         assert_eq!(api.kind, "container");
         assert_eq!(api.state, "Up 3 hours");
-        let worker = m.services.iter().find(|s| s.name == "worker").expect("worker");
-        assert_eq!(worker.state, "Up 12 minutes", "o separador não pode quebrar a linha");
+        let worker = m
+            .services
+            .iter()
+            .find(|s| s.name == "worker")
+            .expect("worker");
+        assert_eq!(
+            worker.state, "Up 12 minutes",
+            "o separador não pode quebrar a linha"
+        );
         assert_eq!(m.services.iter().filter(|s| s.kind == "serviço").count(), 2);
         assert!(
             m.notes.iter().any(|n| n.contains("Docker disponível")),
             "{:?}",
             m.notes
         );
-        assert_eq!(m.notes.len(), 1, "systemd presente não gera nota: {:?}", m.notes);
+        assert!(
+            !m.notes.iter().any(|n| n.contains("systemd")),
+            "systemd presente não gera nota: {:?}",
+            m.notes
+        );
     }
 
     #[test]
     fn ferramentas_ausentes_aparecem_como_nota_e_nada_inventado() {
-        let raw = "host only\nkernel 1.0\nuptime 10\nload 0.1 0.1 0.1\ndocker ausente\nsystemd ausente\n";
+        let raw =
+            "host only\nkernel 1.0\nuptime 10\nload 0.1 0.1 0.1\ndocker ausente\nsystemd ausente\n";
         let m = parse_metrics(2, "minimal", raw);
         assert_eq!(m.hostname.as_deref(), Some("only"));
         assert!(m.mem_total_kb.is_none());
         assert!(m.disks.is_empty());
         assert!(m.services.is_empty());
-        assert!(m.notes.iter().any(|n| n.contains("Docker")), "{:?}", m.notes);
-        assert!(m.notes.iter().any(|n| n.contains("systemd")), "{:?}", m.notes);
-        assert!(m.warnings.iter().any(|w| w.contains("df")), "{:?}", m.warnings);
+        assert!(
+            m.notes.iter().any(|n| n.contains("Docker")),
+            "{:?}",
+            m.notes
+        );
+        assert!(
+            m.notes.iter().any(|n| n.contains("systemd")),
+            "{:?}",
+            m.notes
+        );
+        assert!(
+            m.warnings.iter().any(|w| w.contains("df")),
+            "{:?}",
+            m.warnings
+        );
     }
 
     #[test]
@@ -406,12 +541,24 @@ load 12.0 11.0 10.0
 cpus 2
 memtotal 1000
 memavail 50
-disk 1000 950 50 /data
+disk /dev/sda1 1000 950 50 /data
 ";
         let m = parse_metrics(3, "apertado", raw);
-        assert!(m.warnings.iter().any(|w| w.contains("/data")), "{:?}", m.warnings);
-        assert!(m.warnings.iter().any(|w| w.contains("memória")), "{:?}", m.warnings);
-        assert!(m.warnings.iter().any(|w| w.contains("carga")), "{:?}", m.warnings);
+        assert!(
+            m.warnings.iter().any(|w| w.contains("/data")),
+            "{:?}",
+            m.warnings
+        );
+        assert!(
+            m.warnings.iter().any(|w| w.contains("memória")),
+            "{:?}",
+            m.warnings
+        );
+        assert!(
+            m.warnings.iter().any(|w| w.contains("carga")),
+            "{:?}",
+            m.warnings
+        );
     }
 
     #[test]
@@ -434,17 +581,30 @@ disk 1000 950 50 /data
     fn script_nao_escreve_nem_presume_ferramentas() {
         let script = metrics_script();
         for proibido in ["rm ", "mv ", "touch ", "echo -e", " apt ", "yum", "install"] {
-            assert!(!script.contains(proibido), "o script não pode conter {proibido:?}");
+            assert!(
+                !script.contains(proibido),
+                "o script não pode conter {proibido:?}"
+            );
         }
         // O único destino de redirecionamento permitido é o buraco negro. As
         // demais ocorrências de `>` e `<` no script são comparações do awk.
         let mut sobra = metrics_script();
-        for segura in ["2>/dev/null", ">/dev/null 2>&1", "2>&1", "NR>1", "$2>0", "i<=NF"] {
+        for segura in [
+            "2>/dev/null",
+            ">/dev/null 2>&1",
+            "2>&1",
+            "NR>1",
+            "$2>0",
+            "i<=NF",
+        ] {
             sobra = sobra.replace(segura, "");
         }
         assert!(!sobra.contains('>'), "sobrou um redirecionamento: {sobra}");
         assert!(!sobra.contains('<'), "a leitura não consome stdin");
-        assert!(script.contains("command -v docker"), "docker é verificado antes de usado");
+        assert!(
+            script.contains("command -v docker"),
+            "docker é verificado antes de usado"
+        );
         assert!(script.contains("df -Pk"), "df em modo POSIX");
         assert!(script.contains("2>/dev/null"));
     }

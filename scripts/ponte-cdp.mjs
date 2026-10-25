@@ -17,7 +17,8 @@ if (!alvo) {
   console.error("diga a expressão JavaScript a avaliar, ou --mouse, --click-node, --drag-node");
   process.exit(2);
 }
-const lista = await (await fetch("http://127.0.0.1:9223/json/list")).json();
+// O CDP do WebView2 só expõe HTTP em localhost; não há como usar HTTPS aqui.
+const lista = await (await fetch("http://127.0.0.1:9223/json/list")).json(); // nosemgrep
 const pagina = lista.find((t) => t.type === "page" && t.url.includes("localhost"));
 if (!pagina) {
   console.error("nenhuma página do aplicativo no CDP:", lista.map((t) => `${t.type} ${t.url}`));

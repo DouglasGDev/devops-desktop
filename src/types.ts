@@ -661,8 +661,10 @@ export interface AnalysisTool {
   duracaoMs: number;
   /** Quantas regras o conjunto embarcado declara, lido do próprio texto. */
   regras: number;
-  /** De onde o caminho veio: `configuração` ou `path`. */
+  /** De onde o caminho veio: `configuração`, `path` ou `python-scripts`. */
   origem: string;
+  /** O valor apontado em Configurações, mesmo quando ele não resolveu. */
+  apontado: string;
   /** O que a ferramenta respondeu na sondagem de versão, em uma linha. */
   resposta: string;
 }
@@ -735,6 +737,61 @@ export interface AnalysisFinding {
   message: string;
   cwe: string | null;
   snippet: string | null;
+  /** Identidade estável entre corridas; não muda quando a linha muda. */
+  fingerprint: string;
+}
+
+/** Um achado com o estado em relação à corrida anterior. `null` é "sem base". */
+export interface AnalysisFindingView extends AnalysisFinding {
+  baseline: "novo" | "persistente" | null;
+}
+
+export interface AchadosFiltro {
+  severidade?: string | null;
+  origem?: string | null;
+  regra?: string | null;
+  busca?: string | null;
+  /** Só faz sentido com uma corrida comparável: sem base, os dois nomes não existem. */
+  estado?: "novo" | "persistente" | null;
+  limite?: number | null;
+  deslocamento?: number | null;
+}
+
+export interface Faceta {
+  valor: string;
+  quantidade: number;
+}
+
+export interface FindingsPage {
+  itens: AnalysisFindingView[];
+  /** Quantos achados atendem ao filtro, não só os desta página. */
+  total: number;
+  /** O total da corrida sem filtro. */
+  totalGeral: number;
+  deslocamento: number;
+  limite: number;
+  facetas: {
+    severidades: Faceta[];
+    origens: Faceta[];
+    regras: Faceta[];
+  };
+}
+
+export interface BaselineRun {
+  id: number;
+  startedAt: string;
+  tool: string;
+  toolVersion: string | null;
+}
+
+export interface AnalysisComparison {
+  baseline: BaselineRun | null;
+  novos: number;
+  persistentes: number;
+  corrigidos: number;
+  /** Falso quando a corrida atual não concluiu: ausência não é prova de correção. */
+  corrigidosConclusivos: boolean;
+  corrigidosItens: AnalysisFinding[];
 }
 
 /** O pedido de varredura. `path` é uma subpasta relativa dentro do projeto. */
@@ -776,6 +833,20 @@ export interface AnalysisPackage {
     contagem: AnalysisCounts & { total: number; noCorte: number };
   };
   decisoes: { acao: string; motivo: string; evidencia: string }[];
+  comparacao: {
+    base: { id: number; inicio: string; ferramenta: string; versao: string | null } | null;
+    novos: number;
+    persistentes: number;
+    corrigidos: number;
+    corrigidosConclusivos: boolean;
+    corrigidosExemplos: {
+      regra: string;
+      severidade: string;
+      arquivo: string;
+      linha: number;
+      mensagem: string;
+    }[];
+  };
   porRegra: {
     regra: string;
     severidade: string;
@@ -784,6 +855,7 @@ export interface AnalysisPackage {
     exemplos: string[];
   }[];
   achados: {
+    impressao: string;
     regra: string;
     origem: string;
     severidade: string;

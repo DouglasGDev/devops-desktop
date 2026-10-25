@@ -1,16 +1,19 @@
 use std::{
+    collections::BTreeMap,
     ops::Deref,
     path::PathBuf,
     sync::{Arc, Condvar, Mutex},
 };
 
-use rusqlite::{Connection, OptionalExtension, Row};
+use rusqlite::{params_from_iter, types::Value, Connection, OptionalExtension, Row};
 use tauri::Manager;
 
 use crate::models::{
-    AnalysisCounts, AnalysisFinding, AnalysisRun, AuditEntry, DefinitionRevision, DeployProfile,
-    DeployProfileInput, DeployRun, DeployRunStep, PipelineNode, PipelineNodeInput, Project,
-    Routine, RoutineInput, RoutineParam, Server, ServerInput, StepLogLine, TerminalHistoryEntry,
+    AchadosFiltro, AnalysisComparison, AnalysisCounts, AnalysisFinding, AnalysisFindingView,
+    AnalysisRun, AuditEntry, BaselineRun, DefinitionRevision, DeployProfile, DeployProfileInput,
+    DeployRun, DeployRunStep, Faceta, FindingsFacets, FindingsPage, PipelineNode,
+    PipelineNodeInput, Project, Routine, RoutineInput, RoutineParam, Server, ServerInput,
+    StepLogLine, TerminalHistoryEntry,
 };
 
 pub struct AppState {
@@ -84,8 +87,9 @@ impl Db {
         match &self.arquivo {
             Some(caminho) => {
                 drop(ociosas);
-                let conn = Connection::open(caminho)
-                    .map_err(|e| format!("não foi possível abrir o banco {}: {e}", caminho.display()))?;
+                let conn = Connection::open(caminho).map_err(|e| {
+                    format!("não foi possível abrir o banco {}: {e}", caminho.display())
+                })?;
                 sintonizar(&conn)?;
                 Ok(Emprestimo {
                     banco: self,
@@ -117,7 +121,7 @@ impl Db {
         }
         // Notifica mesmo quando a conexão foi fechada em vez de guardada: quem
         // espera pela conexão única do teste não pode acordar sozinho.
-        let _ = self.espera.notify_one();
+        self.espera.notify_one();
     }
 }
 
@@ -589,21 +593,61 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS idx_step_logs_run_pos
         ON deploy_step_logs(run_id, position, seq);
     "#,
+    // v12 — cada achado ganha uma identidade que não depende da linha. A linha
+    // muda quando o arquivo cresce; o defeito continua o mesmo. É essa identidade
+    // que permite comparar duas corridas e dizer o que é novo, o que persiste e o
+    // que foi corrigido — sem ela, toda varredura parecia começar do zero.
+    //
+    // A tabela é reconstruída em vez de receber um `ALTER`: a migração precisa
+    // poder rodar também sobre uma base que já traga a coluna (um retrato, uma
+    // cópia), e `ADD COLUMN` não tem a forma idempotente que as outras têm.
+    r#"
+    PRAGMA foreign_keys=OFF;
+    CREATE TABLE analysis_findings_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL REFERENCES analysis_runs(id) ON DELETE CASCADE,
+        rule_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        severity TEXT NOT NULL CHECK (severity IN ('ERROR','WARNING','INFO')),
+        file TEXT NOT NULL,
+        line_start INTEGER NOT NULL,
+        line_end INTEGER NOT NULL,
+        message TEXT NOT NULL,
+        cwe TEXT,
+        snippet TEXT,
+        fingerprint TEXT NOT NULL DEFAULT ''
+    );
+    INSERT INTO analysis_findings_new (id, run_id, rule_id, source, severity, file,
+        line_start, line_end, message, cwe, snippet)
+    SELECT id, run_id, rule_id, source, severity, file, line_start, line_end, message, cwe, snippet
+    FROM analysis_findings;
+    DROP TABLE analysis_findings;
+    ALTER TABLE analysis_findings_new RENAME TO analysis_findings;
+    CREATE INDEX IF NOT EXISTS idx_analysis_findings_run
+        ON analysis_findings(run_id, severity, file);
+    CREATE INDEX IF NOT EXISTS idx_analysis_findings_fingerprint
+        ON analysis_findings(run_id, fingerprint);
+    PRAGMA foreign_keys=ON;
+    "#,
 ];
 
 /// A pasta onde o aplicativo guarda o que é dele: o banco e, ao lado dele, as
 /// regras de análise que o semgrep lê do disco. Uma dona única porque duas
 /// janelas resolvendo caminhos diferentes escreveriam em dois lugares.
 pub fn pasta_de_dados(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app
-        .path()
+    app.path()
         .app_data_dir()
         .map_err(|e| format!("não foi possível determinar o diretório de dados: {e}"))
 }
 
 pub fn init(app: &tauri::AppHandle) -> Result<DbHandle, String> {
     let dir = pasta_de_dados(app)?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("não foi possível criar o diretório de dados {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        format!(
+            "não foi possível criar o diretório de dados {}: {e}",
+            dir.display()
+        )
+    })?;
     let db_path = dir.join("devops-desktop.db");
     let conn = Connection::open(&db_path)
         .map_err(|e| format!("não foi possível abrir o banco {}: {e}", db_path.display()))?;
@@ -633,6 +677,12 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), String> {
     }
     if version < MIGRATIONS.len() as i64 {
         retrato_inicial_das_definicoes(conn)?;
+    }
+    // A impressão é calculada em Rust, não em SQL: a base antiga recebe a mesma
+    // identidade que uma corrida nova receberia, então a primeira comparação
+    // depois da atualização não inventa "novo" para tudo.
+    if version < 12 {
+        recalcular_impressoes(conn)?;
     }
     Ok(())
 }
@@ -697,7 +747,9 @@ const PROJECT_COLUMNS: &str = "id, name, local_path, is_git_repo, git_branch, gi
 
 pub fn list_servers(conn: &Connection) -> Result<Vec<Server>, String> {
     let mut stmt = conn
-        .prepare(&format!("SELECT {SERVER_COLUMNS} FROM servers ORDER BY environment, name"))
+        .prepare(&format!(
+            "SELECT {SERVER_COLUMNS} FROM servers ORDER BY environment, name"
+        ))
         .map_err(|e| format!("falha ao consultar servidores: {e}"))?;
     let rows = stmt
         .query_map([], row_to_server)
@@ -718,7 +770,11 @@ pub fn get_server(conn: &Connection, id: i64) -> Result<Server, String> {
     .map_err(|e| format!("servidor #{id} não encontrado: {e}"))
 }
 
-pub fn insert_server(conn: &Connection, input: &ServerInput, source: &str) -> Result<Server, String> {
+pub fn insert_server(
+    conn: &Connection,
+    input: &ServerInput,
+    source: &str,
+) -> Result<Server, String> {
     let now = now_rfc3339();
     conn.execute(
         "INSERT INTO servers (name, host, port, username, auth_method, identity_file, ssh_alias, environment, group_name, notes, source, created_at, updated_at)
@@ -743,7 +799,11 @@ pub fn insert_server(conn: &Connection, input: &ServerInput, source: &str) -> Re
     get_server(conn, id)
 }
 
-pub fn update_server_row(conn: &Connection, id: i64, input: &ServerInput) -> Result<Server, String> {
+pub fn update_server_row(
+    conn: &Connection,
+    id: i64,
+    input: &ServerInput,
+) -> Result<Server, String> {
     let now = now_rfc3339();
     let affected = conn
         .execute(
@@ -797,7 +857,10 @@ fn apagar_modelos_e_execucoes(conn: &Connection, modelos: &[i64]) -> Result<usiz
     )
     .map_err(|e| format!("falha ao remover os deploys registrados: {e}"))?;
     let afetados = conn
-        .execute(&format!("DELETE FROM deploy_profiles WHERE id IN ({lista})"), [])
+        .execute(
+            &format!("DELETE FROM deploy_profiles WHERE id IN ({lista})"),
+            [],
+        )
         .map_err(|e| format!("falha ao remover os modelos de deploy: {e}"))?;
     Ok(afetados)
 }
@@ -830,7 +893,13 @@ pub fn delete_server_row(conn: &Connection, id: i64) -> Result<usize, String> {
     Ok(removidos)
 }
 
-pub fn server_exists(conn: &Connection, alias: &str, host: &str, user: &str, port: i64) -> Result<bool, String> {
+pub fn server_exists(
+    conn: &Connection,
+    alias: &str,
+    host: &str,
+    user: &str,
+    port: i64,
+) -> Result<bool, String> {
     conn.query_row(
         "SELECT COUNT(*) FROM servers WHERE (ssh_alias = ?1 AND ?1 IS NOT NULL) OR (host = ?2 AND username = ?3 AND port = ?4)",
         rusqlite::params![alias, host, user, port],
@@ -857,7 +926,9 @@ pub fn record_connection_status(
 
 pub fn list_projects(conn: &Connection) -> Result<Vec<Project>, String> {
     let mut stmt = conn
-        .prepare(&format!("SELECT {PROJECT_COLUMNS} FROM projects ORDER BY name"))
+        .prepare(&format!(
+            "SELECT {PROJECT_COLUMNS} FROM projects ORDER BY name"
+        ))
         .map_err(|e| format!("falha ao consultar projetos: {e}"))?;
     let rows = stmt
         .query_map([], row_to_project)
@@ -910,7 +981,9 @@ pub fn update_project_row(
 ) -> Result<Project, String> {
     if let Some(sid) = default_server_id {
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM servers WHERE id = ?1", [sid], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM servers WHERE id = ?1", [sid], |r| {
+                r.get(0)
+            })
             .map_err(|e| format!("falha ao validar servidor: {e}"))?;
         if count == 0 {
             return Err(format!("servidor #{sid} não existe"));
@@ -965,7 +1038,8 @@ fn clean_optional(value: &Option<String>) -> Option<String> {
         .map(str::to_string)
 }
 
-const ROUTINE_COLUMNS: &str = "id, name, description, command, danger, params, is_builtin, created_at, updated_at";
+const ROUTINE_COLUMNS: &str =
+    "id, name, description, command, danger, params, is_builtin, created_at, updated_at";
 
 fn row_to_routine(row: &Row) -> rusqlite::Result<Routine> {
     let params_json: String = row.get("params")?;
@@ -985,7 +1059,9 @@ fn row_to_routine(row: &Row) -> rusqlite::Result<Routine> {
 
 pub fn list_routines(conn: &Connection) -> Result<Vec<Routine>, String> {
     let mut stmt = conn
-        .prepare(&format!("SELECT {ROUTINE_COLUMNS} FROM routines ORDER BY is_builtin DESC, name"))
+        .prepare(&format!(
+            "SELECT {ROUTINE_COLUMNS} FROM routines ORDER BY is_builtin DESC, name"
+        ))
         .map_err(|e| format!("falha ao consultar rotinas: {e}"))?;
     let rows = stmt
         .query_map([], row_to_routine)
@@ -1035,7 +1111,11 @@ pub fn insert_routine(conn: &Connection, input: &RoutineInput) -> Result<Routine
     get_routine(conn, conn.last_insert_rowid())
 }
 
-pub fn update_routine_row(conn: &Connection, id: i64, input: &RoutineInput) -> Result<Routine, String> {
+pub fn update_routine_row(
+    conn: &Connection,
+    id: i64,
+    input: &RoutineInput,
+) -> Result<Routine, String> {
     let now = now_rfc3339();
     let params_json = routine_params_json(&input.params)?;
     let affected = conn
@@ -1181,7 +1261,11 @@ fn guardar_executor(input: &DeployProfileInput) -> ExecutorGuardado {
 
 fn exists(conn: &Connection, table: &str, id: i64, label: &str) -> Result<(), String> {
     let count: i64 = conn
-        .query_row(&format!("SELECT COUNT(*) FROM {table} WHERE id = ?1"), [id], |r| r.get(0))
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE id = ?1"),
+            [id],
+            |r| r.get(0),
+        )
         .map_err(|e| format!("falha ao validar {label}: {e}"))?;
     if count == 0 {
         return Err(format!("{label} #{id} não existe"));
@@ -1290,7 +1374,10 @@ fn gravar_revisao(conn: &Connection, p: &DeployProfile) -> Result<(), String> {
 }
 
 /// As versões salvas de uma definição, da mais nova para a mais antiga.
-pub fn list_revisions(conn: &Connection, profile_id: i64) -> Result<Vec<DefinitionRevision>, String> {
+pub fn list_revisions(
+    conn: &Connection,
+    profile_id: i64,
+) -> Result<Vec<DefinitionRevision>, String> {
     let mut stmt = conn
         .prepare("SELECT version, spec, saved_at FROM pipeline_revisions WHERE profile_id = ?1 ORDER BY version DESC")
         .map_err(|e| format!("falha ao preparar o histórico da definição: {e}"))?;
@@ -1533,7 +1620,10 @@ fn row_to_node(row: &Row) -> rusqlite::Result<PipelineNode> {
 /// Os nós salvos de uma definição, na ordem em que aparecem na tela. Lista vazia
 /// significa uma coisa só: a definição roda o pipeline linear de quinze etapas que
 /// já existia — não há grafo "escondido" nem default inventado.
-pub fn list_pipeline_nodes(conn: &Connection, profile_id: i64) -> Result<Vec<PipelineNode>, String> {
+pub fn list_pipeline_nodes(
+    conn: &Connection,
+    profile_id: i64,
+) -> Result<Vec<PipelineNode>, String> {
     let mut stmt = conn
         .prepare(&format!(
             "SELECT {NODE_COLUMNS} FROM pipeline_nodes WHERE profile_id = ?1 ORDER BY x, y, node_key"
@@ -1649,7 +1739,10 @@ pub fn record_terminal_command(
     Ok(())
 }
 
-pub fn list_terminal_history(conn: &Connection, limit: i64) -> Result<Vec<TerminalHistoryEntry>, String> {
+pub fn list_terminal_history(
+    conn: &Connection,
+    limit: i64,
+) -> Result<Vec<TerminalHistoryEntry>, String> {
     let mut stmt = conn
         .prepare("SELECT id, ts, server_id, server_name, command FROM terminal_history ORDER BY id DESC LIMIT ?1")
         .map_err(|e| format!("falha ao consultar histórico do terminal: {e}"))?;
@@ -1846,15 +1939,14 @@ pub fn read_step_logs(
     busca: Option<&str>,
     limite: i64,
 ) -> Result<Vec<StepLogLine>, String> {
-    let termo = busca
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(|t| {
-            format!(
-                "%{}%",
-                t.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
-            )
-        });
+    let termo = busca.map(str::trim).filter(|t| !t.is_empty()).map(|t| {
+        format!(
+            "%{}%",
+            t.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        )
+    });
     // O tope é por bloco de tentativa, não pela leitura inteira: um bloco grande não
     // pode esconder o seguinte, e é no fim de cada bloco que o motor escreve o aviso
     // de corte.
@@ -1962,13 +2054,18 @@ pub fn get_run(conn: &Connection, run_id: i64) -> Result<DeployRun, String> {
         .query_map([run_id], row_to_step)
         .map_err(|e| format!("falha ao consultar etapas do deploy: {e}"))?;
     for r in rows {
-        base.steps.push(r.map_err(|e| format!("falha ao ler etapa do deploy: {e}"))?);
+        base.steps
+            .push(r.map_err(|e| format!("falha ao ler etapa do deploy: {e}"))?);
     }
     Ok(base)
 }
 
 /// Histórico de deploys, sem as etapas (o detalhe vem em `get_run`).
-pub fn list_runs(conn: &Connection, project_id: Option<i64>, limit: i64) -> Result<Vec<DeployRun>, String> {
+pub fn list_runs(
+    conn: &Connection,
+    project_id: Option<i64>,
+    limit: i64,
+) -> Result<Vec<DeployRun>, String> {
     let sql = match project_id {
         Some(_) => format!(
             "SELECT {RUN_SELECT} {RUN_FROM} WHERE p.project_id = ?1 ORDER BY r.started_at DESC LIMIT ?2"
@@ -2001,9 +2098,11 @@ pub fn list_runs(conn: &Connection, project_id: Option<i64>, limit: i64) -> Resu
 }
 
 pub fn setting_value(conn: &Connection, key: &str) -> Result<Option<String>, String> {
-    conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0))
-        .optional()
-        .map_err(|e| format!("falha ao ler configuração: {e}"))
+    conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+        r.get(0)
+    })
+    .optional()
+    .map_err(|e| format!("falha ao ler configuração: {e}"))
 }
 
 // ---------- análise de código-fonte (plano CI/CD, etapa 5) ----------
@@ -2083,7 +2182,8 @@ pub fn fechar_analise(conn: &Connection, run_id: i64, run: &AnalysisRun) -> Resu
             run.exit_code,
             run.tool_errors,
             run.blocked as i64,
-            serde_json::to_string(&run.counts).map_err(|e| format!("falha ao gravar a contagem: {e}"))?,
+            serde_json::to_string(&run.counts)
+                .map_err(|e| format!("falha ao gravar a contagem: {e}"))?,
             run.note,
         ],
     )
@@ -2091,14 +2191,134 @@ pub fn fechar_analise(conn: &Connection, run_id: i64, run: &AnalysisRun) -> Resu
     Ok(())
 }
 
-/// Grava os achados de uma varredura. Um achado sem severidade conhecida não
-/// chega aqui — o `CHECK` da tabela recusa, e a mensagem dele diz qual linha.
-pub fn gravar_achados(conn: &Connection, run_id: i64, achados: &[AnalysisFinding]) -> Result<(), String> {
-    for a in achados {
-        conn.execute(
-            "INSERT INTO analysis_findings (run_id, rule_id, source, severity, file, line_start, \
-             line_end, message, cwe, snippet) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            rusqlite::params![
+/// FNV-1a de 64 bits: estável entre versões e plataformas, ao contrário do hasher
+/// padrão do Rust. A identidade precisa sobreviver a uma atualização do
+/// aplicativo — senão a primeira corrida depois de cada versão pareceria nova.
+fn fnv1a64(texto: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in texto.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// O conteúdo que identifica um defeito, sem a linha: a mesma regra, no mesmo
+/// arquivo, com a mesma mensagem e o mesmo trecho. Duas ocorrências idênticas no
+/// mesmo arquivo recebem ordinais diferentes em [`impressao_do_achado`].
+fn base_da_impressao(a: &AnalysisFinding) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        a.rule_id,
+        a.file,
+        a.message,
+        a.snippet.as_deref().unwrap_or("").trim()
+    )
+}
+
+fn impressao(base: &str, ocorrencia: u32) -> String {
+    format!("{:016x}-{ocorrencia:04x}", fnv1a64(base))
+}
+
+fn impressao_do_achado(a: &AnalysisFinding, ocorrencias: &mut BTreeMap<String, u32>) -> String {
+    let base = base_da_impressao(a);
+    let conta = ocorrencias.entry(base.clone()).or_insert(0);
+    *conta += 1;
+    impressao(&base, *conta)
+}
+
+/// Dá identidade aos achados que já estavam no banco antes da v12. A ordem é a
+/// mesma de [`gravar_achados`] dentro de cada base — linha e id —, para que uma
+/// ocorrência antiga receba o mesmo ordinal que receberia hoje.
+fn recalcular_impressoes(conn: &Connection) -> Result<(), String> {
+    let linhas: Vec<(i64, i64, String, String, String, Option<String>)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, run_id, rule_id, file, message, snippet FROM analysis_findings \
+                 WHERE fingerprint = '' ORDER BY run_id, rule_id, file, message, COALESCE(snippet, ''), line_start, id",
+            )
+            .map_err(|e| format!("falha ao preparar a identidade dos achados: {e}"))?;
+        let lidas = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
+            .map_err(|e| format!("falha ao ler os achados sem identidade: {e}"))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("falha ao ler os achados sem identidade: {e}"))?;
+        lidas
+    };
+    if linhas.is_empty() {
+        return Ok(());
+    }
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("falha ao abrir a transação das identidades: {e}"))?;
+    let mut ocorrencias: BTreeMap<String, u32> = BTreeMap::new();
+    let mut run_atual: Option<i64> = None;
+    {
+        let mut stmt = tx
+            .prepare("UPDATE analysis_findings SET fingerprint = ?1 WHERE id = ?2")
+            .map_err(|e| format!("falha ao preparar a identidade: {e}"))?;
+        for (id, run_id, rule_id, file, message, snippet) in linhas {
+            // O ordinal é por corrida: a ocorrência 1 de duas varreduras diferentes
+            // é a mesma ocorrência, e é assim que a comparação as reconhece.
+            if run_atual != Some(run_id) {
+                ocorrencias.clear();
+                run_atual = Some(run_id);
+            }
+            let achado = AnalysisFinding {
+                id,
+                run_id,
+                rule_id,
+                source: String::new(),
+                severity: String::new(),
+                file,
+                line_start: 0,
+                line_end: 0,
+                message,
+                cwe: None,
+                snippet,
+                fingerprint: String::new(),
+            };
+            let marca = impressao_do_achado(&achado, &mut ocorrencias);
+            stmt.execute(rusqlite::params![marca, id])
+                .map_err(|e| format!("falha ao gravar a identidade do achado {id}: {e}"))?;
+        }
+    }
+    tx.commit()
+        .map_err(|e| format!("falha ao concluir as identidades: {e}"))?;
+    Ok(())
+}
+
+/// Grava os achados de uma varredura numa única transação: ou a corrida inteira
+/// entra, ou nenhuma linha entra. Um achado sem severidade conhecida não chega
+/// aqui — o `CHECK` da tabela recusa, e a transação desfaz o lote.
+pub fn gravar_achados(
+    conn: &Connection,
+    run_id: i64,
+    achados: &[AnalysisFinding],
+) -> Result<(), String> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("falha ao abrir a transação dos achados: {e}"))?;
+    let mut ocorrencias: BTreeMap<String, u32> = BTreeMap::new();
+    {
+        let mut stmt = tx
+            .prepare(
+                "INSERT INTO analysis_findings (run_id, rule_id, source, severity, file, line_start, \
+                 line_end, message, cwe, snippet, fingerprint) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            )
+            .map_err(|e| format!("falha ao preparar a gravação dos achados: {e}"))?;
+        for a in achados {
+            let marca = impressao_do_achado(a, &mut ocorrencias);
+            stmt.execute(rusqlite::params![
                 run_id,
                 a.rule_id,
                 a.source,
@@ -2109,24 +2329,32 @@ pub fn gravar_achados(conn: &Connection, run_id: i64, achados: &[AnalysisFinding
                 a.message,
                 a.cwe,
                 a.snippet,
-            ],
-        )
-        .map_err(|e| format!("falha ao gravar o achado “{}”: {e}", a.rule_id))?;
+                marca,
+            ])
+            .map_err(|e| format!("falha ao gravar o achado “{}”: {e}", a.rule_id))?;
+        }
     }
+    tx.commit()
+        .map_err(|e| format!("falha ao concluir a gravação dos achados: {e}"))?;
     Ok(())
 }
 
 /// Quantos achados de cada severidade uma varredura deixou, contados na tabela.
 pub fn contar_achados(conn: &Connection, run_id: i64) -> Result<AnalysisCounts, String> {
     let mut stmt = conn
-        .prepare("SELECT severity, COUNT(*) FROM analysis_findings WHERE run_id = ?1 GROUP BY severity")
+        .prepare(
+            "SELECT severity, COUNT(*) FROM analysis_findings WHERE run_id = ?1 GROUP BY severity",
+        )
         .map_err(|e| format!("falha ao preparar a contagem: {e}"))?;
     let mut contagem = AnalysisCounts::default();
     let linhas = stmt
-        .query_map([run_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .query_map([run_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })
         .map_err(|e| format!("falha ao contar os achados: {e}"))?;
     for linha in linhas {
-        let (severidade, quantidade) = linha.map_err(|e| format!("falha ao contar os achados: {e}"))?;
+        let (severidade, quantidade) =
+            linha.map_err(|e| format!("falha ao contar os achados: {e}"))?;
         match severidade.as_str() {
             "ERROR" => contagem.error = quantidade,
             "WARNING" => contagem.warning = quantidade,
@@ -2186,6 +2414,9 @@ pub fn obter_analise(conn: &Connection, run_id: i64) -> Result<AnalysisRun, Stri
 /// Os achados de uma varredura, na ordem em que pesam: primeiro o que barra,
 /// depois o arquivo e a linha. O corte é um parâmetro, nunca texto colado na
 /// consulta — o que chega da tela passa por aqui sem virar sintaxe.
+const FINDING_COLUMNS: &str = "f.id, f.run_id, f.rule_id, f.source, f.severity, f.file, \
+     f.line_start, f.line_end, f.message, f.cwe, f.snippet, f.fingerprint";
+
 pub fn listar_achados(
     conn: &Connection,
     run_id: i64,
@@ -2193,16 +2424,20 @@ pub fn listar_achados(
     limite: i64,
 ) -> Result<Vec<AnalysisFinding>, String> {
     let corte = severidade.unwrap_or("");
-    let sql = "SELECT id, run_id, rule_id, source, severity, file, line_start, line_end, message, \
-         cwe, snippet FROM analysis_findings \
-         WHERE run_id = ?1 AND (?2 = '' OR severity = ?2) \
-         ORDER BY CASE severity WHEN 'ERROR' THEN 0 WHEN 'WARNING' THEN 1 ELSE 2 END, \
-         file, line_start LIMIT ?3";
+    let sql = format!(
+        "SELECT {FINDING_COLUMNS} FROM analysis_findings f \
+         WHERE f.run_id = ?1 AND (?2 = '' OR f.severity = ?2) \
+         ORDER BY CASE f.severity WHEN 'ERROR' THEN 0 WHEN 'WARNING' THEN 1 ELSE 2 END, \
+         f.file, f.line_start, f.id LIMIT ?3"
+    );
     let mut stmt = conn
-        .prepare(sql)
+        .prepare(&sql)
         .map_err(|e| format!("falha ao preparar os achados: {e}"))?;
     let linhas = stmt
-        .query_map(rusqlite::params![run_id, corte, limite], row_to_analysis_finding)
+        .query_map(
+            rusqlite::params![run_id, corte, limite],
+            row_to_analysis_finding,
+        )
         .map_err(|e| format!("falha ao listar os achados: {e}"))?;
     let mut out = Vec::new();
     for linha in linhas {
@@ -2224,6 +2459,273 @@ fn row_to_analysis_finding(row: &Row) -> rusqlite::Result<AnalysisFinding> {
         message: row.get("message")?,
         cwe: row.get("cwe")?,
         snippet: row.get("snippet")?,
+        fingerprint: row.get("fingerprint")?,
+    })
+}
+
+/// A corrida concluída mais recente do mesmo projeto e instrumento, anterior à
+/// corrida pedida. Interrompida nunca entra: ela não leu o fim, e usá-la como
+/// base faria todo achado não visto parecer corrigido. Sem leitura também não:
+/// uma corrida que não abriu arquivo não tem o que comparar.
+pub fn corrida_base(conn: &Connection, run: &AnalysisRun) -> Result<Option<BaselineRun>, String> {
+    conn.query_row(
+        "SELECT id, started_at, tool, tool_version FROM analysis_runs \
+         WHERE project_id = ?1 AND analyzer = ?2 AND id <> ?3 AND status = 'concluida' \
+         AND files_scanned > 0 AND (started_at < ?4 OR (started_at = ?4 AND id < ?3)) \
+         ORDER BY started_at DESC, id DESC LIMIT 1",
+        rusqlite::params![run.project_id, run.analyzer, run.id, run.started_at],
+        |r| {
+            Ok(BaselineRun {
+                id: r.get(0)?,
+                started_at: r.get(1)?,
+                tool: r.get(2)?,
+                tool_version: r.get(3)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|e| format!("falha ao localizar a corrida anterior: {e}"))
+}
+
+/// As identidades de uma corrida, para quem precisa marcar cada achado contra a
+/// base em uma passada só (o SARIF), em vez de uma consulta por resultado.
+pub fn impressoes_da_corrida(
+    conn: &Connection,
+    run_id: i64,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT fingerprint FROM analysis_findings WHERE run_id = ?1")
+        .map_err(|e| format!("falha ao preparar as identidades da corrida: {e}"))?;
+    let marcas = stmt
+        .query_map([run_id], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("falha ao listar as identidades da corrida: {e}"))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("falha ao ler as identidades da corrida: {e}"))?;
+    Ok(marcas)
+}
+
+/// O que mudou desde a última corrida comparável: identidades presentes agora e
+/// ausentes antes são novas; presentes nas duas persistem; e as que só existiam
+/// antes foram corrigidas. Tudo por impressão digital, nunca por linha.
+pub fn comparar_analises(conn: &Connection, run_id: i64) -> Result<AnalysisComparison, String> {
+    let run = obter_analise(conn, run_id)?;
+    let Some(base) = corrida_base(conn, &run)? else {
+        return Ok(AnalysisComparison {
+            baseline: None,
+            novos: 0,
+            persistentes: 0,
+            corrigidos: 0,
+            corrigidos_conclusivos: false,
+            corrigidos_itens: Vec::new(),
+        });
+    };
+    let persistentes: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM analysis_findings f WHERE f.run_id = ?1 \
+             AND EXISTS (SELECT 1 FROM analysis_findings b \
+                         WHERE b.run_id = ?2 AND b.fingerprint = f.fingerprint)",
+            rusqlite::params![run_id, base.id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("falha ao comparar os achados: {e}"))?;
+    let total = run.counts.total();
+    // "Não está mais aqui" só é correção quando esta corrida leu o bastante para
+    // poder encontrá-lo. Uma varredura interrompida, sem leitura ou que falhou no
+    // instrumento não transforma ausência em prova de conserto.
+    let corrigidos_conclusivos = run.status == "concluida" && run.files_scanned > 0;
+    let (corrigidos, corrigidos_itens) = if corrigidos_conclusivos {
+        let quantidade: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM analysis_findings b WHERE b.run_id = ?1 \
+                 AND NOT EXISTS (SELECT 1 FROM analysis_findings f \
+                                 WHERE f.run_id = ?2 AND f.fingerprint = b.fingerprint)",
+                rusqlite::params![base.id, run_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("falha ao contar os corrigidos: {e}"))?;
+        let sql = format!(
+            "SELECT {FINDING_COLUMNS} FROM analysis_findings f WHERE f.run_id = ?1 \
+             AND NOT EXISTS (SELECT 1 FROM analysis_findings c \
+                             WHERE c.run_id = ?2 AND c.fingerprint = f.fingerprint) \
+             ORDER BY CASE f.severity WHEN 'ERROR' THEN 0 WHEN 'WARNING' THEN 1 ELSE 2 END, \
+             f.file, f.line_start, f.id LIMIT 100"
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("falha ao preparar os corrigidos: {e}"))?;
+        let itens = stmt
+            .query_map(rusqlite::params![base.id, run_id], row_to_analysis_finding)
+            .map_err(|e| format!("falha ao listar os corrigidos: {e}"))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("falha ao ler os corrigidos: {e}"))?;
+        (quantidade, itens)
+    } else {
+        (0, Vec::new())
+    };
+    Ok(AnalysisComparison {
+        baseline: Some(base),
+        novos: (total - persistentes).max(0),
+        persistentes,
+        corrigidos,
+        corrigidos_conclusivos,
+        corrigidos_itens,
+    })
+}
+
+fn filtro_achados(filtro: &AchadosFiltro) -> (Vec<String>, Vec<Value>) {
+    let mut condicoes: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
+    if let Some(sev) = filtro
+        .severidade
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        condicoes.push("f.severity = ?".to_string());
+        params.push(Value::Text(sev.to_string()));
+    }
+    if let Some(origem) = filtro
+        .origem
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        condicoes.push("f.source = ?".to_string());
+        params.push(Value::Text(origem.to_string()));
+    }
+    if let Some(regra) = filtro
+        .regra
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        condicoes.push("f.rule_id = ?".to_string());
+        params.push(Value::Text(regra.to_string()));
+    }
+    if let Some(busca) = filtro
+        .busca
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let alvo = format!("%{busca}%");
+        condicoes.push(
+            "(f.file LIKE ? OR f.rule_id LIKE ? OR f.message LIKE ? OR COALESCE(f.snippet, '') LIKE ?)"
+                .to_string(),
+        );
+        for _ in 0..4 {
+            params.push(Value::Text(alvo.clone()));
+        }
+    }
+    (condicoes, params)
+}
+
+fn facetas(conn: &Connection, run_id: i64) -> Result<FindingsFacets, String> {
+    let contar = |coluna: &str, limite: usize| -> Result<Vec<Faceta>, String> {
+        let sql = format!(
+            "SELECT {coluna}, COUNT(*) FROM analysis_findings WHERE run_id = ?1 \
+             GROUP BY {coluna} ORDER BY COUNT(*) DESC, {coluna} LIMIT ?2"
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("falha ao preparar as facetas: {e}"))?;
+        let lidas = stmt
+            .query_map(rusqlite::params![run_id, limite as i64], |r| {
+                Ok(Faceta {
+                    valor: r.get(0)?,
+                    quantidade: r.get(1)?,
+                })
+            })
+            .map_err(|e| format!("falha ao listar as facetas: {e}"))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("falha ao ler as facetas: {e}"))?;
+        Ok(lidas)
+    };
+    Ok(FindingsFacets {
+        severidades: contar("severity", 3)?,
+        origens: contar("source", 10)?,
+        regras: contar("rule_id", 80)?,
+    })
+}
+
+/// A página de achados de uma corrida com todos os cortes da triagem. Os filtros
+/// são parâmetros de SQL, nunca texto colado; e o estado (`novo`/`persistente`)
+/// vem da comparação com a corrida base, não de uma lista montada na tela.
+pub fn listar_achados_pagina(
+    conn: &Connection,
+    run_id: i64,
+    filtro: &AchadosFiltro,
+) -> Result<FindingsPage, String> {
+    let run = obter_analise(conn, run_id)?;
+    let base = corrida_base(conn, &run)?.map(|b| b.id);
+    let (mut condicoes, mut params) = filtro_achados(filtro);
+    condicoes.insert(0, "f.run_id = ?".to_string());
+    params.insert(0, Value::Integer(run_id));
+    let estado = filtro.estado.as_deref().map(str::trim).unwrap_or("");
+    if estado == "novo" || estado == "persistente" {
+        match base {
+            Some(base_id) => {
+                let existe = "EXISTS (SELECT 1 FROM analysis_findings b WHERE b.run_id = ? AND b.fingerprint = f.fingerprint)";
+                condicoes.push(if estado == "persistente" {
+                    existe.to_string()
+                } else {
+                    format!("NOT {existe}")
+                });
+                params.push(Value::Integer(base_id));
+            }
+            // Sem base, não existe "novo" nem "persistente": os dois nomes dizem
+            // respeito a uma comparação que esta corrida não tem.
+            None => condicoes.push("0".to_string()),
+        }
+    }
+    let onde = condicoes.join(" AND ");
+    let limite = filtro.limite.unwrap_or(200).clamp(1, 1000);
+    let deslocamento = filtro.deslocamento.unwrap_or(0).max(0);
+    let total: i64 = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM analysis_findings f WHERE {onde}"),
+            params_from_iter(params.iter()),
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("falha ao contar os achados filtrados: {e}"))?;
+    let mut params_lista = params.clone();
+    params_lista.push(Value::Integer(limite));
+    params_lista.push(Value::Integer(deslocamento));
+    let sql = format!(
+        "SELECT {FINDING_COLUMNS}, CASE WHEN ? IS NULL THEN NULL \
+         WHEN EXISTS (SELECT 1 FROM analysis_findings b WHERE b.run_id = ? AND b.fingerprint = f.fingerprint) \
+         THEN 'persistente' ELSE 'novo' END AS baseline \
+         FROM analysis_findings f WHERE {onde} \
+         ORDER BY CASE f.severity WHEN 'ERROR' THEN 0 WHEN 'WARNING' THEN 1 ELSE 2 END, \
+         f.file, f.line_start, f.id LIMIT ? OFFSET ?"
+    );
+    // O CASE precisa do id da base antes dos parâmetros do filtro; sem base ele
+    // recebe NULL duas vezes e a coluna `baseline` sai nula.
+    let mut params_com_base: Vec<Value> = vec![
+        base.map(Value::Integer).unwrap_or(Value::Null),
+        base.map(Value::Integer).unwrap_or(Value::Null),
+    ];
+    params_com_base.extend(params_lista);
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("falha ao preparar a página de achados: {e}"))?;
+    let itens = stmt
+        .query_map(params_from_iter(params_com_base.iter()), |row| {
+            Ok(AnalysisFindingView {
+                achado: row_to_analysis_finding(row)?,
+                baseline: row.get("baseline")?,
+            })
+        })
+        .map_err(|e| format!("falha ao listar a página de achados: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("falha ao ler a página de achados: {e}"))?;
+    Ok(FindingsPage {
+        itens,
+        total,
+        total_geral: run.counts.total(),
+        deslocamento,
+        limite,
+        facetas: facetas(conn, run_id)?,
     })
 }
 
@@ -2262,7 +2764,8 @@ mod tests {
     /// do pool que se quer provar.
     #[test]
     fn uma_conexao_em_uso_nao_obriga_a_segunda_a_esperar() {
-        let caminho = std::env::temp_dir().join(format!("devops-desktop-teste-{}.db", std::process::id()));
+        let caminho =
+            std::env::temp_dir().join(format!("devops-desktop-teste-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&caminho);
         let conn = Connection::open(&caminho).expect("abrir banco de teste");
         migrate(&conn).expect("migrações");
@@ -2350,7 +2853,8 @@ mod tests {
     #[test]
     fn projeto_rejeita_servidor_padrao_inexistente() {
         let conn = mem_db();
-        let p = insert_project(&conn, "site", "C:/projetos/site", true, Some("main"), None).unwrap();
+        let p =
+            insert_project(&conn, "site", "C:/projetos/site", true, Some("main"), None).unwrap();
         assert!(p.is_git_repo);
 
         assert!(update_project_row(&conn, p.id, "site", Some(999)).is_err());
@@ -2367,7 +2871,8 @@ mod tests {
 
     fn seeded(conn: &Connection) -> (i64, i64) {
         let server = insert_server(conn, &sample_input(), "manual").unwrap();
-        let project = insert_project(conn, "site", "C:/projetos/site", true, Some("main"), None).unwrap();
+        let project =
+            insert_project(conn, "site", "C:/projetos/site", true, Some("main"), None).unwrap();
         (project.id, server.id)
     }
 
@@ -2420,7 +2925,10 @@ mod tests {
         assert_eq!(saved.remote_path, "/var/www/site");
         assert_eq!(saved.git_branch.as_deref(), Some("main"));
         // itens vazios são descartados e os demais aparecem na ordem gravada
-        assert_eq!(saved.include_paths, vec!["dist".to_string(), "public/favicon.ico".to_string()]);
+        assert_eq!(
+            saved.include_paths,
+            vec!["dist".to_string(), "public/favicon.ico".to_string()]
+        );
         assert_eq!(saved.build_commands.len(), 2);
         assert_eq!(saved.step_timeout_secs, 900);
         assert!(saved.releases_enabled && saved.backup_enabled && !saved.delete_extras);
@@ -2429,7 +2937,11 @@ mod tests {
 
         // somente os nomes das variáveis existem no esquema — não há coluna de valor
         let keys: String = conn
-            .query_row("SELECT secret_keys FROM deploy_profiles WHERE id = ?1", [saved.id], |r| r.get(0))
+            .query_row(
+                "SELECT secret_keys FROM deploy_profiles WHERE id = ?1",
+                [saved.id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(keys, "[\"SENTRY_TOKEN\"]");
 
@@ -2458,7 +2970,8 @@ mod tests {
         assert_eq!(edited.id, saved.id);
 
         // apagar o modelo remove as execuções junto (não há chave estrangeira ativa)
-        let outra_execucao = insert_run(&conn, other.id, &proc_de_teste(&other.remote_path)).unwrap();
+        let outra_execucao =
+            insert_run(&conn, other.id, &proc_de_teste(&other.remote_path)).unwrap();
         delete_deploy_profile(&conn, other.id).unwrap();
         assert!(get_deploy_profile(&conn, other.id).is_err());
         assert!(get_run(&conn, outra_execucao).is_err());
@@ -2619,7 +3132,11 @@ mod tests {
         )
         .unwrap();
         let modelo_id: i64 = conn
-            .query_row("SELECT id FROM deploy_profiles WHERE name = 'produção'", [], |r| r.get(0))
+            .query_row(
+                "SELECT id FROM deploy_profiles WHERE name = 'produção'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         conn.execute(
             "INSERT INTO deploy_runs (profile_id, status, started_at, detail) VALUES (?1, 'success', ?2, 'publicado')",
@@ -2627,7 +3144,11 @@ mod tests {
         )
         .unwrap();
         let run_id: i64 = conn
-            .query_row("SELECT id FROM deploy_runs WHERE profile_id = ?1", [modelo_id], |r| r.get(0))
+            .query_row(
+                "SELECT id FROM deploy_runs WHERE profile_id = ?1",
+                [modelo_id],
+                |r| r.get(0),
+            )
             .unwrap();
         // a linha de etapa também entra por SQL cru: pelas funções de hoje ela pediria
         // as colunas do grafo, que uma base dessa época não tinha.
@@ -2671,7 +3192,9 @@ mod tests {
         assert_eq!(execucao.commit_sha, None);
 
         // e a checagem de chaves continua ligada depois da migração
-        let fk: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+        let fk: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(fk, 1, "a migração deixou as chaves desligadas");
 
         // a mesma base agora aceita um modelo sem servidor
@@ -2813,7 +3336,11 @@ mod tests {
         )
         .unwrap();
         let modelo_id: i64 = conn
-            .query_row("SELECT id FROM deploy_profiles WHERE name = 'api'", [], |r| r.get(0))
+            .query_row(
+                "SELECT id FROM deploy_profiles WHERE name = 'api'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         // um grafo desenhado na v7: dois nós, com aresta e executor
         conn.execute(
@@ -2860,7 +3387,9 @@ mod tests {
         assert_eq!(velho.name, "api");
         assert_eq!(velho.strategy, "script");
 
-        let fk: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+        let fk: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(fk, 1, "a migração deixou as chaves desligadas");
 
         // agora sim o tipo novo entra, pela porta de fora: a mesma gravação da tela
@@ -2983,7 +3512,11 @@ mod tests {
         )
         .unwrap();
         let modelo_id: i64 = conn
-            .query_row("SELECT id FROM deploy_profiles WHERE name = 'api'", [], |r| r.get(0))
+            .query_row(
+                "SELECT id FROM deploy_profiles WHERE name = 'api'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         conn.execute(
             "INSERT INTO deploy_runs (profile_id, status, started_at, release_dir, previous_release, detail) \
@@ -3119,9 +3652,12 @@ mod tests {
             let mut escapando = profile_input_no_servidor(project_id, None);
             escapando.releases_enabled = false;
             escapando.remote_path = destino.into();
-            assert!(upsert_deploy_profile(&conn, &escapando)
-                .unwrap_err()
-                .contains("nesta máquina"), "aceitou o destino {destino}");
+            assert!(
+                upsert_deploy_profile(&conn, &escapando)
+                    .unwrap_err()
+                    .contains("nesta máquina"),
+                "aceitou o destino {destino}"
+            );
         }
 
         let mut duplicado = profile_input(project_id, server_id);
@@ -3159,10 +3695,17 @@ mod tests {
     fn rotinas_padrao_e_crud() {
         let conn = mem_db();
         let routines = list_routines(&conn).unwrap();
-        assert!(routines.len() >= 9, "esperava as rotinas padrão, veio {}", routines.len());
+        assert!(
+            routines.len() >= 9,
+            "esperava as rotinas padrão, veio {}",
+            routines.len()
+        );
         assert!(routines.iter().all(|r| r.danger == "read"));
         assert!(routines.iter().all(|r| r.is_builtin));
-        let tail = routines.iter().find(|r| r.command.contains("{{arquivo}}")).unwrap();
+        let tail = routines
+            .iter()
+            .find(|r| r.command.contains("{{arquivo}}"))
+            .unwrap();
         assert_eq!(tail.params.len(), 1);
         assert_eq!(tail.params[0].name, "arquivo");
 
@@ -3203,7 +3746,10 @@ mod tests {
         assert_eq!(updated.description, None);
 
         // nome duplicado é rejeitado (usa o nome atual da rotina renomeada)
-        let duplicado = RoutineInput { name: "Reiniciar serviço".into(), ..input };
+        let duplicado = RoutineInput {
+            name: "Reiniciar serviço".into(),
+            ..input
+        };
         assert!(insert_routine(&conn, &duplicado).is_err());
 
         delete_routine_row(&conn, created.id).unwrap();
@@ -3222,13 +3768,26 @@ mod tests {
         };
         assert!(input.validate().is_err()); // classificação inválida
 
-        let mut ok_input = RoutineInput { danger: "read".into(), ..input };
+        let mut ok_input = RoutineInput {
+            danger: "read".into(),
+            ..input
+        };
         assert!(ok_input.validate().is_err()); // {{a}} usado sem parâmetro definido
 
-        ok_input.params = vec![RoutineParam { name: "a b".into(), label: None, required: None, default: None }];
+        ok_input.params = vec![RoutineParam {
+            name: "a b".into(),
+            label: None,
+            required: None,
+            default: None,
+        }];
         assert!(ok_input.validate().is_err()); // nome de parâmetro com espaço
 
-        ok_input.params = vec![RoutineParam { name: "a".into(), label: None, required: None, default: None }];
+        ok_input.params = vec![RoutineParam {
+            name: "a".into(),
+            label: None,
+            required: None,
+            default: None,
+        }];
         ok_input.validate().unwrap();
     }
 
@@ -3246,13 +3805,18 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].server_name.as_deref(), Some("web-prod"));
         assert!(entries[0].command.contains("ghp_***"));
-        assert!(!entries[0].command.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ1234"));
+        assert!(!entries[0]
+            .command
+            .contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ1234"));
 
         assert_eq!(clear_terminal_history(&conn).unwrap(), 1);
         assert!(list_terminal_history(&conn, 10).unwrap().is_empty());
 
         // preferência ausente → quem decide o padrão é a camada de comandos
-        assert_eq!(setting_value(&conn, "terminal_history_enabled").unwrap(), None);
+        assert_eq!(
+            setting_value(&conn, "terminal_history_enabled").unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -3305,8 +3869,14 @@ mod tests {
         grava(4, "done", None);
         let (estado, mensagem, inicio) = le(4);
         assert_eq!(estado, "done");
-        assert_eq!(mensagem, None, "o texto de execução não sobrevive à linha concluída");
-        assert!(inicio.is_some(), "a hora de início fica: é o que diz quando o nó começou");
+        assert_eq!(
+            mensagem, None,
+            "o texto de execução não sobrevive à linha concluída"
+        );
+        assert!(
+            inicio.is_some(),
+            "a hora de início fica: é o que diz quando o nó começou"
+        );
 
         // Já a etapa do motor escreve a própria linha final com a mensagem do resultado,
         // e nada apaga o que ela disse.
@@ -3324,27 +3894,29 @@ mod tests {
         sem_servidor.remote_path = "C:/publicados/site".into();
         let modelo = upsert_deploy_profile(&conn, &sem_servidor).unwrap();
 
-        let no = |chave: &str, kind: &str, etapa: Option<i64>, deps: &[&str], x: i64| PipelineNodeInput {
-            node_key: chave.into(),
-            title: chave.into(),
-            kind: kind.into(),
-            engine_step: etapa,
-            executor: Some("local".into()),
-            environment: None,
-            working_dir: None,
-            commands: Some(vec!["echo pronto".into()]),
-            git_op: None,
-            git_ref: None,
-            analyzer: None,
-            severity_gate: None,
-            depends_on: Some(deps.iter().map(|d| d.to_string()).collect()),
-            parallel: Some(false),
-            timeout_secs: Some(0),
-            retry_limit: Some(1),
-            condition: Some("ramo=main".into()),
-            requires_approval: Some(etapa == Some(10)),
-            x: Some(x),
-            y: Some(0),
+        let no = |chave: &str, kind: &str, etapa: Option<i64>, deps: &[&str], x: i64| {
+            PipelineNodeInput {
+                node_key: chave.into(),
+                title: chave.into(),
+                kind: kind.into(),
+                engine_step: etapa,
+                executor: Some("local".into()),
+                environment: None,
+                working_dir: None,
+                commands: Some(vec!["echo pronto".into()]),
+                git_op: None,
+                git_ref: None,
+                analyzer: None,
+                severity_gate: None,
+                depends_on: Some(deps.iter().map(|d| d.to_string()).collect()),
+                parallel: Some(false),
+                timeout_secs: Some(0),
+                retry_limit: Some(1),
+                condition: Some("ramo=main".into()),
+                requires_approval: Some(etapa == Some(10)),
+                x: Some(x),
+                y: Some(0),
+            }
         };
 
         replace_pipeline_nodes(
@@ -3385,7 +3957,13 @@ mod tests {
         let sem_no = replace_pipeline_nodes(&conn, modelo.id, &[]).unwrap();
         assert!(sem_no.is_empty());
         assert_eq!(list_pipeline_nodes(&conn, modelo.id).unwrap().len(), 0);
-        assert_eq!(list_revisions(&conn, modelo.id).unwrap()[0].spec["nos"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            list_revisions(&conn, modelo.id).unwrap()[0].spec["nos"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
 
         // e um nó fora do tipo que o motor conhece é recusado pelo SQLite
         let quebrado = no("estranho", "agenda", None, &[], 40);
@@ -3538,10 +4116,7 @@ mod tests {
             )
             .unwrap();
         assert!(!bruto.contains("valor-da-variavel-9f3c"), "{bruto}");
-        assert!(
-            !bruto.contains("NAO-E-UM-TOKEN-REAL-2026"),
-            "{bruto}"
-        );
+        assert!(!bruto.contains("NAO-E-UM-TOKEN-REAL-2026"), "{bruto}");
         // e o que o motor viu continua lá, linha por linha, sem as em branco: a
         // variável vira `***` e o formato conhecido de token perde só a cauda.
         let gravadas = read_step_logs(&conn, execucao, 3, None, None, 50).unwrap();
@@ -3556,5 +4131,245 @@ mod tests {
         );
         assert_eq!(gravadas[0].stream, "stdout");
         assert_eq!(gravadas[3].seq, 3);
+    }
+
+    // ---------- identidade e comparação de achados (v12) ----------
+
+    fn achado_de_teste(regra: &str, arquivo: &str, linha: i64, trecho: &str) -> AnalysisFinding {
+        AnalysisFinding {
+            id: 0,
+            run_id: 0,
+            rule_id: regra.to_string(),
+            source: "embutido".to_string(),
+            severity: "ERROR".to_string(),
+            file: arquivo.to_string(),
+            line_start: linha,
+            line_end: linha,
+            message: format!("mensagem de {regra}"),
+            cwe: None,
+            snippet: Some(trecho.to_string()),
+            fingerprint: String::new(),
+        }
+    }
+
+    fn corrida_de_teste(
+        conn: &Connection,
+        projeto: i64,
+        inicio: &str,
+        achados: &[AnalysisFinding],
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO analysis_runs (project_id, analyzer, tool, root, severity_gate, status, \
+             started_at, finished_at, files_scanned, counts) \
+             VALUES (?1, 'embutido', 'embutido', 'C:/projeto', 'ERROR', 'concluida', ?2, ?2, 10, ?3)",
+            rusqlite::params![
+                projeto,
+                inicio,
+                serde_json::to_string(&AnalysisCounts {
+                    error: achados.len() as i64,
+                    ..AnalysisCounts::default()
+                })
+                .unwrap()
+            ],
+        )
+        .unwrap();
+        let run_id = conn.last_insert_rowid();
+        gravar_achados(conn, run_id, achados).unwrap();
+        run_id
+    }
+
+    #[test]
+    fn a_impressao_ignora_a_linha_e_a_comparacao_diz_o_que_mudou() {
+        let conn = mem_db();
+        let projeto = insert_project(&conn, "site", "C:/projeto", true, None, None).unwrap();
+        let primeira = corrida_de_teste(
+            &conn,
+            projeto.id,
+            "2026-01-01T10:00:00Z",
+            &[
+                achado_de_teste("dd-101-shell-true", "src/a.py", 1, "os.system(x)"),
+                achado_de_teste("dd-105-avaliacao-de-codigo", "src/b.py", 2, "eval(y)"),
+            ],
+        );
+        // A mesma falha desceu cinco linhas e outra nasceu; uma foi corrigida.
+        let segunda = corrida_de_teste(
+            &conn,
+            projeto.id,
+            "2026-01-02T10:00:00Z",
+            &[
+                achado_de_teste("dd-101-shell-true", "src/a.py", 6, "os.system(x)"),
+                achado_de_teste("dd-110-except-pass", "src/c.py", 3, "except: pass"),
+            ],
+        );
+
+        let comparacao = comparar_analises(&conn, segunda).unwrap();
+        assert_eq!(comparacao.baseline.as_ref().map(|b| b.id), Some(primeira));
+        assert_eq!(comparacao.persistentes, 1, "{comparacao:?}");
+        assert_eq!(comparacao.novos, 1, "{comparacao:?}");
+        assert_eq!(comparacao.corrigidos, 1, "{comparacao:?}");
+        assert_eq!(
+            comparacao.corrigidos_itens[0].rule_id,
+            "dd-105-avaliacao-de-codigo"
+        );
+
+        // A impressão em si não mudou com a linha.
+        let marcas = impressoes_da_corrida(&conn, segunda).unwrap();
+        let antigas = impressoes_da_corrida(&conn, primeira).unwrap();
+        assert_eq!(
+            marcas.intersection(&antigas).count(),
+            1,
+            "{marcas:?} {antigas:?}"
+        );
+    }
+
+    #[test]
+    fn a_triagem_filtra_no_banco_e_a_pagina_conta_o_total_do_filtro() {
+        let conn = mem_db();
+        let projeto = insert_project(&conn, "site", "C:/projeto", true, None, None).unwrap();
+        let base = corrida_de_teste(
+            &conn,
+            projeto.id,
+            "2026-01-01T10:00:00Z",
+            &[achado_de_teste(
+                "dd-101-shell-true",
+                "src/a.py",
+                1,
+                "os.system(x)",
+            )],
+        );
+        let atual = corrida_de_teste(
+            &conn,
+            projeto.id,
+            "2026-01-02T10:00:00Z",
+            &[
+                achado_de_teste("dd-101-shell-true", "src/a.py", 6, "os.system(x)"),
+                achado_de_teste("dd-105-avaliacao-de-codigo", "src/b.py", 2, "eval(y)"),
+            ],
+        );
+        assert!(base > 0);
+
+        let mut filtro = AchadosFiltro {
+            busca: Some("a.py".into()),
+            limite: Some(1),
+            ..Default::default()
+        };
+        let pagina = listar_achados_pagina(&conn, atual, &filtro).unwrap();
+        assert_eq!(pagina.total, 1);
+        assert_eq!(pagina.total_geral, 2);
+        assert_eq!(pagina.itens.len(), 1);
+        assert_eq!(pagina.itens[0].baseline.as_deref(), Some("persistente"));
+        assert_eq!(pagina.facetas.severidades[0].valor, "ERROR");
+        assert_eq!(pagina.facetas.regras.len(), 2);
+
+        filtro = AchadosFiltro {
+            estado: Some("novo".into()),
+            ..Default::default()
+        };
+        let novos = listar_achados_pagina(&conn, atual, &filtro).unwrap();
+        assert_eq!(novos.total, 1);
+        assert_eq!(novos.itens[0].achado.rule_id, "dd-105-avaliacao-de-codigo");
+
+        filtro = AchadosFiltro {
+            regra: Some("dd-105-avaliacao-de-codigo".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            listar_achados_pagina(&conn, atual, &filtro).unwrap().total,
+            1
+        );
+
+        filtro = AchadosFiltro {
+            origem: Some("semgrep".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            listar_achados_pagina(&conn, atual, &filtro).unwrap().total,
+            0
+        );
+
+        // A primeira página pula um e ainda enxerga o total inteiro.
+        filtro = AchadosFiltro {
+            limite: Some(1),
+            deslocamento: Some(1),
+            ..Default::default()
+        };
+        let segunda_pagina = listar_achados_pagina(&conn, atual, &filtro).unwrap();
+        assert_eq!(segunda_pagina.total, 2);
+        assert_eq!(segunda_pagina.itens.len(), 1);
+        assert_eq!(segunda_pagina.deslocamento, 1);
+    }
+
+    #[test]
+    fn sem_corrida_anterior_nao_existe_novo_nem_persistente() {
+        let conn = mem_db();
+        let projeto = insert_project(&conn, "site", "C:/projeto", true, None, None).unwrap();
+        let unica = corrida_de_teste(
+            &conn,
+            projeto.id,
+            "2026-01-01T10:00:00Z",
+            &[achado_de_teste(
+                "dd-101-shell-true",
+                "src/a.py",
+                1,
+                "os.system(x)",
+            )],
+        );
+        let comparacao = comparar_analises(&conn, unica).unwrap();
+        assert!(comparacao.baseline.is_none());
+        assert_eq!(comparacao.novos, 0);
+        assert_eq!(comparacao.persistentes, 0);
+        assert_eq!(comparacao.corrigidos, 0);
+
+        let filtro = AchadosFiltro {
+            estado: Some("novo".into()),
+            ..Default::default()
+        };
+        let pagina = listar_achados_pagina(&conn, unica, &filtro).unwrap();
+        assert_eq!(pagina.total, 0, "sem base, nada pode ser chamado de novo");
+        let sem_filtro = listar_achados_pagina(&conn, unica, &AchadosFiltro::default()).unwrap();
+        assert!(sem_filtro.itens[0].baseline.is_none());
+    }
+
+    #[test]
+    fn a_base_antiga_recebe_a_mesma_impressao_que_uma_corrida_nova() {
+        let conn = mem_db();
+        let projeto = insert_project(&conn, "site", "C:/projeto", true, None, None).unwrap();
+        let antiga = corrida_de_teste(
+            &conn,
+            projeto.id,
+            "2026-01-01T10:00:00Z",
+            &[achado_de_teste(
+                "dd-101-shell-true",
+                "src/a.py",
+                1,
+                "os.system(x)",
+            )],
+        );
+        // Simula uma linha gravada antes da v12: sem identidade.
+        conn.execute(
+            "UPDATE analysis_findings SET fingerprint = '' WHERE run_id = ?1",
+            [antiga],
+        )
+        .unwrap();
+        recalcular_impressoes(&conn).unwrap();
+        let recuperada = listar_achados(&conn, antiga, None, 10).unwrap();
+        assert!(!recuperada[0].fingerprint.is_empty());
+
+        // E a identidade recuperada reconhece a mesma falha numa corrida nova,
+        // mesmo com a linha deslocada.
+        let nova = corrida_de_teste(
+            &conn,
+            projeto.id,
+            "2026-01-02T10:00:00Z",
+            &[achado_de_teste(
+                "dd-101-shell-true",
+                "src/a.py",
+                9,
+                "os.system(x)",
+            )],
+        );
+        let comparacao = comparar_analises(&conn, nova).unwrap();
+        assert_eq!(comparacao.persistentes, 1);
+        assert_eq!(comparacao.novos, 0);
     }
 }

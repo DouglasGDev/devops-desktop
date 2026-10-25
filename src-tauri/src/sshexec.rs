@@ -238,7 +238,11 @@ pub fn run_local_with_env(
     if command.trim().is_empty() {
         return Err("comando vazio".to_string());
     }
-    let (program, flag) = if cfg!(windows) { ("cmd", "/C") } else { ("sh", "-c") };
+    let (program, flag) = if cfg!(windows) {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
     let mut cmd = crate::proc::command(program);
     cmd.arg(flag)
         .arg(command)
@@ -314,7 +318,11 @@ pub fn collect_bytes(child: &mut Child, timeout: Duration, cancel: &AtomicBool) 
 /// falta é o que faz um prazo curto ser um prazo de verdade — com o passo fixo
 /// de 200 ms, um prazo de 1 ms acordava depois dele e colhia o processo como se
 /// tivesse respondido a tempo.
-pub fn harvest(child: &mut Child, timeout: Duration, cancel: &AtomicBool) -> (Option<i32>, bool, bool) {
+pub fn harvest(
+    child: &mut Child,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> (Option<i32>, bool, bool) {
     let started = Instant::now();
     loop {
         match child.try_wait() {
@@ -386,8 +394,17 @@ pub fn parse_probe(raw: &str) -> Vec<(String, Option<String>)> {
         if line.is_empty() {
             continue;
         }
-        let Some((name, path)) = line.split_once(' ') else { continue };
-        out.push((name.to_string(), if path == "-" { None } else { Some(path.to_string()) }));
+        let Some((name, path)) = line.split_once(' ') else {
+            continue;
+        };
+        out.push((
+            name.to_string(),
+            if path == "-" {
+                None
+            } else {
+                Some(path.to_string())
+            },
+        ));
     }
     out
 }
@@ -438,7 +455,10 @@ mod tests {
         let mut s = server();
         s.ssh_alias = Some("  web-prod  ".into());
         let cmd = ssh_base(&s, None).unwrap();
-        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
         assert!(args.contains(&"web-prod".to_string()), "{args:?}");
         assert!(!args.iter().any(|a| a == "-p"), "{args:?}");
         assert!(args.contains(&"BatchMode=yes".to_string()));
@@ -460,7 +480,10 @@ mod tests {
         assert_eq!(shell_quote("/var/www/site"), "'/var/www/site'");
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
         // uma injeção clássica vira texto inofensivo dentro das aspas
-        assert_eq!(shell_quote("x'; rm -rf /; echo 'y"), "'x'\\''; rm -rf /; echo '\\''y'");
+        assert_eq!(
+            shell_quote("x'; rm -rf /; echo 'y"),
+            "'x'\\''; rm -rf /; echo '\\''y'"
+        );
     }
 
     #[test]
@@ -475,10 +498,14 @@ mod tests {
         assert!(validate_remote_args(&["releases/2026-10-09T0010", "site-current"]).is_ok());
         let erro = validate_remote_args(&["rm -rf /"]).unwrap_err();
         assert!(erro.contains("rejeitado"), "{erro}");
-        assert!(validate_remote_args(&["x;id"]).unwrap_err().contains("rejeitado"));
+        assert!(validate_remote_args(&["x;id"])
+            .unwrap_err()
+            .contains("rejeitado"));
         assert!(validate_remote_args(&[""]).is_err());
         // aspas e cifrões também não passam
-        assert!(validate_remote_args(&["'$HOME'"]).unwrap_err().contains("rejeitado"));
+        assert!(validate_remote_args(&["'$HOME'"])
+            .unwrap_err()
+            .contains("rejeitado"));
     }
 
     #[test]
@@ -493,7 +520,14 @@ mod tests {
         assert!(!minima.contains("command -v git"), "{minima}");
         assert!(!minima.contains("command -v cksum"), "{minima}");
         // as extras do executor entram uma vez cada, mesmo repetidas ou vazias
-        let com_pm2 = probe_script(false, false, false, false, false, &["pm2", "node", "pm2", " "]);
+        let com_pm2 = probe_script(
+            false,
+            false,
+            false,
+            false,
+            false,
+            &["pm2", "node", "pm2", " "],
+        );
         assert!(com_pm2.contains("command -v pm2"), "{com_pm2}");
         assert!(com_pm2.contains("command -v node"), "{com_pm2}");
         assert_eq!(com_pm2.matches("command -v pm2").count(), 1, "{com_pm2}");
@@ -507,7 +541,10 @@ mod tests {
     fn leitura_da_sonda_distingue_presente_e_ausente() {
         let rows = parse_probe("bash /usr/bin/bash\ngit -\nshell 5.2.15\n");
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0], ("bash".to_string(), Some("/usr/bin/bash".to_string())));
+        assert_eq!(
+            rows[0],
+            ("bash".to_string(), Some("/usr/bin/bash".to_string()))
+        );
         assert_eq!(rows[1], ("git".to_string(), None));
     }
 
@@ -552,17 +589,31 @@ mod tests {
         assert!(!falho.ok());
         assert_eq!(falho.exit_code, Some(7));
 
-        assert!(run_local("", std::path::Path::new("."), Duration::from_secs(5), &cancel).is_err());
-        assert!(
-            run_local("echo a\0b", std::path::Path::new("."), Duration::from_secs(5), &cancel).is_err()
-        );
+        assert!(run_local(
+            "",
+            std::path::Path::new("."),
+            Duration::from_secs(5),
+            &cancel
+        )
+        .is_err());
+        assert!(run_local(
+            "echo a\0b",
+            std::path::Path::new("."),
+            Duration::from_secs(5),
+            &cancel
+        )
+        .is_err());
     }
 
     #[test]
     fn comando_local_interrompido_marca_cancelamento() {
         let cancel = AtomicBool::new(true);
         let r = run_local(
-            if cfg!(windows) { "ping -n 30 127.0.0.1 >nul" } else { "sleep 30" },
+            if cfg!(windows) {
+                "ping -n 30 127.0.0.1 >nul"
+            } else {
+                "sleep 30"
+            },
             std::path::Path::new("."),
             Duration::from_secs(120),
             &cancel,

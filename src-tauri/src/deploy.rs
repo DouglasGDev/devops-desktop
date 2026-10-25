@@ -132,10 +132,7 @@ impl DeployState {
         self.runs
             .lock()
             .map_err(|_| "registrador de deploys indisponível".to_string())?
-            .insert(
-                run_id,
-                ActiveRun { label, cancel },
-            );
+            .insert(run_id, ActiveRun { label, cancel });
         Ok(())
     }
 
@@ -256,7 +253,12 @@ pub struct ApprovalBroker {
 impl ApprovalBroker {
     /// Emite o pedido e espera. Só retorna com uma decisão, com o prazo vencido
     /// ou com a corrida interrompida — nunca "aprovado porque ninguém respondeu".
-    pub fn wait(&self, app: &AppHandle, pedido: PedidoDeAprovacao, cancel: &AtomicBool) -> Decision {
+    pub fn wait(
+        &self,
+        app: &AppHandle,
+        pedido: PedidoDeAprovacao,
+        cancel: &AtomicBool,
+    ) -> Decision {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         {
@@ -308,8 +310,12 @@ impl ApprovalBroker {
             .map_err(|_| "o registro de aprovações está indisponível")?
             .remove(&id)
             .ok_or_else(|| "não há mais nenhum nó esperando esta aprovação".to_string())?;
-        tx.send(if approved { Decision::Approved } else { Decision::Denied })
-            .map_err(|_| "o nó que esperava a aprovação já encerrou".to_string())
+        tx.send(if approved {
+            Decision::Approved
+        } else {
+            Decision::Denied
+        })
+        .map_err(|_| "o nó que esperava a aprovação já encerrou".to_string())
     }
 
     /// Quantos nós estão parados esperando decisão.
@@ -391,7 +397,8 @@ pub fn collect_files(
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let read = fs::read_dir(&dir).map_err(|e| format!("falha ao ler {}: {e}", dir.display()))?;
+        let read =
+            fs::read_dir(&dir).map_err(|e| format!("falha ao ler {}: {e}", dir.display()))?;
         for entry in read.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
@@ -413,7 +420,11 @@ pub fn collect_files(
                 continue;
             }
             let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            out.push(LocalFile { rel, abs: path, size });
+            out.push(LocalFile {
+                rel,
+                abs: path,
+                size,
+            });
             if out.len() > max_files {
                 return Err(format!(
                     "mais de {max_files} arquivos selecionados — refine os caminhos a enviar"
@@ -502,7 +513,11 @@ const fn crc_table() -> [u32; 256] {
         let mut c = i as u32;
         let mut j = 0;
         while j < 8 {
-            c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            c = if c & 1 != 0 {
+                0xEDB8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
             j += 1;
         }
         table[i] = c;
@@ -573,7 +588,11 @@ fn human_bytes(bytes: u64) -> String {
 
 /// Últimas linhas úteis de um texto de erro.
 fn tail(stderr: &str, stdout: &str) -> String {
-    let source = if stderr.trim().is_empty() { stdout } else { stderr };
+    let source = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
     let mut linhas = source
         .lines()
         .rev()
@@ -688,7 +707,11 @@ impl Fail {
         }
     }
 
-    fn failed(command: impl Into<String>, exit_code: Option<i64>, message: impl Into<String>) -> Self {
+    fn failed(
+        command: impl Into<String>,
+        exit_code: Option<i64>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             message: message.into(),
             command: Some(command.into()),
@@ -711,10 +734,8 @@ impl Fail {
 /// para a etapa 5 não varrer o projeto duas vezes.
 fn gate(ctx: &mut Ctx, position: i64) -> Result<Vec<security::Finding>, Fail> {
     let found = secret_findings(ctx);
-    let bloqueantes: Vec<&security::Finding> = found
-        .iter()
-        .filter(|f| f.severity == "block")
-        .collect();
+    let bloqueantes: Vec<&security::Finding> =
+        found.iter().filter(|f| f.severity == "block").collect();
     if bloqueantes.is_empty() {
         return Ok(found);
     }
@@ -774,10 +795,7 @@ pub(crate) fn bloco_de_log(stream: &str, masked: &str, gravadas: i64) -> Vec<(St
         _ => "system",
     };
     let livres = (TETO_LINHAS_POR_TENTATIVA - gravadas) as usize;
-    let visiveis: Vec<&str> = masked
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .collect();
+    let visiveis: Vec<&str> = masked.lines().filter(|l| !l.trim().is_empty()).collect();
     let mut bloco: Vec<(String, String)> = visiveis
         .iter()
         .take(livres)
@@ -909,7 +927,11 @@ impl Ctx {
     /// definição não se atropelam no depósito de imagens, e a reversão tem um nome
     /// para voltar.
     fn executor(&self) -> runtime::Alvo {
-        let alvo = pasta_do_executor(&self.base(), self.profile.releases_enabled, self.local_mode());
+        let alvo = pasta_do_executor(
+            &self.base(),
+            self.profile.releases_enabled,
+            self.local_mode(),
+        );
         self.profile
             .alvo(&alvo)
             .com_tag(&format!("r{}", self.run_id))
@@ -958,9 +980,9 @@ impl Ctx {
     }
 
     fn server_ref(&self) -> Result<&Server, Fail> {
-        self.server
-            .as_ref()
-            .ok_or_else(|| Fail::new("este modelo publica nesta máquina e não tem servidor para contatar"))
+        self.server.as_ref().ok_or_else(|| {
+            Fail::new("este modelo publica nesta máquina e não tem servidor para contatar")
+        })
     }
 
     fn has(&self, tool: &str) -> bool {
@@ -988,7 +1010,14 @@ impl Ctx {
     /// exemplo) é traduzida para a linha do nó em execução, com o nome e o
     /// identificador dele — assim uma etapa do motor funciona igual na linha
     /// salvante e dentro de um grafo desenhado na tela.
-    fn mark(&self, position: i64, status: &str, message: Option<&str>, command: Option<&str>, exit_code: Option<i64>) {
+    fn mark(
+        &self,
+        position: i64,
+        status: &str,
+        message: Option<&str>,
+        command: Option<&str>,
+        exit_code: Option<i64>,
+    ) {
         // O registro de quais etapas do motor foram alcançadas só existe para as
         // quinze posições do pipeline linear; um nó de grafo fora delas não tem bit.
         if (1..=15).contains(&position) {
@@ -998,7 +1027,11 @@ impl Ctx {
             Some(row) => Linha::from(row),
             None => Linha {
                 position,
-                nome: if self.local_mode() { step_name_local(position) } else { step_name(position) },
+                nome: if self.local_mode() {
+                    step_name_local(position)
+                } else {
+                    step_name(position)
+                },
                 chave: None,
                 tocando: false,
             },
@@ -1014,7 +1047,14 @@ impl Ctx {
 
     /// O destino de toda etapa: histórico no banco e evento na tela, com os
     /// segredos mascaras antes de sair do motor.
-    fn registra(&self, linha: &Linha, status: &str, message: Option<&str>, command: Option<&str>, exit_code: Option<i64>) {
+    fn registra(
+        &self,
+        linha: &Linha,
+        status: &str,
+        message: Option<&str>,
+        command: Option<&str>,
+        exit_code: Option<i64>,
+    ) {
         let message = message.map(|m| self.secrets.mask(m));
         let command = command.map(|c| self.secrets.mask(c));
         let falha_de_registro = if let Ok(conn) = self.db.lock() {
@@ -1039,7 +1079,11 @@ impl Ctx {
         // Fora do lock: `log` também escreve no banco, e o mutex não é reentrante.
         if let Some(e) = falha_de_registro {
             // Etapa sem registro no histórico é dado perdido: mostra na tela.
-            self.log(linha.position, "err", &format!("falha ao registrar a etapa: {e}"));
+            self.log(
+                linha.position,
+                "err",
+                &format!("falha ao registrar a etapa: {e}"),
+            );
         }
         let _ = self.app.emit(
             "deploy-step",
@@ -1136,7 +1180,12 @@ impl Ctx {
         Ok(())
     }
 
-    fn remote(&mut self, position: i64, script: &str, label: &str) -> Result<sshexec::ExecResult, Fail> {
+    fn remote(
+        &mut self,
+        position: i64,
+        script: &str,
+        label: &str,
+    ) -> Result<sshexec::ExecResult, Fail> {
         let shell = self.shell.clone();
         self.remote_with(position, &shell, script, label)
     }
@@ -1188,9 +1237,8 @@ impl Ctx {
         }
         let timeout = self.timeout();
         let env = self.secrets.env();
-        let result =
-            sshexec::run_local_with_env(command, &self.root, &env, timeout, &self.cancel)
-                .map_err(Fail::new)?;
+        let result = sshexec::run_local_with_env(command, &self.root, &env, timeout, &self.cancel)
+            .map_err(Fail::new)?;
         self.log(position, "out", &result.stdout);
         self.log(position, "err", &result.stderr);
         if !result.ok() {
@@ -1231,7 +1279,12 @@ impl Ctx {
         format!("set -eu\n{}\n{body}", self.secrets.prelude())
     }
 
-    fn run_commands(&mut self, position: i64, label: &str, commands: &[String]) -> Result<usize, Fail> {
+    fn run_commands(
+        &mut self,
+        position: i64,
+        label: &str,
+        commands: &[String],
+    ) -> Result<usize, Fail> {
         let linhas: Vec<&str> = commands
             .iter()
             .map(|c| c.trim())
@@ -1253,9 +1306,16 @@ impl Ctx {
         for line in &linhas {
             // O eco do comando passa por aspas: apóstrofo no comando não pode
             // abrir nem fechar nada no script.
-            script.push_str(&format!("echo {}\n{line}\n", sshexec::shell_quote(&format!("+ {line}"))));
+            script.push_str(&format!(
+                "echo {}\n{line}\n",
+                sshexec::shell_quote(&format!("+ {line}"))
+            ));
         }
-        self.remote(position, &script, &format!("{label} ({} comando(s))", linhas.len()))?;
+        self.remote(
+            position,
+            &script,
+            &format!("{label} ({} comando(s))", linhas.len()),
+        )?;
         Ok(linhas.len())
     }
 }
@@ -1313,7 +1373,13 @@ fn rollback_pipeline(ctx: &mut Ctx) -> Result<String, Fail> {
     step(ctx, 1, validate_step)?;
     step(ctx, 2, connection_step)?;
     for position in 3..=10 {
-        ctx.mark(position, "skipped", Some("não se aplica ao rollback"), None, None);
+        ctx.mark(
+            position,
+            "skipped",
+            Some("não se aplica ao rollback"),
+            None,
+            None,
+        );
     }
     step(ctx, 11, rollback_switch)?;
     step(ctx, 12, restart_step)?;
@@ -1424,7 +1490,9 @@ fn dir_local(raiz: &Path, bruto: &str, titulo: &str, prazo: Duration) -> Result<
     let raiz_real = match git_probe::canon(raiz, prazo) {
         git_probe::Canon::Resolveu(caminho) => caminho,
         git_probe::Canon::Ausente(e) => {
-            return Err(Fail::new(format!("não foi possível abrir a pasta do projeto: {e}")))
+            return Err(Fail::new(format!(
+                "não foi possível abrir a pasta do projeto: {e}"
+            )))
         }
         git_probe::Canon::SemResposta(motivo) => return Err(Fail::new(motivo)),
     };
@@ -1459,10 +1527,7 @@ fn rodar_comandos(ctx: &mut Ctx, no: &PipelineNode, posicao: i64) -> Result<usiz
         .filter(|c| !c.is_empty())
         .collect();
     if linhas.is_empty() {
-        return Err(Fail::new(format!(
-            "o nó “{}” ficou sem comando",
-            no.title
-        )));
+        return Err(Fail::new(format!("o nó “{}” ficou sem comando", no.title)));
     }
     // Nas quinze etapas em fila é `step` quem marca a linha como em execução, e é essa
     // marca que grava a hora de início. Um nó de comando não passa por `step`, então
@@ -1526,7 +1591,11 @@ fn resumo_do_no(no: &PipelineNode) -> String {
         _ => format!(
             "{} comando(s) {}",
             no.commands.iter().filter(|c| !c.trim().is_empty()).count(),
-            if no.executor == "ssh" { "no servidor" } else { "nesta máquina" }
+            if no.executor == "ssh" {
+                "no servidor"
+            } else {
+                "nesta máquina"
+            }
         ),
     }
 }
@@ -1578,8 +1647,14 @@ fn git_do_no(dir: &Path, operacao: &str, referencia: &str) -> Result<String, Str
             // Publicar a marca só tem sentido onde há para onde publicar; sem remoto
             // a tag fica nesta máquina, e a linha diz isso em vez de emendar.
             let remotos = git::remotes(dir)?;
-            match remotos.iter().find(|r| r.name == "origin").or_else(|| remotos.first()) {
-                None => Ok(format!("tag {referencia} criada nesta máquina — sem remoto cadastrado")),
+            match remotos
+                .iter()
+                .find(|r| r.name == "origin")
+                .or_else(|| remotos.first())
+            {
+                None => Ok(format!(
+                    "tag {referencia} criada nesta máquina — sem remoto cadastrado"
+                )),
                 Some(remoto) => {
                     let envio = git::push_tag(dir, &remoto.name, referencia)?;
                     Ok(format!(
@@ -1603,7 +1678,10 @@ fn git_do_no(dir: &Path, operacao: &str, referencia: &str) -> Result<String, Str
 fn rodar_no_git(ctx: &mut Ctx, no: &PipelineNode, posicao: i64) -> Result<String, Fail> {
     let operacao = no.git_op.as_deref().unwrap_or("").trim();
     if operacao.is_empty() {
-        return Err(Fail::new(format!("o nó “{}” ficou sem operação de git", no.title)));
+        return Err(Fail::new(format!(
+            "o nó “{}” ficou sem operação de git",
+            no.title
+        )));
     }
     let referencia = no.git_ref.as_deref().unwrap_or("").trim();
     let dir = dir_do_no(ctx, no)?;
@@ -1639,7 +1717,11 @@ fn rodar_no_analise(ctx: &mut Ctx, no: &PipelineNode, posicao: i64) -> Result<St
         &format!(
             "+ análise de código · {} · {}",
             entrada.analyzer(),
-            if corte.is_empty() { "sem corte".to_string() } else { format!("corte {corte}") }
+            if corte.is_empty() {
+                "sem corte".to_string()
+            } else {
+                format!("corte {corte}")
+            }
         ),
     );
     let run = {
@@ -1655,7 +1737,11 @@ fn rodar_no_analise(ctx: &mut Ctx, no: &PipelineNode, posicao: i64) -> Result<St
         "out",
         &format!(
             "{} arquivo(s) lido(s) · {} achado(s): {} erro, {} aviso, {} info",
-            run.files_scanned, run.counts.total(), run.counts.error, run.counts.warning, run.counts.info
+            run.files_scanned,
+            run.counts.total(),
+            run.counts.error,
+            run.counts.warning,
+            run.counts.info
         ),
     );
     if let Some(nota) = run.note.as_deref() {
@@ -1711,10 +1797,14 @@ fn veredito_do_no(run: &AnalysisRun) -> Result<String, Fail> {
         return Err(Fail::failed(
             format!("análise de código ({})", run.tool),
             None,
-            run.note.clone().unwrap_or_else(|| match run.status.as_str() {
-                "falhou" => "a varredura não conseguiu ler o código".to_string(),
-                outro => format!("a varredura terminou no estado “{outro}”, que não é uma conclusão"),
-            }),
+            run.note
+                .clone()
+                .unwrap_or_else(|| match run.status.as_str() {
+                    "falhou" => "a varredura não conseguiu ler o código".to_string(),
+                    outro => {
+                        format!("a varredura terminou no estado “{outro}”, que não é uma conclusão")
+                    }
+                }),
         ));
     }
     Ok(texto)
@@ -1767,7 +1857,11 @@ fn executar_no(ctx: &mut Ctx, index: usize, no: &PipelineNode) -> Result<Fim, Fa
         Ok(Fim::Pulado) => Ok(Fim::Pulado),
         Err(fail) => {
             let mensagem = if no.retry_limit > 0 {
-                format!("{} — {} tentativa(s) usada(s)", fail.message, no.retry_limit + 1)
+                format!(
+                    "{} — {} tentativa(s) usada(s)",
+                    fail.message,
+                    no.retry_limit + 1
+                )
             } else {
                 fail.message.clone()
             };
@@ -1804,7 +1898,13 @@ fn executar_conteudo(ctx: &mut Ctx, no: &PipelineNode, row: &NodeRow) -> Result<
     }
     let precisa_aprovar = no.requires_approval || no.kind == "aprovacao";
     if precisa_aprovar {
-        ctx.mark(row.position, "running", Some("esperando aprovação"), None, None);
+        ctx.mark(
+            row.position,
+            "running",
+            Some("esperando aprovação"),
+            None,
+            None,
+        );
         let decisao = ctx.approvals.wait(
             &ctx.app,
             PedidoDeAprovacao {
@@ -1828,10 +1928,10 @@ fn executar_conteudo(ctx: &mut Ctx, no: &PipelineNode, row: &NodeRow) -> Result<
             }
             Decision::Expired => {
                 return Err(Fail::new(format!(
-                    "ninguém respondeu ao pedido de aprovação do nó “{}” dentro do prazo de {} minutos",
-                    no.title,
-                    APPROVAL_TIMEOUT.as_secs() / 60
-                )))
+                "ninguém respondeu ao pedido de aprovação do nó “{}” dentro do prazo de {} minutos",
+                no.title,
+                APPROVAL_TIMEOUT.as_secs() / 60
+            )))
             }
             Decision::Cancelled => return Err(Fail::cancelled()),
         }
@@ -2018,10 +2118,7 @@ fn bloqueado(
             .copied()
             .filter(|i| dentro.contains(i))
             .and_then(|i| situacao.get(&i));
-        matches!(
-            quem_ela_espera,
-            Some(&Sit::Falho) | Some(&Sit::Bloqueado)
-        )
+        matches!(quem_ela_espera, Some(&Sit::Falho) | Some(&Sit::Bloqueado))
     })
 }
 
@@ -2059,7 +2156,11 @@ fn grafo(
     while !restantes.is_empty() {
         if ctx.cancelled() {
             for &i in &restantes {
-                ctx.marca_no(&NodeRow::of(i, &nos[i]), "skipped", Some("corrida interrompida"));
+                ctx.marca_no(
+                    &NodeRow::of(i, &nos[i]),
+                    "skipped",
+                    Some("corrida interrompida"),
+                );
             }
             return Err(Fail::cancelled());
         }
@@ -2138,7 +2239,9 @@ fn grafo(
             for (i, handle) in ramos {
                 let titulo = nos[i].title.clone();
                 let resultado = handle.join().unwrap_or_else(|_| {
-                    Err(Fail::new(format!("o ramal “{titulo}” quebrou durante a execução")))
+                    Err(Fail::new(format!(
+                        "o ramal “{titulo}” quebrou durante a execução"
+                    )))
                 });
                 registrar_saida(&mut situacao, &mut restantes, &mut falha, i, resultado);
             }
@@ -2148,7 +2251,11 @@ fn grafo(
         let resultado = executar_no(ctx, i, &nos[i]);
         if matches!(resultado, Err(ref f) if f.cancelled) {
             for &j in &restantes {
-                ctx.marca_no(&NodeRow::of(j, &nos[j]), "skipped", Some("corrida interrompida"));
+                ctx.marca_no(
+                    &NodeRow::of(j, &nos[j]),
+                    "skipped",
+                    Some("corrida interrompida"),
+                );
             }
             return Err(Fail::cancelled());
         }
@@ -2240,11 +2347,17 @@ fn checar_pasta_e_variaveis(ctx: &mut Ctx) -> Result<(), Fail> {
 /// significar alguma coisa. O que não é opção é esperar sem prazo: abrir a pasta é
 /// uma espera de disco, e um volume adormecido devolve o motivo, parando a
 /// validação ali em vez de girar para sempre.
-fn origem_e_destino(raiz: &Path, destino: &Path, prazo: Duration) -> Result<(PathBuf, PathBuf), String> {
+fn origem_e_destino(
+    raiz: &Path,
+    destino: &Path,
+    prazo: Duration,
+) -> Result<(PathBuf, PathBuf), String> {
     let origem = match git_probe::canon_ou_ancestral(raiz, prazo) {
         git_probe::Canon::Resolveu(caminho) => caminho,
         git_probe::Canon::Ausente(motivo) => {
-            return Err(format!("a pasta local do projeto não pôde ser lida: {motivo}"))
+            return Err(format!(
+                "a pasta local do projeto não pôde ser lida: {motivo}"
+            ))
         }
         git_probe::Canon::SemResposta(motivo) => return Err(motivo),
     };
@@ -2341,7 +2454,14 @@ pub fn checar_definicao(
             // Cada estratégia tem o seu requisito mínimo; o resto cai no `_ => {}` e é
             // validado pelas etapas seguintes.
             match profile.strategy.as_str() {
-                "git" if profile.git_branch.as_deref().unwrap_or("").trim().is_empty() => {
+                "git"
+                    if profile
+                        .git_branch
+                        .as_deref()
+                        .unwrap_or("")
+                        .trim()
+                        .is_empty() =>
+                {
                     return Err("o deploy por Git exige a branch de origem".into());
                 }
                 "script" if profile.prepare_commands.iter().all(|c| c.trim().is_empty()) => {
@@ -2483,7 +2603,9 @@ fn destino_step(ctx: &mut Ctx) -> Result<Info, Fail> {
 
 fn git_step(ctx: &mut Ctx) -> Result<Info, Fail> {
     if !ctx.project.is_git_repo {
-        return Ok(Info::skip("a pasta local não é repositório Git — nada a verificar"));
+        return Ok(Info::skip(
+            "a pasta local não é repositório Git — nada a verificar",
+        ));
     }
     let status = git::status(&ctx.root).map_err(Fail::new)?;
     ctx.branch = status
@@ -2583,7 +2705,9 @@ fn files_step(ctx: &mut Ctx) -> Result<Info, Fail> {
 
 fn secrets_step(ctx: &mut Ctx) -> Result<Info, Fail> {
     if ctx.files.is_empty() {
-        return Ok(Info::skip("não há arquivos locais para verificar nesta estratégia"));
+        return Ok(Info::skip(
+            "não há arquivos locais para verificar nesta estratégia",
+        ));
     }
     let found = gate(ctx, 5)?;
     let avisos = found.iter().filter(|f| f.severity == "warn").count();
@@ -2692,8 +2816,8 @@ fn executar_rota(
     let saida = ctx.remote(posicao, &script, rotulo)?;
     let bruto = saida.stdout.clone();
     let alvo = executor_pronto(ctx)?;
-    let estado =
-        runtime::estado_no_ar(&alvo, &bruto).map_err(|motivo| Fail::failed(rotulo, Some(1), motivo))?;
+    let estado = runtime::estado_no_ar(&alvo, &bruto)
+        .map_err(|motivo| Fail::failed(rotulo, Some(1), motivo))?;
     Ok((estado, bruto))
 }
 
@@ -2741,8 +2865,9 @@ fn prepare_step(ctx: &mut Ctx) -> Result<Info, Fail> {
         .iter()
         .chain(ctx.profile.restart_commands.iter())
         .any(|c| c.contains("docker-compose"));
-    let precisa_cksum =
-        matches!(strategy, "sftp" | "artifacts" | "docker") && !ctx.profile.releases_enabled && !ctx.files.is_empty();
+    let precisa_cksum = matches!(strategy, "sftp" | "artifacts" | "docker")
+        && !ctx.profile.releases_enabled
+        && !ctx.files.is_empty();
 
     // A sonda roda em `sh`: é o único shell garantido antes de sabermos o que o
     // servidor tem.
@@ -2790,7 +2915,13 @@ fn prepare_step(ctx: &mut Ctx) -> Result<Info, Fail> {
     let resumo: Vec<String> = ctx
         .tools
         .iter()
-        .map(|(name, path)| if path.is_some() { format!("{name} ✓") } else { format!("{name} ✗") })
+        .map(|(name, path)| {
+            if path.is_some() {
+                format!("{name} ✓")
+            } else {
+                format!("{name} ✗")
+            }
+        })
         .collect();
     ctx.log(
         8,
@@ -2825,9 +2956,7 @@ fn prepare_step(ctx: &mut Ctx) -> Result<Info, Fail> {
     let executados = ctx.run_commands(8, "preparação", &ctx.profile.prepare_commands.clone())?;
     Ok(Info::done(format!(
         "{} pronto · shell {} · {}/{total} comando(s) de preparação",
-        base,
-        ctx.shell,
-        executados,
+        base, ctx.shell, executados,
     )))
 }
 
@@ -2870,8 +2999,8 @@ fn prepare_local(ctx: &mut Ctx) -> Result<Info, Fail> {
 /// fora — é o espelho do `find . -type f` usado no servidor.
 fn listar_arquivos_local(dir: &Path) -> Result<Vec<String>, String> {
     fn andar(pasta: &Path, prefixo: &str, out: &mut Vec<String>) -> Result<(), String> {
-        let entradas = fs::read_dir(pasta)
-            .map_err(|e| format!("falha ao ler {}: {e}", pasta.display()))?;
+        let entradas =
+            fs::read_dir(pasta).map_err(|e| format!("falha ao ler {}: {e}", pasta.display()))?;
         for entrada in entradas {
             let entrada = entrada.map_err(|e| format!("falha ao ler {}: {e}", pasta.display()))?;
             let nome = entrada.file_name().to_string_lossy().to_string();
@@ -2939,7 +3068,9 @@ fn backup_step(ctx: &mut Ctx) -> Result<Info, Fail> {
         return backup_local(ctx);
     }
     if !ctx.profile.backup_enabled {
-        return Ok(Info::skip("backup desativado no modelo — nenhum ponto de recuperação novo"));
+        return Ok(Info::skip(
+            "backup desativado no modelo — nenhum ponto de recuperação novo",
+        ));
     }
     let base = ctx.base();
     let origem = if ctx.profile.releases_enabled {
@@ -2962,7 +3093,9 @@ fn backup_step(ctx: &mut Ctx) -> Result<Info, Fail> {
     ));
     ctx.remote(9, &script, "backup")?;
     ctx.backup = Some(destino.clone());
-    Ok(Info::done(format!("ponto de recuperação em {destino} (origem {origem})")))
+    Ok(Info::done(format!(
+        "ponto de recuperação em {destino} (origem {origem})"
+    )))
 }
 
 /// Ponto de recuperação do modo sem servidor: os arquivos que já estão no destino
@@ -2970,10 +3103,14 @@ fn backup_step(ctx: &mut Ctx) -> Result<Info, Fail> {
 /// qualquer sobrescrita. É essa pasta que a ação **Reverter** repõe no lugar.
 fn backup_local(ctx: &mut Ctx) -> Result<Info, Fail> {
     if !ctx.profile.backup_enabled {
-        return Ok(Info::skip("backup desativado no modelo — nenhum ponto de recuperação novo"));
+        return Ok(Info::skip(
+            "backup desativado no modelo — nenhum ponto de recuperação novo",
+        ));
     }
     if ctx.files.is_empty() {
-        return Ok(Info::skip("nenhum arquivo seria copiado — não há o que guardar do destino"));
+        return Ok(Info::skip(
+            "nenhum arquivo seria copiado — não há o que guardar do destino",
+        ));
     }
     let (a_copiar, _) = ctx.plano_de_copia()?;
     if a_copiar.is_empty() && !ctx.profile.delete_extras {
@@ -3036,7 +3173,9 @@ fn send_step(ctx: &mut Ctx) -> Result<Info, Fail> {
     }
     match ctx.profile.strategy.as_str() {
         "git" => send_git(ctx),
-        "script" => Ok(Info::skip("deploy por script: só comandos, nenhum arquivo é enviado")),
+        "script" => Ok(Info::skip(
+            "deploy por script: só comandos, nenhum arquivo é enviado",
+        )),
         _ => send_files(ctx),
     }
 }
@@ -3045,7 +3184,9 @@ fn send_step(ctx: &mut Ctx) -> Result<Info, Fail> {
 /// que o envio por sftp compara o `cksum` antes de transferir.
 fn send_local(ctx: &mut Ctx) -> Result<Info, Fail> {
     if ctx.profile.strategy == "script" {
-        return Ok(Info::skip("deploy por script: só comandos, nenhuma pasta é copiada"));
+        return Ok(Info::skip(
+            "deploy por script: só comandos, nenhuma pasta é copiada",
+        ));
     }
     let (a_copiar, iguais) = ctx.plano_de_copia()?;
     let base = ctx.destino_path();
@@ -3064,7 +3205,11 @@ fn send_local(ctx: &mut Ctx) -> Result<Info, Fail> {
             Fail::failed(
                 format!("copiar {}", arquivo.rel),
                 None,
-                format!("falha ao copiar {} para {}: {e}", arquivo.abs.display(), alvo.display()),
+                format!(
+                    "falha ao copiar {} para {}: {e}",
+                    arquivo.abs.display(),
+                    alvo.display()
+                ),
             )
         })?;
         copiados += 1;
@@ -3081,7 +3226,11 @@ fn send_local(ctx: &mut Ctx) -> Result<Info, Fail> {
     ctx.sent = copiados;
     ctx.unchanged = iguais;
     if total == 0 {
-        ctx.log(10, "out", "destino já igual à origem: nenhum arquivo precisou ser copiado");
+        ctx.log(
+            10,
+            "out",
+            "destino já igual à origem: nenhum arquivo precisou ser copiado",
+        );
     }
     let mut removidos = 0usize;
     if ctx.profile.delete_extras && !ctx.files.is_empty() {
@@ -3093,7 +3242,9 @@ fn send_local(ctx: &mut Ctx) -> Result<Info, Fail> {
         base.display()
     );
     if removidos > 0 {
-        msg.push_str(&format!(" · {removidos} removido(s) (exclusão explícita ativada)"));
+        msg.push_str(&format!(
+            " · {removidos} removido(s) (exclusão explícita ativada)"
+        ));
     }
     Ok(Info::done(msg))
 }
@@ -3127,8 +3278,9 @@ fn delete_extras_local(ctx: &mut Ctx, base: &Path, lista: &[LocalFile]) -> Resul
             if fs::rename(&caminho, &copia).is_err() {
                 fs::copy(&caminho, &copia)
                     .map_err(|e| Fail::new(format!("falha ao guardar {rel}: {e}")))?;
-                fs::remove_file(&caminho)
-                    .map_err(|e| Fail::new(format!("falha ao remover {}: {e}", caminho.display())))?;
+                fs::remove_file(&caminho).map_err(|e| {
+                    Fail::new(format!("falha ao remover {}: {e}", caminho.display()))
+                })?;
             }
         } else {
             fs::remove_file(&caminho)
@@ -3143,9 +3295,13 @@ fn delete_extras_local(ctx: &mut Ctx, base: &Path, lista: &[LocalFile]) -> Resul
 
 /// Remove diretórios vazios abaixo do destino, sem tocar no próprio destino.
 fn podar_pastas_vazias(base: &Path) {
-    let Ok(entradas) = fs::read_dir(base) else { return };
+    let Ok(entradas) = fs::read_dir(base) else {
+        return;
+    };
     for entrada in entradas.flatten() {
-        let Ok(tipo) = entrada.file_type() else { continue };
+        let Ok(tipo) = entrada.file_type() else {
+            continue;
+        };
         if !tipo.is_dir() {
             continue;
         }
@@ -3154,7 +3310,10 @@ fn podar_pastas_vazias(base: &Path) {
             continue;
         }
         podar_pastas_vazias(&caminho);
-        if fs::read_dir(&caminho).map(|mut d| d.next().is_none()).unwrap_or(false) {
+        if fs::read_dir(&caminho)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(false)
+        {
             let _ = fs::remove_dir(&caminho);
         }
     }
@@ -3268,7 +3427,11 @@ fn send_files(ctx: &mut Ctx) -> Result<Info, Fail> {
         );
     }
     if total == 0 {
-        ctx.log(10, "out", "destino já igual à origem: nenhum arquivo precisou ser enviado");
+        ctx.log(
+            10,
+            "out",
+            "destino já igual à origem: nenhum arquivo precisou ser enviado",
+        );
     }
 
     if ctx.profile.delete_extras && ctx.release.is_none() && !selecionados.is_empty() {
@@ -3279,7 +3442,10 @@ fn send_files(ctx: &mut Ctx) -> Result<Info, Fail> {
         ctx.unchanged
     );
     if ctx.removed > 0 {
-        msg.push_str(&format!(" · {} removido(s) (exclusão explícita ativada)", ctx.removed));
+        msg.push_str(&format!(
+            " · {} removido(s) (exclusão explícita ativada)",
+            ctx.removed
+        ));
     }
     Ok(Info::done(msg))
 }
@@ -3293,9 +3459,8 @@ fn delete_extras(ctx: &mut Ctx, destino: &str, lista: &[LocalFile]) -> Result<us
         .map(|f| f.rel.clone())
         .collect::<Vec<_>>()
         .join("\n");
-    fs::write(&tmp, format!("{conteudo}\n")).map_err(|e| {
-        Fail::new(format!("falha ao preparar o manifesto local: {e}"))
-    })?;
+    fs::write(&tmp, format!("{conteudo}\n"))
+        .map_err(|e| Fail::new(format!("falha ao preparar o manifesto local: {e}")))?;
     let remoto = remote_join(destino, ".devops-manifest.txt");
     let enviado = ctx.upload(&[(tmp.clone(), remoto)], "sftp put (manifesto)");
     let resultado = if let Err(fail) = enviado {
@@ -3339,7 +3504,11 @@ fn update_step(ctx: &mut Ctx) -> Result<Info, Fail> {
         operacoes += 1;
     }
     if matches!(ctx.profile.strategy.as_str(), "git" | "script" | "docker") {
-        operacoes += ctx.run_commands(11, "build/atualização no servidor", &ctx.profile.build_commands.clone())?;
+        operacoes += ctx.run_commands(
+            11,
+            "build/atualização no servidor",
+            &ctx.profile.build_commands.clone(),
+        )?;
     }
     // Com executor declarado, a imagem desta corrida é construída a partir do código
     // que a etapa 10 acabou de enviar — por isso vem depois do envio e da troca de
@@ -3382,11 +3551,19 @@ fn update_local(ctx: &mut Ctx) -> Result<Info, Fail> {
             "sem servidor a publicação vai direto para a pasta de destino: não há troca de release nem comando remoto",
         ));
     }
-    let n = ctx.run_commands(11, "build/atualização nesta máquina", &ctx.profile.build_commands.clone())?;
+    let n = ctx.run_commands(
+        11,
+        "build/atualização nesta máquina",
+        &ctx.profile.build_commands.clone(),
+    )?;
     if n == 0 {
-        return Ok(Info::skip("nenhum comando de build ou atualização configurado no modelo"));
+        return Ok(Info::skip(
+            "nenhum comando de build ou atualização configurado no modelo",
+        ));
     }
-    Ok(Info::done(format!("{n} operação(ões) de atualização concluída(s) nesta máquina")))
+    Ok(Info::done(format!(
+        "{n} operação(ões) de atualização concluída(s) nesta máquina"
+    )))
 }
 
 fn restart_step(ctx: &mut Ctx) -> Result<Info, Fail> {
@@ -3487,13 +3664,18 @@ fn confirm_step(ctx: &mut Ctx) -> Result<Info, Fail> {
             format!("o diretório ativo {live} está vazio — a publicação não produziu arquivos"),
         ));
     }
-    ctx.confirmation = format!("{live} no ar com {count} arquivo(s) · {} enviado(s)", ctx.sent);
+    ctx.confirmation = format!(
+        "{live} no ar com {count} arquivo(s) · {} enviado(s)",
+        ctx.sent
+    );
     let mut msg = format!("publicação confirmada em {live} · {count} arquivo(s) no destino");
     if ctx.profile.releases_enabled {
         msg.push_str(&format!(
             " · release {} · anterior {}",
             ctx.release.clone().unwrap_or_default(),
-            ctx.previous.clone().unwrap_or_else(|| "nenhuma".to_string())
+            ctx.previous
+                .clone()
+                .unwrap_or_else(|| "nenhuma".to_string())
         ));
     }
     if let Some(b) = ctx.backup.clone() {
@@ -3539,7 +3721,11 @@ fn confirm_local(ctx: &mut Ctx) -> Result<Info, Fail> {
             format!(
                 "{} arquivo(s) não bateram com a origem no destino: {}{}",
                 divergentes.len(),
-                mostradas.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+                mostradas
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 if divergentes.len() > 5 { " …" } else { "" }
             ),
         ));
@@ -3589,7 +3775,9 @@ fn register_step(ctx: &mut Ctx) -> Result<Info, Fail> {
         ctx.unchanged,
         ctx.removed,
         ctx.release.clone().unwrap_or_else(|| ctx.base()),
-        ctx.previous.clone().unwrap_or_else(|| "nenhuma".to_string())
+        ctx.previous
+            .clone()
+            .unwrap_or_else(|| "nenhuma".to_string())
     )))
 }
 
@@ -3610,8 +3798,12 @@ fn rollback_switch(ctx: &mut Ctx) -> Result<Info, Fail> {
             )
         })?;
         let roteiro = executor.roteiro_reverter(&imagem);
-        let (estado, bruto) =
-            executar_rota(ctx, 11, &roteiro, "voltar o container para a imagem anterior")?;
+        let (estado, bruto) = executar_rota(
+            ctx,
+            11,
+            &roteiro,
+            "voltar o container para a imagem anterior",
+        )?;
         // O container que sai também é lido: esta corrida deslocou uma imagem, e uma
         // reversão dela tem para onde voltar do mesmo jeito.
         ctx.imagem_anterior = runtime::parse_anterior(&bruto).map(|(_, id)| id);
@@ -3699,9 +3891,8 @@ fn rollback_local(ctx: &mut Ctx) -> Result<Info, Fail> {
             fs::create_dir_all(pai)
                 .map_err(|e| Fail::new(format!("falha ao preparar {}: {e}", pai.display())))?;
         }
-        fs::copy(&origem, &alvo).map_err(|e| {
-            Fail::new(format!("falha ao repor {} no destino: {e}", rel))
-        })?;
+        fs::copy(&origem, &alvo)
+            .map_err(|e| Fail::new(format!("falha ao repor {} no destino: {e}", rel)))?;
         repostos += 1;
     }
     ctx.sent = repostos;
@@ -3804,7 +3995,9 @@ fn corrida(
     let com_dependencias = pedido.com_dependencias;
     let profile_id = pedido.profile_id;
     let (profile, servidor, project, root, extra, run_id, nos) = {
-        let conn = db.lock().map_err(|_| "o banco local está indisponível".to_string())?;
+        let conn = db
+            .lock()
+            .map_err(|_| "o banco local está indisponível".to_string())?;
         let profile = db::get_deploy_profile(&conn, profile_id)?;
         let servidor = servidor_do_modelo(&conn, &profile)?;
         let project = db::get_project(&conn, profile.project_id)?;
@@ -3815,9 +4008,8 @@ fn corrida(
                 profile.name
             ));
         }
-        let extra = security::extra_patterns(
-            db::setting_value(&conn, SECRET_PATTERNS_SETTING)?.as_deref(),
-        );
+        let extra =
+            security::extra_patterns(db::setting_value(&conn, SECRET_PATTERNS_SETTING)?.as_deref());
         let root = PathBuf::from(&project.local_path);
         let run_id = db::insert_run(&conn, profile_id, &procedencia(&profile, &servidor, &root))?;
         let _ = audit::log(
@@ -3835,10 +4027,13 @@ fn corrida(
                 "modelo {} · estratégia {} · execução #{run_id}{}{}",
                 profile.name,
                 profile.strategy,
-                if servidor.is_none() { " · nesta máquina" } else { "" },
+                if servidor.is_none() {
+                    " · nesta máquina"
+                } else {
+                    ""
+                },
                 match &alvo {
-                    Some(chave) if com_dependencias =>
-                        format!(" · nó “{chave}” com dependências"),
+                    Some(chave) if com_dependencias => format!(" · nó “{chave}” com dependências"),
                     Some(chave) => format!(" · nó “{chave}”"),
                     None if nos.is_empty() => String::new(),
                     None => format!(" · grafo com {} nó(s)", nos.len()),
@@ -3878,7 +4073,10 @@ fn corrida(
 
 /// O servidor cadastrado do modelo, quando ele tem um. A ausência é o modo sem
 /// servidor: a publicação acontece nas pastas e no shell desta máquina.
-fn servidor_do_modelo(conn: &rusqlite::Connection, profile: &DeployProfile) -> Result<Option<Server>, String> {
+fn servidor_do_modelo(
+    conn: &rusqlite::Connection,
+    profile: &DeployProfile,
+) -> Result<Option<Server>, String> {
     match profile.server_id {
         Some(id) => db::get_server(conn, id).map(Some),
         None => Ok(None),
@@ -3896,7 +4094,9 @@ pub fn rollback(
     secret_values: HashMap<String, String>,
 ) -> Result<i64, String> {
     let (profile, servidor, project, root, extra, heranca, new_run) = {
-        let conn = db.lock().map_err(|_| "o banco local está indisponível".to_string())?;
+        let conn = db
+            .lock()
+            .map_err(|_| "o banco local está indisponível".to_string())?;
         let origem = db::get_run(&conn, run_id)?;
         if origem.status != "success" && origem.status != "failed" {
             return Err(format!(
@@ -3907,9 +4107,8 @@ pub fn rollback(
         let profile = db::get_deploy_profile(&conn, origem.profile_id)?;
         let servidor = servidor_do_modelo(&conn, &profile)?;
         let project = db::get_project(&conn, profile.project_id)?;
-        let extra = security::extra_patterns(
-            db::setting_value(&conn, SECRET_PATTERNS_SETTING)?.as_deref(),
-        );
+        let extra =
+            security::extra_patterns(db::setting_value(&conn, SECRET_PATTERNS_SETTING)?.as_deref());
         let root = PathBuf::from(&project.local_path);
         let novo = db::insert_run(&conn, profile.id, &procedencia(&profile, &servidor, &root))?;
         let heranca = Heranca {
@@ -4036,9 +4235,11 @@ fn run(
     let linhas = match &percurso {
         // todas as etapas aparecem como "aguardando" assim que o clique acontece
         Percurso::Linear | Percurso::Reversao => ctx.mark_waiting_do_motor(),
-        Percurso::Grafo { nos, alvo, com_dependencias } => {
-            ctx.mark_waiting_dos_nos(nos, alvo.as_deref(), *com_dependencias)
-        }
+        Percurso::Grafo {
+            nos,
+            alvo,
+            com_dependencias,
+        } => ctx.mark_waiting_dos_nos(nos, alvo.as_deref(), *com_dependencias),
     };
     if linhas == 0 {
         state.forget(run_id);
@@ -4102,9 +4303,11 @@ fn execute(ctx: Ctx, state: DeployState, percurso: Percurso) {
     let resultado = match &percurso {
         Percurso::Reversao => rollback_pipeline(&mut ctx),
         Percurso::Linear => pipeline(&mut ctx),
-        Percurso::Grafo { nos, alvo, com_dependencias } => {
-            grafo(&mut ctx, nos, alvo.as_deref(), *com_dependencias)
-        }
+        Percurso::Grafo {
+            nos,
+            alvo,
+            com_dependencias,
+        } => grafo(&mut ctx, nos, alvo.as_deref(), *com_dependencias),
     };
     if !grafico {
         let flags = ctx.touched.load(Ordering::Relaxed);
@@ -4117,7 +4320,11 @@ fn execute(ctx: Ctx, state: DeployState, percurso: Percurso) {
     let (status, detail) = match &resultado {
         Ok(resumo) => ("success", resumo.clone()),
         Err(fail) => (
-            if fail.cancelled { "cancelled" } else { "failed" },
+            if fail.cancelled {
+                "cancelled"
+            } else {
+                "failed"
+            },
             fail.message.clone(),
         ),
     };
@@ -4166,7 +4373,13 @@ fn finalize(ctx: &Ctx, status: &str, detail: &str, rollback: bool) {
         db::get_run(&conn, ctx.run_id)
     };
     if let Ok(run) = run {
-        let _ = ctx.app.emit("deploy-done", FinalEvent { run_id: ctx.run_id, run });
+        let _ = ctx.app.emit(
+            "deploy-done",
+            FinalEvent {
+                run_id: ctx.run_id,
+                run,
+            },
+        );
     }
 }
 
@@ -4206,10 +4419,13 @@ pub struct Preflight {
 
 pub fn preflight(db: &DbHandle, profile_id: i64) -> Result<Preflight, String> {
     let (profile, project, extra) = {
-        let conn = db.lock().map_err(|_| "o banco local está indisponível".to_string())?;
+        let conn = db
+            .lock()
+            .map_err(|_| "o banco local está indisponível".to_string())?;
         let profile = db::get_deploy_profile(&conn, profile_id)?;
         let project = db::get_project(&conn, profile.project_id)?;
-        let extra = security::extra_patterns(db::setting_value(&conn, SECRET_PATTERNS_SETTING)?.as_deref());
+        let extra =
+            security::extra_patterns(db::setting_value(&conn, SECRET_PATTERNS_SETTING)?.as_deref());
         (profile, project, extra)
     };
     let root = PathBuf::from(&project.local_path);
@@ -4221,7 +4437,12 @@ pub fn preflight(db: &DbHandle, profile_id: i64) -> Result<Preflight, String> {
     let mut findings = Vec::new();
     let mut lista: Vec<LocalFile> = Vec::new();
     if envia {
-        lista = collect_files(&root, &profile.include_paths, &profile.exclude_paths, MAX_FILES)?;
+        lista = collect_files(
+            &root,
+            &profile.include_paths,
+            &profile.exclude_paths,
+            MAX_FILES,
+        )?;
         let rels: Vec<String> = lista.iter().map(|f| f.rel.clone()).collect();
         findings.extend(security::check_paths(&root, &rels, &extra));
     }
@@ -4324,12 +4545,10 @@ mod tests {
         manifest.insert("a.js".into(), (crc32(b"conteudo-a") as u64, 10));
         // tamanho igual e crc diferente → envia
         manifest.insert("b.js".into(), (999, 20));
-        let enviados = changed_files(&local, &manifest, |f| {
-            match f.rel.as_str() {
-                "a.js" => Some(crc32(b"conteudo-a") as u64),
-                "b.js" => Some(crc32(b"mudou") as u64),
-                _ => None,
-            }
+        let enviados = changed_files(&local, &manifest, |f| match f.rel.as_str() {
+            "a.js" => Some(crc32(b"conteudo-a") as u64),
+            "b.js" => Some(crc32(b"mudou") as u64),
+            _ => None,
         });
         let nomes: Vec<&str> = enviados.iter().map(|f| f.rel.as_str()).collect();
         assert_eq!(nomes, vec!["b.js", "novo.js"]);
@@ -4337,8 +4556,14 @@ mod tests {
 
     #[test]
     fn junta_caminhos_sem_duplicar_barra() {
-        assert_eq!(remote_join("/var/www/site", "releases/x"), "/var/www/site/releases/x");
-        assert_eq!(remote_join("/var/www/site/", "/index.html"), "/var/www/site/index.html");
+        assert_eq!(
+            remote_join("/var/www/site", "releases/x"),
+            "/var/www/site/releases/x"
+        );
+        assert_eq!(
+            remote_join("/var/www/site/", "/index.html"),
+            "/var/www/site/index.html"
+        );
         assert_eq!(remote_join("/var/www", ""), "/var/www");
     }
 
@@ -4346,7 +4571,9 @@ mod tests {
     fn nome_de_release_so_tem_caracteres_de_argomento() {
         let nome = release_name("2026-10-09T12:00:00Z", 7);
         assert_eq!(nome, "releases/2026-10-09T12:00:00Z-7");
-        assert!(nome.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-' | ':')));
+        assert!(nome
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-' | ':')));
     }
 
     #[test]
@@ -4356,7 +4583,10 @@ mod tests {
             Some("releases/1")
         );
         assert_eq!(parse_marker("PREV:\n", "PREV:"), None);
-        assert_eq!(parse_marker("HEAD:abc123\n", "HEAD:").as_deref(), Some("abc123"));
+        assert_eq!(
+            parse_marker("HEAD:abc123\n", "HEAD:").as_deref(),
+            Some("abc123")
+        );
     }
 
     #[test]
@@ -4378,9 +4608,14 @@ mod tests {
         let secrets = Secrets::new(&declared, &provided);
         assert_eq!(secrets.count(), 1);
         let prelude = secrets.prelude();
-        assert!(prelude.contains("export SENTRY_TOKEN='abc123'"), "{prelude}");
+        assert!(
+            prelude.contains("export SENTRY_TOKEN='abc123'"),
+            "{prelude}"
+        );
         assert!(!prelude.contains("NAO_DECLARADO"));
-        assert!(secrets.mask("chamada com abc123 no cabeçalho").contains("***"));
+        assert!(secrets
+            .mask("chamada com abc123 no cabeçalho")
+            .contains("***"));
         assert_eq!(Secrets::missing(&declared, &HashMap::new()).len(), 2);
     }
 
@@ -4470,13 +4705,17 @@ mod tests {
         // O destino é dados, nunca sintaxe: apóstrofo e espaço não abrem o script.
         let quoted = sshexec::shell_quote("/var/www/minha 'site'");
         let script = format!("mkdir -p {quoted}\n");
-        assert_eq!(
-            script,
-            "mkdir -p '/var/www/minha '\\''site'\\'''\n"
-        );
+        assert_eq!(script, "mkdir -p '/var/www/minha '\\''site'\\'''\n");
         let destino = "/var/www/backups/antes.tgz";
-        let tar = format!("tar -czf {} -C {} .\n", sshexec::shell_quote(destino), sshexec::shell_quote("/var/www/site/current"));
-        assert!(tar.starts_with("tar -czf '/var/www/backups/antes.tgz' -C '/var/www/site/current'"), "{tar}");
+        let tar = format!(
+            "tar -czf {} -C {} .\n",
+            sshexec::shell_quote(destino),
+            sshexec::shell_quote("/var/www/site/current")
+        );
+        assert!(
+            tar.starts_with("tar -czf '/var/www/backups/antes.tgz' -C '/var/www/site/current'"),
+            "{tar}"
+        );
     }
 
     #[test]
@@ -4487,9 +4726,14 @@ mod tests {
         let declared = vec!["DB_URL".to_string(), "TAG".to_string()];
         let secrets = Secrets::new(&declared, &provided);
         let prelude = secrets.prelude();
-        assert_eq!(prelude, "export DB_URL='postgres://u:p@h/db'\nexport TAG='v1.2'\n");
+        assert_eq!(
+            prelude,
+            "export DB_URL='postgres://u:p@h/db'\nexport TAG='v1.2'\n"
+        );
         // os nomes aparecem, os valores só saem mascarados
-        assert!(secrets.mask("connect postgres://u:p@h/db ok").contains("***"));
+        assert!(secrets
+            .mask("connect postgres://u:p@h/db ok")
+            .contains("***"));
     }
 
     #[test]
@@ -4573,9 +4817,15 @@ mod tests {
     #[test]
     fn o_escopo_do_diagnostico_e_o_no_sozinho_ou_a_corrente_dele() {
         let nos = grafo_de_teste();
-        assert_eq!(escopo_do_grafo(&nos, None, false), (0..8).collect::<Vec<usize>>());
+        assert_eq!(
+            escopo_do_grafo(&nos, None, false),
+            (0..8).collect::<Vec<usize>>()
+        );
         assert_eq!(escopo_do_grafo(&nos, Some("copia"), false), vec![6]);
-        assert_eq!(escopo_do_grafo(&nos, Some("copia"), true), vec![0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            escopo_do_grafo(&nos, Some("copia"), true),
+            vec![0, 1, 2, 3, 4, 5, 6]
+        );
         assert!(escopo_do_grafo(&nos, Some("que_nao_existe"), true).is_empty());
     }
 
@@ -4645,10 +4895,16 @@ mod tests {
         let lista = listar_arquivos_local(&base).unwrap();
         assert_eq!(
             lista,
-            vec!["assets/app.js".to_string(), "assets/img/logo.svg".to_string(), "index.html".to_string()]
+            vec![
+                "assets/app.js".to_string(),
+                "assets/img/logo.svg".to_string(),
+                "index.html".to_string()
+            ]
         );
         // destino que ainda não existe é pasta vazia, não erro
-        assert!(listar_arquivos_local(&base.join("ausente")).unwrap().is_empty());
+        assert!(listar_arquivos_local(&base.join("ausente"))
+            .unwrap()
+            .is_empty());
         fs::remove_dir_all(&base).unwrap();
     }
 
@@ -4662,7 +4918,10 @@ mod tests {
 
         podar_pastas_vazias(&base);
         assert!(!base.join("vazia").exists(), "a pasta vazia deveria sumir");
-        assert!(base.join(BACKUPS_DIR).join("9").is_dir(), "a guarda não pode ser podada");
+        assert!(
+            base.join(BACKUPS_DIR).join("9").is_dir(),
+            "a guarda não pode ser podada"
+        );
         assert!(base.join("index.html").is_file());
         fs::remove_dir_all(&base).unwrap();
     }
@@ -4681,15 +4940,25 @@ mod tests {
         // Com releases, o `current` é o código desta corrida. A raiz seria a
         // publicação anterior: construir a imagem a partir dela publicaria código
         // velho sem dizer nada.
-        assert_eq!(pasta_do_executor("/srv/api", true, false), "/srv/api/current");
+        assert_eq!(
+            pasta_do_executor("/srv/api", true, false),
+            "/srv/api/current"
+        );
         // Sem releases não há symlink nenhum, e nesta máquina o destino é o destino.
         assert_eq!(pasta_do_executor("/srv/api", false, false), "/srv/api");
-        assert_eq!(pasta_do_executor("C:/publicados/site", true, true), "C:/publicados/site");
+        assert_eq!(
+            pasta_do_executor("C:/publicados/site", true, true),
+            "C:/publicados/site"
+        );
     }
 
     #[test]
     fn a_falta_no_servidor_e_a_ferramenta_que_a_sonda_pediu() {
-        let exigidas = [("git", "git"), ("pm2", "pm2"), ("node", "node (o app do pm2)")];
+        let exigidas = [
+            ("git", "git"),
+            ("pm2", "pm2"),
+            ("node", "node (o app do pm2)"),
+        ];
         let tem = |t: &str| t == "git" || t == "node";
         assert_eq!(faltas_do_servidor(&exigidas, tem), vec!["pm2"]);
         assert!(faltas_do_servidor(&exigidas, |_| true).is_empty());
@@ -4698,11 +4967,17 @@ mod tests {
     #[test]
     fn a_recusa_nomeia_o_executor_e_sem_executor_diz_a_estrategia() {
         let com_executor = recusa_de_ferramentas(&["pm2", "node (o app do pm2)"], "pm2");
-        assert!(com_executor.contains("o servidor não tem: pm2, node"), "{com_executor}");
+        assert!(
+            com_executor.contains("o servidor não tem: pm2, node"),
+            "{com_executor}"
+        );
         assert!(com_executor.contains("executor PM2"), "{com_executor}");
         // nada declarado é exatamente a mensagem de antes: a falta é da estratégia
         let sem_executor = recusa_de_ferramentas(&["git"], "");
-        assert!(sem_executor.contains("escolha outra estratégia"), "{sem_executor}");
+        assert!(
+            sem_executor.contains("escolha outra estratégia"),
+            "{sem_executor}"
+        );
         assert!(!sem_executor.contains("executor"), "{sem_executor}");
     }
 
@@ -4738,7 +5013,10 @@ mod tests {
     fn remoto_bare(de: &Path, nome: &str) -> PathBuf {
         let destino = de.parent().unwrap().join(format!("{nome}.git"));
         let _ = fs::remove_dir_all(&destino);
-        git_em(de, &["clone", "--bare", "-q", ".", &destino.to_string_lossy()]);
+        git_em(
+            de,
+            &["clone", "--bare", "-q", ".", &destino.to_string_lossy()],
+        );
         destino
     }
 
@@ -4754,7 +5032,11 @@ mod tests {
         assert!(feito.contains("tag v1.0.0 criada"), "{feito}");
         assert!(feito.contains("sem remoto"), "{feito}");
         // lida de volta no próprio repositório: a linha não promete o que o git não fez
-        let nomes: Vec<String> = git::tags(&dir).unwrap().into_iter().map(|t| t.name).collect();
+        let nomes: Vec<String> = git::tags(&dir)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
         assert!(nomes.contains(&"v1.0.0".to_string()), "{nomes:?}");
     }
 
@@ -4792,7 +5074,10 @@ mod tests {
         git_em(&origem, &["push", "-q", "-u", "origin", "main"]);
         let clone = origem.parent().unwrap().join("no-git-pull-clone");
         let _ = fs::remove_dir_all(&clone);
-        git_em(origem.parent().unwrap(), &["clone", "-q", &endereco, &clone.to_string_lossy()]);
+        git_em(
+            origem.parent().unwrap(),
+            &["clone", "-q", &endereco, &clone.to_string_lossy()],
+        );
 
         git_em(&origem, &["commit", "-q", "-m", "segundo", "--allow-empty"]);
         git_em(&origem, &["push", "-q", "origin", "main"]);
@@ -4852,24 +5137,48 @@ mod tests {
     #[test]
     fn o_no_de_analise_barra_com_a_contagem_e_nao_com_o_codigo_de_saida() {
         let atingido = veredito_do_no(&corrida(true, "concluida", "ERROR", None)).unwrap_err();
-        assert_eq!(atingido.command.as_deref(), Some("análise de código (corte ERROR)"));
-        assert!(atingido.message.contains("erro 2, aviso 1"), "{}", atingido.message);
-        assert!(atingido.message.contains("barra a publicação"), "{}", atingido.message);
-        assert_eq!(atingido.exit_code, None, "o nó não tem código de saída de ferramenta");
+        assert_eq!(
+            atingido.command.as_deref(),
+            Some("análise de código (corte ERROR)")
+        );
+        assert!(
+            atingido.message.contains("erro 2, aviso 1"),
+            "{}",
+            atingido.message
+        );
+        assert!(
+            atingido.message.contains("barra a publicação"),
+            "{}",
+            atingido.message
+        );
+        assert_eq!(
+            atingido.exit_code, None,
+            "o nó não tem código de saída de ferramenta"
+        );
 
         let dentro = veredito_do_no(&corrida(false, "concluida", "ERROR", None)).unwrap();
         assert!(dentro.contains("dentro do corte ERROR"), "{dentro}");
-        assert!(dentro.contains("1 achado(s) com 40 arquivo(s) lidos"), "{dentro}");
+        assert!(
+            dentro.contains("1 achado(s) com 40 arquivo(s) lidos"),
+            "{dentro}"
+        );
     }
 
     #[test]
     fn o_no_de_analise_nao_passa_por_limpo_sem_leitura() {
         // Sem corte o nó informa, mas uma varredura que falhou não informa nada:
         // é falha dita com a nota de quem varreu, nunca um sucesso presumido.
-        let sem_corte = veredito_do_no(&corrida(false, "falhou", "", Some("a varredura não leu arquivo nenhum")))
-            .unwrap_err();
+        let sem_corte = veredito_do_no(&corrida(
+            false,
+            "falhou",
+            "",
+            Some("a varredura não leu arquivo nenhum"),
+        ))
+        .unwrap_err();
         assert!(
-            sem_corte.message.contains("a varredura não leu arquivo nenhum"),
+            sem_corte
+                .message
+                .contains("a varredura não leu arquivo nenhum"),
             "{}",
             sem_corte.message
         );
@@ -4886,7 +5195,10 @@ mod tests {
         let cortada = veredito_do_no(&corrida(true, "interrompida", "ERROR", None)).unwrap_err();
         assert!(cortada.cancelled, "{:?}", cortada.message);
         assert_eq!(cortada.message, "interrompido pelo usuário");
-        assert_eq!(cortada.command, None, "não houve comando de ferramenta cortado");
+        assert_eq!(
+            cortada.command, None,
+            "não houve comando de ferramenta cortado"
+        );
 
         // sem corte também: metade da árvore lida não conclui o nó
         let muda = veredito_do_no(&corrida(false, "interrompida", "", None)).unwrap_err();
@@ -4895,7 +5207,10 @@ mod tests {
         // um estado que não é nenhum dos terminais — a corrida que ficou "rodando"
         // porque o aplicativo morreu no meio — é falha dita, nunca sucesso presumido
         let parada = veredito_do_no(&corrida(false, "rodando", "ERROR", None)).unwrap_err();
-        assert!(!parada.cancelled, "estado desconhecido não é vontade do usuário");
+        assert!(
+            !parada.cancelled,
+            "estado desconhecido não é vontade do usuário"
+        );
         assert!(
             parada.message.contains("que não é uma conclusão"),
             "{}",
@@ -4935,7 +5250,11 @@ mod tests {
         let apertado = bloco_de_log("err", "a\nb\nc", TETO_LINHAS_POR_TENTATIVA - 1);
         assert_eq!(apertado.len(), 2);
         assert_eq!(apertado[0], ("stderr".to_string(), "a".to_string()));
-        assert!(apertado[1].1.contains("2 linha(s) além do teto"), "{}", apertado[1].1);
+        assert!(
+            apertado[1].1.contains("2 linha(s) além do teto"),
+            "{}",
+            apertado[1].1
+        );
 
         // E o nome do fluxo do esquema vem do do motor, com as em branco fora:
         // linha vazia não é saída de ninguém.
@@ -4960,25 +5279,47 @@ mod tests {
         fs::create_dir_all(raiz.join("sub")).expect("criar a pasta de trabalho");
         fs::create_dir_all(base.join("fora")).expect("criar a pasta de fora");
 
-        let dentro = dir_local(&raiz, "sub", "coleta", git_probe::PRAZO_SONDA).expect("a pasta respondeu");
+        let dentro =
+            dir_local(&raiz, "sub", "coleta", git_probe::PRAZO_SONDA).expect("a pasta respondeu");
         assert!(!dentro.to_string_lossy().starts_with(r"\\?\"), "{dentro:?}");
 
         // Caminho que existe mas dobra para fora: é a contenção que recusa.
         let dobrando = dir_local(&raiz, "../fora", "coleta", git_probe::PRAZO_SONDA)
             .expect_err("sai da pasta cadastrada");
-        assert!(dobrando.message.contains("sai do projeto"), "{}", dobrando.message);
+        assert!(
+            dobrando.message.contains("sai do projeto"),
+            "{}",
+            dobrando.message
+        );
 
         // Pasta que não está lá: ausência dita, com as palavras do nó.
         let falta = dir_local(&raiz, "nao-existe", "coleta", git_probe::PRAZO_SONDA)
             .expect_err("a pasta não existe");
-        assert!(falta.message.contains("não existe dentro do projeto"), "{}", falta.message);
-        assert!(!falta.message.contains("não respondeu"), "{}", falta.message);
+        assert!(
+            falta.message.contains("não existe dentro do projeto"),
+            "{}",
+            falta.message
+        );
+        assert!(
+            !falta.message.contains("não respondeu"),
+            "{}",
+            falta.message
+        );
 
         // Prazo menor que qualquer resposta de disco: a corrida devolve o motivo da
         // espera, e não um "não existe" que culparia o desenho do grafo.
-        let sem_resposta = dir_local(&raiz, "sub", "coleta", Duration::ZERO).expect_err("0 ms é prazo");
-        assert!(sem_resposta.message.contains("não respondeu em 0 ms"), "{}", sem_resposta.message);
-        assert!(sem_resposta.message.contains("projeto"), "{}", sem_resposta.message);
+        let sem_resposta =
+            dir_local(&raiz, "sub", "coleta", Duration::ZERO).expect_err("0 ms é prazo");
+        assert!(
+            sem_resposta.message.contains("não respondeu em 0 ms"),
+            "{}",
+            sem_resposta.message
+        );
+        assert!(
+            sem_resposta.message.contains("projeto"),
+            "{}",
+            sem_resposta.message
+        );
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -4992,20 +5333,32 @@ mod tests {
         // criado — o da primeira publicação. Os dois lados saem da mesma forma,
         // então a régua de `checar_definicao` dispara.
         let dentro = raiz.join("publicado");
-        let (origem, alvo) = origem_e_destino(&raiz, &dentro, git_probe::PRAZO_SONDA).expect("os dois lados");
-        assert!(alvo.starts_with(&origem), "{alvo:?} deveria estar dentro de {origem:?}");
+        let (origem, alvo) =
+            origem_e_destino(&raiz, &dentro, git_probe::PRAZO_SONDA).expect("os dois lados");
+        assert!(
+            alvo.starts_with(&origem),
+            "{alvo:?} deveria estar dentro de {origem:?}"
+        );
         assert!(!origem.starts_with(&alvo), "e não o contrário");
 
         // Destino de fora, também inexistente: a régua diz fora, e a publicação
         // segue.
         let fora = base.join("publicado-fora");
-        let (origem2, alvo2) = origem_e_destino(&raiz, &fora, git_probe::PRAZO_SONDA).expect("os dois lados");
-        assert!(!alvo2.starts_with(&origem2), "{alvo2:?} não está dentro de {origem2:?}");
+        let (origem2, alvo2) =
+            origem_e_destino(&raiz, &fora, git_probe::PRAZO_SONDA).expect("os dois lados");
+        assert!(
+            !alvo2.starts_with(&origem2),
+            "{alvo2:?} não está dentro de {origem2:?}"
+        );
         assert!(!alvo2.to_string_lossy().starts_with(r"\\?\"), "{alvo2:?}");
 
         // Volume que não acorda: a validação para com o motivo da espera.
-        let sem_resposta = origem_e_destino(&raiz, &fora, Duration::ZERO).expect_err("0 ms é prazo");
-        assert!(sem_resposta.contains("não respondeu em 0 ms"), "{sem_resposta}");
+        let sem_resposta =
+            origem_e_destino(&raiz, &fora, Duration::ZERO).expect_err("0 ms é prazo");
+        assert!(
+            sem_resposta.contains("não respondeu em 0 ms"),
+            "{sem_resposta}"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 }

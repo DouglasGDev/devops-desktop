@@ -37,7 +37,10 @@ mod tests {
     fn command_preserva_o_argv() {
         let mut cmd = command("git");
         cmd.arg("-C").arg(".").arg("status");
-        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
         assert_eq!(args, vec!["-C", ".", "status"]);
     }
 }

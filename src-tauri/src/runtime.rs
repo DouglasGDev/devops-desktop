@@ -20,7 +20,8 @@ pub const RUNTIMES: [&str; 4] = ["", "docker", "compose", "pm2"];
 /// Como o `docker inspect` é pedido: nome, estado e, se houver HEALTHCHECK, a
 /// saúde. Ficou fora de um `format!` porque as chaves do template colidiriam com
 /// os placeholders da própria formatação.
-const MODELO_CONTAINER: &str = "{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}-{{end}}";
+const MODELO_CONTAINER: &str =
+    "{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}-{{end}}";
 
 /// Nome e id da imagem que o build acabou de produzir.
 const MODELO_IMAGEM: &str = "{{.Id}}";
@@ -150,7 +151,13 @@ impl Alvo {
         let limpa: String = tag
             .to_ascii_lowercase()
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '.' { c } else { '-' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '.' {
+                    c
+                } else {
+                    '-'
+                }
+            })
             .collect();
         self.tag = limpa.trim_matches('-').to_string();
         self
@@ -185,22 +192,33 @@ impl Alvo {
             return Ok(());
         }
         if self.diretorio.trim().is_empty() {
-            return Err(format!("{}: falta o diretório do código no destino", nome(&self.runtime)));
+            return Err(format!(
+                "{}: falta o diretório do código no destino",
+                nome(&self.runtime)
+            ));
         }
         match self.runtime.as_str() {
             "docker" => {
                 let imagem = self.imagem.trim();
                 if imagem.is_empty() {
-                    return Err("Docker: diga o nome da imagem (ex.: meuapp ou registry.local/meuapp)".into());
+                    return Err(
+                        "Docker: diga o nome da imagem (ex.: meuapp ou registry.local/meuapp)"
+                            .into(),
+                    );
                 }
                 if !imagem
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || ".-_/:@".contains(c))
                 {
-                    return Err("Docker: o nome da imagem só aceita minúsculas, números e . - _ / : @".into());
+                    return Err(
+                        "Docker: o nome da imagem só aceita minúsculas, números e . - _ / : @"
+                            .into(),
+                    );
                 }
                 if imagem.contains("//") || imagem.starts_with(':') || imagem.ends_with(':') {
-                    return Err("Docker: o nome da imagem tem uma barra ou dois-pontos sobrando".into());
+                    return Err(
+                        "Docker: o nome da imagem tem uma barra ou dois-pontos sobrando".into(),
+                    );
                 }
                 if self.dockerfile.trim().is_empty() || self.dockerfile.starts_with('/') {
                     return Err("Docker: o Dockerfile é um caminho dentro do projeto, não um caminho absoluto".into());
@@ -214,7 +232,10 @@ impl Alvo {
             }
             "compose" => {
                 if self.compose_file.trim().is_empty() || self.compose_file.starts_with('/') {
-                    return Err("Docker Compose: o arquivo do compose é um caminho dentro do projeto".into());
+                    return Err(
+                        "Docker Compose: o arquivo do compose é um caminho dentro do projeto"
+                            .into(),
+                    );
                 }
                 if !self.portas.is_empty() {
                     return Err(
@@ -228,10 +249,17 @@ impl Alvo {
                     return Err("PM2: diga o nome do app como ele aparece no `pm2 list`".into());
                 }
                 if !self.portas.is_empty() {
-                    return Err("PM2: a porta em que o app escuta é do próprio app, não do modelo".into());
+                    return Err(
+                        "PM2: a porta em que o app escuta é do próprio app, não do modelo".into(),
+                    );
                 }
             }
-            _ => return Err(format!("executor de runtime desconhecido: {}", self.runtime)),
+            _ => {
+                return Err(format!(
+                    "executor de runtime desconhecido: {}",
+                    self.runtime
+                ))
+            }
         }
         Ok(())
     }
@@ -270,17 +298,17 @@ fn conferir_porta(porta: &str) -> Result<(), String> {
         }
     }
     let ultima = partes.last().unwrap_or(&"");
-    let numero = ultima
-        .parse::<u16>()
-        .map_err(|_| format!("Docker: a porta de container em “{bruto}” não é um número 1-65535"))?;
+    let numero = ultima.parse::<u16>().map_err(|_| {
+        format!("Docker: a porta de container em “{bruto}” não é um número 1-65535")
+    })?;
     if numero == 0 {
         return Err(format!("Docker: a porta de container em “{bruto}” é zero"));
     }
     if partes.len() > 1 {
         let host = partes[partes.len() - 2];
-        let numero = host
-            .parse::<u16>()
-            .map_err(|_| format!("Docker: a porta de origem em “{bruto}” não é um número 1-65535"))?;
+        let numero = host.parse::<u16>().map_err(|_| {
+            format!("Docker: a porta de origem em “{bruto}” não é um número 1-65535")
+        })?;
         if numero == 0 {
             return Err(format!("Docker: a porta de origem em “{bruto}” é zero"));
         }
@@ -506,8 +534,7 @@ pub struct Container {
 
 impl Container {
     pub fn no_ar(&self) -> bool {
-        self.estado == "running"
-            && matches!(self.saude.as_str(), "-" | "" | "healthy")
+        self.estado == "running" && matches!(self.saude.as_str(), "-" | "" | "healthy")
     }
 
     /// A palavra que vai para a tela. Curta porque é o estado, não um parágrafo.
@@ -524,7 +551,10 @@ pub fn parse_containers(raw: &str) -> Vec<Container> {
     for bruto in raw.lines() {
         let linha = bruto.trim();
         let corpo = linha.strip_prefix("CONTAINER:").unwrap_or(linha);
-        let partes: Vec<&str> = corpo.split('|').map(|p| p.trim().trim_start_matches('/')).collect();
+        let partes: Vec<&str> = corpo
+            .split('|')
+            .map(|p| p.trim().trim_start_matches('/'))
+            .collect();
         if partes.len() < 2 || partes[1].is_empty() {
             continue;
         }
@@ -539,7 +569,10 @@ pub fn parse_containers(raw: &str) -> Vec<Container> {
         out.push(Container {
             nome,
             estado: partes[1].to_string(),
-            saude: partes.get(2).map(|s| s.to_string()).unwrap_or_else(|| "-".to_string()),
+            saude: partes
+                .get(2)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "-".to_string()),
         });
     }
     out
@@ -595,9 +628,7 @@ pub fn estado_no_ar(alvo: &Alvo, raw: &str) -> Result<String, String> {
             if lidos.is_empty() {
                 return Err("o docker não devolveu estado nenhum do container".to_string());
             }
-            let resumo = resumir(
-                lidos.iter().map(|c| c.resumo()).collect(),
-            );
+            let resumo = resumir(lidos.iter().map(|c| c.resumo()).collect());
             if lidos.iter().all(Container::no_ar) {
                 Ok(format!("{} container(s) no ar: {resumo}", lidos.len()))
             } else {
@@ -665,7 +696,10 @@ impl AppPm2 {
     }
 
     pub fn resumo(&self) -> String {
-        format!("{} · {} · pid {} · {} reinicio(s)", self.nome, self.status, self.pid, self.reinicios)
+        format!(
+            "{} · {} · pid {} · {} reinicio(s)",
+            self.nome, self.status, self.pid, self.reinicios
+        )
     }
 }
 
@@ -726,7 +760,10 @@ mod testes {
         assert!(roteiro.contains("docker build -f 'Dockerfile' -t 'meuapp:v7-f40243ff' ."));
         assert!(roteiro.contains("docker image inspect"));
         assert!(roteiro.contains("IMAGEM:"));
-        assert!(parse_imagem("Step 1/3 : FROM alpine\nIMAGEM:sha256:abc123\n").as_deref() == Some("sha256:abc123"));
+        assert!(
+            parse_imagem("Step 1/3 : FROM alpine\nIMAGEM:sha256:abc123\n").as_deref()
+                == Some("sha256:abc123")
+        );
     }
 
     #[test]
@@ -822,12 +859,21 @@ mod testes {
         alvo.conferir().unwrap();
         // Sem serviço o compose trabalha no arquivo inteiro: `up -d ''` seria um
         // nome de serviço que o próprio docker recusa, não um "todos".
-        let todos = Alvo { servico: String::new(), ..alvo };
+        let todos = Alvo {
+            servico: String::new(),
+            ..alvo
+        };
         let sem_servico = todos.roteiro_subir().unwrap();
-        assert!(sem_servico.contains("docker compose -f 'docker-compose.yml' up -d\n"), "{sem_servico}");
+        assert!(
+            sem_servico.contains("docker compose -f 'docker-compose.yml' up -d\n"),
+            "{sem_servico}"
+        );
         assert!(sem_servico.contains("ps -q)"), "{sem_servico}");
         assert!(!sem_servico.contains("''"));
-        assert!(todos.roteiro_build().unwrap().contains("docker compose -f 'docker-compose.yml' build\n"));
+        assert!(todos
+            .roteiro_build()
+            .unwrap()
+            .contains("docker compose -f 'docker-compose.yml' build\n"));
     }
 
     #[test]
@@ -846,7 +892,10 @@ mod testes {
         assert!(roteiro.contains("RAZAO:o app %s não está no pm2 desta máquina"));
         assert!(roteiro.contains("pm2 jlist"));
         // nada do nome do app vai para dentro de aspas simples sem estarquoted
-        let com_apostrofo = Alvo { servico: "d'api".into(), ..alvo.clone() };
+        let com_apostrofo = Alvo {
+            servico: "d'api".into(),
+            ..alvo.clone()
+        };
         let aspas = com_apostrofo.roteiro_subir().unwrap();
         assert!(aspas.contains("'d'\\''api'"), "{aspas}");
     }
@@ -868,10 +917,15 @@ mod testes {
         assert!(ok.contains("site · running · saúde healthy"), "{ok}");
 
         // Compose com dois serviços: um deles parado já recusa a etapa inteira.
-        let compose = Alvo { diretorio: "/var/www/site".into(), ..Alvo::novo("compose") };
-        assert!(estado_no_ar(&compose, "web|running|-\nworker|restarting|-\n")
-            .unwrap_err()
-            .contains("restarting"));
+        let compose = Alvo {
+            diretorio: "/var/www/site".into(),
+            ..Alvo::novo("compose")
+        };
+        assert!(
+            estado_no_ar(&compose, "web|running|-\nworker|restarting|-\n")
+                .unwrap_err()
+                .contains("restarting")
+        );
         assert!(estado_no_ar(&compose, "web|running|-\nworker|running|-\n")
             .unwrap()
             .starts_with("2 container(s) no ar"));
@@ -882,16 +936,24 @@ mod testes {
         );
 
         // PM2: o app declarado é o que decide, e um offline com pid 0 não está no ar.
-        let pm2 = Alvo { diretorio: "/srv/app".into(), servico: "api".into(), ..Alvo::novo("pm2") };
+        let pm2 = Alvo {
+            diretorio: "/srv/app".into(),
+            servico: "api".into(),
+            ..Alvo::novo("pm2")
+        };
         let json = r#"[{"name":"api","pid":0,"pm2_env":{"status":"offline","restart_time":3,"pm_uptime":0}},{"name":"worker","pid":9,"pm2_env":{"status":"online","restart_time":0,"pm_uptime":1}}]"#;
-        assert!(estado_no_ar(&pm2, json).unwrap_err().contains("api não está no ar"));
+        assert!(estado_no_ar(&pm2, json)
+            .unwrap_err()
+            .contains("api não está no ar"));
         let no_ar = r#"[{"name":"api","pid":412,"pm2_env":{"status":"online","restart_time":1,"pm_uptime":9}}]"#;
         assert_eq!(
             estado_no_ar(&pm2, no_ar).unwrap(),
             "pm2 · api · online · pid 412 · 1 reinicio(s)"
         );
         // Ausente da lista é outra frase, e a lista vazia do pm2 cai aqui.
-        assert!(estado_no_ar(&pm2, "[]").unwrap_err().contains("não está na lista"));
+        assert!(estado_no_ar(&pm2, "[]")
+            .unwrap_err()
+            .contains("não está na lista"));
         assert_eq!(
             estado_no_ar(&pm2, "sem json").unwrap_err(),
             "o pm2 não devolveu a lista de processos"
@@ -908,7 +970,10 @@ mod testes {
 
     #[test]
     fn muitos_containers_sao_mostrados_sem_estourar_a_linha() {
-        let compose = Alvo { diretorio: "/srv/site".into(), ..Alvo::novo("compose") };
+        let compose = Alvo {
+            diretorio: "/srv/site".into(),
+            ..Alvo::novo("compose")
+        };
         let seis = (1..=6)
             .map(|i| format!("s{i}|running|-"))
             .collect::<Vec<_>>()
@@ -926,7 +991,10 @@ mod testes {
         let lista = parse_pm2(json).unwrap();
         assert_eq!(lista.len(), 2);
         assert!(achar_pm2(&lista, "api").unwrap().no_ar());
-        assert_eq!(achar_pm2(&lista, "api").unwrap().resumo(), "api · online · pid 412 · 2 reinicio(s)");
+        assert_eq!(
+            achar_pm2(&lista, "api").unwrap().resumo(),
+            "api · online · pid 412 · 2 reinicio(s)"
+        );
         assert!(!achar_pm2(&lista, "worker").unwrap().no_ar());
         assert!(achar_pm2(&lista, "inexistente").is_none());
 
@@ -955,7 +1023,10 @@ mod testes {
     fn o_modelo_recusa_o_que_o_motor_recusaria() {
         // Docker sem imagem.
         let sem_imagem = Alvo::novo("docker");
-        assert!(sem_imagem.conferir().unwrap_err().contains("falta o diretório"));
+        assert!(sem_imagem
+            .conferir()
+            .unwrap_err()
+            .contains("falta o diretório"));
         let mut alvo = docker();
         alvo.diretorio.clear();
         assert!(alvo.conferir().unwrap_err().contains("falta o diretório"));
@@ -965,10 +1036,16 @@ mod testes {
         alvo.imagem = "Meu App".into();
         assert!(alvo.conferir().unwrap_err().contains("minúsculas"));
         alvo.imagem = "a//b".into();
-        assert!(alvo.conferir().unwrap_err().contains("barra ou dois-pontos"));
+        assert!(alvo
+            .conferir()
+            .unwrap_err()
+            .contains("barra ou dois-pontos"));
         alvo.imagem = "meuapp".into();
         alvo.dockerfile = "/etc/Dockerfile".into();
-        assert!(alvo.conferir().unwrap_err().contains("não um caminho absoluto"));
+        assert!(alvo
+            .conferir()
+            .unwrap_err()
+            .contains("não um caminho absoluto"));
         alvo.dockerfile = "Dockerfile".into();
         alvo.portas = vec!["99999999:80".into()];
         assert!(alvo.conferir().unwrap_err().contains("porta"));
@@ -976,7 +1053,10 @@ mod testes {
         alvo.conferir().unwrap();
 
         // PM2 sem app nomeado não tem o que recarregar.
-        let mut pm2 = Alvo { diretorio: "/srv/app".into(), ..Alvo::novo("pm2") };
+        let mut pm2 = Alvo {
+            diretorio: "/srv/app".into(),
+            ..Alvo::novo("pm2")
+        };
         assert!(pm2.conferir().unwrap_err().contains("pm2 list"));
         pm2.servico = "api".into();
         pm2.conferir().unwrap();
@@ -1021,11 +1101,21 @@ mod testes {
         assert_eq!(tentativas_de_espera(600), 8);
         assert_eq!(tentativas_de_espera(0), 2);
         let alvo = Alvo::da_definicao(
-            &Definicao { runtime: "docker", imagem: Some("meuapp"), dockerfile: None, compose_file: None, servico: None, portas: &[] },
+            &Definicao {
+                runtime: "docker",
+                imagem: Some("meuapp"),
+                dockerfile: None,
+                compose_file: None,
+                servico: None,
+                portas: &[],
+            },
             "/var/www/site",
             20,
         );
-        assert!(alvo.roteiro_subir().unwrap().contains("while [ $para -lt 5 ]"));
+        assert!(alvo
+            .roteiro_subir()
+            .unwrap()
+            .contains("while [ $para -lt 5 ]"));
     }
 
     #[test]

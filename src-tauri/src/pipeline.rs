@@ -33,8 +33,8 @@ use crate::{
     deploy,
     models::{
         DefinitionRevision, DeployProfile, DeployRun, DeployRunStep, PipelineNode,
-        PipelineNodeInput, StepLogLine, MAX_NODES, NODE_ANALISADORES, NODE_EXECUTORS,
-        NODE_GIT_OPS, SEVERIDADES,
+        PipelineNodeInput, StepLogLine, MAX_NODES, NODE_ANALISADORES, NODE_EXECUTORS, NODE_GIT_OPS,
+        SEVERIDADES,
     },
 };
 
@@ -153,10 +153,7 @@ pub fn checar_forma(nos: &[NoParaChecar]) -> Result<String, String> {
     if nos.len() > MAX_NODES {
         return Err(format!("o grafo aceita no máximo {MAX_NODES} nós"));
     }
-    let todos: HashMap<&str, &NoParaChecar> = nos
-        .iter()
-        .map(|n| (n.chave.trim(), n))
-        .collect();
+    let todos: HashMap<&str, &NoParaChecar> = nos.iter().map(|n| (n.chave.trim(), n)).collect();
     if todos.len() != nos.len() {
         let mut vistas: HashSet<&str> = HashSet::new();
         let repetida = nos
@@ -164,7 +161,9 @@ pub fn checar_forma(nos: &[NoParaChecar]) -> Result<String, String> {
             .map(|n| n.chave.trim())
             .find(|c| !vistas.insert(*c))
             .unwrap_or("");
-        return Err(format!("dois nós compartilham o identificador “{repetida}”"));
+        return Err(format!(
+            "dois nós compartilham o identificador “{repetida}”"
+        ));
     }
     for no in nos {
         if no.chave.trim().is_empty() {
@@ -327,7 +326,10 @@ fn achar_ciclo(nos: &[NoParaChecar], todos: &HashMap<&str, &NoParaChecar>) -> Op
     let mut removidos = 0usize;
     while let Some(chave) = fila.pop() {
         removidos += 1;
-        for no in nos.iter().filter(|n| n.dependencias.iter().any(|d| d.trim() == chave)) {
+        for no in nos
+            .iter()
+            .filter(|n| n.dependencias.iter().any(|d| d.trim() == chave))
+        {
             if let Some(q) = indepesas.get_mut(no.chave.trim()) {
                 *q -= 1;
                 if *q == 0 {
@@ -364,8 +366,13 @@ pub struct RetryPolicy {
 
 /// Listar definições com a última execução de cada uma. As execuções vêm de uma
 /// única consulta, não de uma por definição.
-pub fn definitions(db: &DbHandle, project_id: Option<i64>) -> Result<Vec<DefinitionSummary>, String> {
-    let conn = db.lock().map_err(|_| "o banco local está indisponível".to_string())?;
+pub fn definitions(
+    db: &DbHandle,
+    project_id: Option<i64>,
+) -> Result<Vec<DefinitionSummary>, String> {
+    let conn = db
+        .lock()
+        .map_err(|_| "o banco local está indisponível".to_string())?;
     let perfis = db::list_deploy_profiles(&conn, project_id)?;
     let execucoes = db::list_runs(&conn, project_id, 200)?;
     Ok(perfis
@@ -384,13 +391,17 @@ pub fn definitions(db: &DbHandle, project_id: Option<i64>) -> Result<Vec<Definit
 
 /// As versões salvas de uma definição, com o retrato do que ela era em cada uma.
 pub fn revisions(db: &DbHandle, definition_id: i64) -> Result<Vec<DefinitionRevision>, String> {
-    let conn = db.lock().map_err(|_| "o banco local está indisponível".to_string())?;
+    let conn = db
+        .lock()
+        .map_err(|_| "o banco local está indisponível".to_string())?;
     db::list_revisions(&conn, definition_id)
 }
 
 /// O grafo salvo de uma definição, na ordem em que a tela o desenha.
 pub fn nodes(db: &DbHandle, definition_id: i64) -> Result<Vec<PipelineNode>, String> {
-    let conn = db.lock().map_err(|_| "o banco local está indisponível".to_string())?;
+    let conn = db
+        .lock()
+        .map_err(|_| "o banco local está indisponível".to_string())?;
     db::list_pipeline_nodes(&conn, definition_id)
 }
 
@@ -403,7 +414,9 @@ pub fn save_nodes(
     definition_id: i64,
     nos: &[PipelineNodeInput],
 ) -> Result<Vec<PipelineNode>, String> {
-    let conn = db.lock().map_err(|_| "o banco local está indisponível".to_string())?;
+    let conn = db
+        .lock()
+        .map_err(|_| "o banco local está indisponível".to_string())?;
     let perfil = db::get_deploy_profile(&conn, definition_id)?;
     for no in nos {
         no.validate()?;
@@ -424,7 +437,11 @@ pub fn save_nodes(
             definition_id,
             perfil.version + 1,
             gravados.len(),
-            if gravados.is_empty() { " · volta à fila de quinze etapas" } else { "" }
+            if gravados.is_empty() {
+                " · volta à fila de quinze etapas"
+            } else {
+                ""
+            }
         )),
     );
     Ok(gravados)
@@ -434,7 +451,9 @@ pub fn save_nodes(
 /// através da mesma função. Os valores das variáveis não entram aqui — eles só
 /// existem na hora da execução, e o motor continua cobrando a ausência deles.
 pub fn validate(db: &DbHandle, definition_id: i64) -> Result<String, String> {
-    let conn = db.lock().map_err(|_| "o banco local está indisponível".to_string())?;
+    let conn = db
+        .lock()
+        .map_err(|_| "o banco local está indisponível".to_string())?;
     let perfil = db::get_deploy_profile(&conn, definition_id)?;
     let projeto = db::get_project(&conn, perfil.project_id)?;
     let servidor = match perfil.server_id {
@@ -458,14 +477,20 @@ pub fn validate(db: &DbHandle, definition_id: i64) -> Result<String, String> {
         perfil.version,
         perfil.strategy,
         perfil.remote_path.trim(),
-        if servidor.is_some() { "servidor SSH" } else { "nesta máquina" },
+        if servidor.is_some() {
+            "servidor SSH"
+        } else {
+            "nesta máquina"
+        },
         grafo
     ))
 }
 
 /// Estado atual de uma execução, inclusive enquanto ela roda.
 fn run_state(db: &DbHandle, run_id: i64) -> Result<DeployRun, String> {
-    let conn = db.lock().map_err(|_| "o banco local está indisponível".to_string())?;
+    let conn = db
+        .lock()
+        .map_err(|_| "o banco local está indisponível".to_string())?;
     db::get_run(&conn, run_id)
 }
 
@@ -474,7 +499,10 @@ fn run_state(db: &DbHandle, run_id: i64) -> Result<DeployRun, String> {
 pub fn retry_policy(db: &DbHandle, run_id: i64) -> Result<RetryPolicy, String> {
     let estado = run_state(db, run_id)?;
     Ok(match politica(&estado) {
-        Ok(()) => RetryPolicy { allowed: true, reason: None },
+        Ok(()) => RetryPolicy {
+            allowed: true,
+            reason: None,
+        },
         Err(reason) => RetryPolicy {
             allowed: false,
             reason: Some(reason),
@@ -547,7 +575,15 @@ pub fn retry(
     let origem = run_state(&db, run_id)?;
     politica(&origem)?;
     let alca = db.clone();
-    let novo = deploy::start(app, state, db, broker, origem.profile_id, secret_values, false)?;
+    let novo = deploy::start(
+        app,
+        state,
+        db,
+        broker,
+        origem.profile_id,
+        secret_values,
+        false,
+    )?;
     if let Ok(conn) = alca.lock() {
         let _ = audit::log(
             &conn,
@@ -590,7 +626,9 @@ pub fn step_logs(
     if pedido <= 0 {
         return Err("a leitura do log de uma etapa precisa pedir ao menos uma linha".to_string());
     }
-    let conn = db.lock().map_err(|_| "o banco local está indisponível".to_string())?;
+    let conn = db
+        .lock()
+        .map_err(|_| "o banco local está indisponível".to_string())?;
     db::read_step_logs(
         &conn,
         run_id,
@@ -730,7 +768,9 @@ mod tests {
         let viva = execucao("running", vec![(1, "done")]);
         assert!(politica(&viva).unwrap_err().contains("em andamento"));
         let muda = execucao("failed", vec![]);
-        assert!(politica(&muda).unwrap_err().contains("nenhuma etapa registrada"));
+        assert!(politica(&muda)
+            .unwrap_err()
+            .contains("nenhuma etapa registrada"));
     }
 
     #[test]
@@ -756,7 +796,11 @@ mod tests {
         // significam nada, e quem responde é a marca que o nó registrou
         let antes = execucao_de_nos(
             "failed",
-            vec![("testes", "done", false), ("build", "done", false), ("lint", "failed", false)],
+            vec![
+                ("testes", "done", false),
+                ("build", "done", false),
+                ("lint", "failed", false),
+            ],
         );
         assert!(politica(&antes).is_ok());
     }
@@ -765,7 +809,11 @@ mod tests {
     fn grafo_que_tocou_o_destino_nao_repete_sem_conferir() {
         let depois = execucao_de_nos(
             "failed",
-            vec![("coleta", "done", false), ("envio", "done", true), ("ativa", "failed", true)],
+            vec![
+                ("coleta", "done", false),
+                ("envio", "done", true),
+                ("ativa", "failed", true),
+            ],
         );
         let err = politica(&depois).unwrap_err();
         assert!(err.contains("resultado lá é desconhecido"), "{err}");
@@ -843,7 +891,12 @@ mod tests {
         }
     }
 
-    fn no_analise(chave: &str, instrumento: &str, corte: &str, dependencias: &[&str]) -> NoParaChecar {
+    fn no_analise(
+        chave: &str,
+        instrumento: &str,
+        corte: &str,
+        dependencias: &[&str],
+    ) -> NoParaChecar {
         NoParaChecar {
             instrumento: instrumento.into(),
             corte: corte.into(),
@@ -947,7 +1000,10 @@ mod tests {
         let mut nos = grafo_valido();
         nos[5].paralelo = true; // "envio" é etapa do motor
         let err = checar_forma(&nos).unwrap_err();
-        assert!(err.contains("só um nó de comando pode dividir ramal"), "{err}");
+        assert!(
+            err.contains("só um nó de comando pode dividir ramal"),
+            "{err}"
+        );
         // um nó de comando marcado para dividir ramal passa
         let mut outros = grafo_valido();
         outros[4].paralelo = true; // "migracao"
@@ -959,7 +1015,10 @@ mod tests {
         let mut nos = grafo_valido();
         nos.push(no("migracao", "comando", None, &[]));
         let err = checar_forma(&nos).unwrap_err();
-        assert!(err.contains("compartilham o identificador “migracao”"), "{err}");
+        assert!(
+            err.contains("compartilham o identificador “migracao”"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -974,7 +1033,9 @@ mod tests {
     fn no_sem_identificador_e_recusado() {
         let mut nos = grafo_valido();
         nos[0].chave = " ".into();
-        assert!(checar_forma(&nos).unwrap_err().contains("sem identificador"));
+        assert!(checar_forma(&nos)
+            .unwrap_err()
+            .contains("sem identificador"));
     }
 
     #[test]
@@ -997,7 +1058,10 @@ mod tests {
     fn tipo_de_no_que_o_motor_nao_conhece_e_recusado() {
         let nos = vec![no("magica", "agenda", None, &[])];
         let err = checar_forma(&nos).unwrap_err();
-        assert!(err.contains("motor, comando, aprovacao, git e analise"), "{err}");
+        assert!(
+            err.contains("motor, comando, aprovacao, git e analise"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1017,7 +1081,10 @@ mod tests {
         let mut paralelo = no_git("puxa", "pull", &[]);
         paralelo.paralelo = true;
         let err = checar_forma(&[paralelo]).unwrap_err();
-        assert!(err.contains("só um nó de comando pode dividir ramal"), "{err}");
+        assert!(
+            err.contains("só um nó de comando pode dividir ramal"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1033,8 +1100,14 @@ mod tests {
 
         // instrumento que não existe varreria nada e aprovaria tudo
         let inventado = checar_forma(&[no_analise("varre", "bandit", "ERROR", &[])]).unwrap_err();
-        assert!(inventado.contains("sem instrumento que o motor rode"), "{inventado}");
-        assert!(inventado.contains("embutido, semgrep, ambos"), "{inventado}");
+        assert!(
+            inventado.contains("sem instrumento que o motor rode"),
+            "{inventado}"
+        );
+        assert!(
+            inventado.contains("embutido, semgrep, ambos"),
+            "{inventado}"
+        );
 
         // um corte inventado barraria para sempre — ninguém entenderia o porquê
         let corte = checar_forma(&[no_analise("varre", "embutido", "CRITICO", &[])]).unwrap_err();

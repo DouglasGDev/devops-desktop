@@ -7,11 +7,22 @@ use std::{
     time::Duration,
 };
 
-use crate::models::{AgentInfo, AgentKey, KeyFile, KnownHostsInfo, SshDiscoveryReport, SshHostCandidate};
+use crate::models::{
+    AgentInfo, AgentKey, KeyFile, KnownHostsInfo, SshDiscoveryReport, SshHostCandidate,
+};
 
 const NON_KEY_FILES: &[&str] = &[
-    "config", "config.old", "known_hosts", "known_hosts.old", "known_hosts2", "authorized_keys",
-    "authorized_keys2", "environment", "rc", "ssh_config", "sshd_config",
+    "config",
+    "config.old",
+    "known_hosts",
+    "known_hosts.old",
+    "known_hosts2",
+    "authorized_keys",
+    "authorized_keys2",
+    "environment",
+    "rc",
+    "ssh_config",
+    "sshd_config",
 ];
 
 pub fn home_ssh_dir() -> Option<PathBuf> {
@@ -47,11 +58,7 @@ struct CandidateBuilder {
 
 impl CandidateBuilder {
     fn into_candidate(self) -> Option<SshHostCandidate> {
-        let concrete = self
-            .patterns
-            .iter()
-            .find(|p| !has_wildcard(p))?
-            .clone();
+        let concrete = self.patterns.iter().find(|p| !has_wildcard(p))?.clone();
         Some(SshHostCandidate {
             is_concrete: true,
             alias: concrete,
@@ -80,7 +87,9 @@ fn parse_config_file(path: &Path, state: &mut ParserState, depth: usize) {
     let canonical = match std::fs::canonicalize(path) {
         Ok(p) => p,
         Err(e) => {
-            state.warnings.push(format!("não foi possível ler {}: {e}", path.display()));
+            state
+                .warnings
+                .push(format!("não foi possível ler {}: {e}", path.display()));
             return;
         }
     };
@@ -91,14 +100,19 @@ fn parse_config_file(path: &Path, state: &mut ParserState, depth: usize) {
     state.config_files.push(canonical.display().to_string());
 
     if depth > 16 {
-        state.warnings.push(format!("limite de profundidade de Include excedido em {}", path.display()));
+        state.warnings.push(format!(
+            "limite de profundidade de Include excedido em {}",
+            path.display()
+        ));
         return;
     }
 
     let content = match fs::read_to_string(&canonical) {
         Ok(c) => c,
         Err(e) => {
-            state.warnings.push(format!("não foi possível ler {}: {e}", canonical.display()));
+            state
+                .warnings
+                .push(format!("não foi possível ler {}: {e}", canonical.display()));
             return;
         }
     };
@@ -134,7 +148,8 @@ fn parse_config_file(path: &Path, state: &mut ParserState, depth: usize) {
                         merge_candidate(&mut state.hosts, candidate);
                     }
                 }
-                let patterns: Vec<String> = value.split_whitespace().map(|s| s.to_string()).collect();
+                let patterns: Vec<String> =
+                    value.split_whitespace().map(|s| s.to_string()).collect();
                 current = Some(CandidateBuilder {
                     patterns,
                     source_file: canonical.display().to_string(),
@@ -164,7 +179,10 @@ fn parse_config_file(path: &Path, state: &mut ParserState, depth: usize) {
                         Err(_) => vec![base.clone()],
                     };
                     if matches.is_empty() {
-                        state.warnings.push(format!("Include sem correspondência: {pattern} (em {})", canonical.display()));
+                        state.warnings.push(format!(
+                            "Include sem correspondência: {pattern} (em {})",
+                            canonical.display()
+                        ));
                     }
                     for m in matches {
                         parse_config_file(&m, state, depth + 1);
@@ -195,7 +213,8 @@ fn parse_config_file(path: &Path, state: &mut ParserState, depth: usize) {
             }
             "identityfile" => {
                 if let Some(b) = current.as_mut() {
-                    b.identity_files.push(expand_tilde(&value).display().to_string());
+                    b.identity_files
+                        .push(expand_tilde(&value).display().to_string());
                 }
             }
             "proxyjump" => {
@@ -276,7 +295,10 @@ fn scan_key_files(ssh_dir: &Path) -> (Vec<KeyFile>, Vec<KeyFile>) {
             Some(n) => n.to_string(),
             None => continue,
         };
-        if NON_KEY_FILES.iter().any(|f| file_name.eq_ignore_ascii_case(f)) {
+        if NON_KEY_FILES
+            .iter()
+            .any(|f| file_name.eq_ignore_ascii_case(f))
+        {
             continue;
         }
         if file_name.ends_with(".pub") {
@@ -294,14 +316,12 @@ fn scan_key_files(ssh_dir: &Path) -> (Vec<KeyFile>, Vec<KeyFile>) {
         } else {
             // Lê apenas as primeiras linhas para detectar formato/criptografia; o
             // material da chave nunca sai do arquivo original.
-            let header = fs::File::open(&path)
-                .ok()
-                .map(|mut f| {
-                    use std::io::Read;
-                    let mut buf = [0u8; 256];
-                    let n = f.read(&mut buf).unwrap_or(0);
-                    String::from_utf8_lossy(&buf[..n]).to_string()
-                });
+            let header = fs::File::open(&path).ok().map(|mut f| {
+                use std::io::Read;
+                let mut buf = [0u8; 256];
+                let n = f.read(&mut buf).unwrap_or(0);
+                String::from_utf8_lossy(&buf[..n]).to_string()
+            });
             let (key_type, encrypted) = match header {
                 Some(h) => {
                     let first = h.lines().next().unwrap_or("");
@@ -312,10 +332,7 @@ fn scan_key_files(ssh_dir: &Path) -> (Vec<KeyFile>, Vec<KeyFile>) {
                     let key_type = if is_openssh {
                         Some("openssh".to_string())
                     } else if is_pem {
-                        first
-                            .split_whitespace()
-                            .nth(1)
-                            .map(|s| s.to_lowercase())
+                        first.split_whitespace().nth(1).map(|s| s.to_lowercase())
                     } else {
                         None
                     };
@@ -392,7 +409,10 @@ fn sonda(programa: &str, args: &[&str], prazo: Duration) -> Sonda {
             motivo: format!("não respondeu em {}", crate::sshexec::texto_duracao(prazo)),
         };
     }
-    Sonda::Respondeu { code: feito.exit_code, stdout: feito.stdout }
+    Sonda::Respondeu {
+        code: feito.exit_code,
+        stdout: feito.stdout,
+    }
 }
 
 fn read_agent() -> AgentInfo {
@@ -415,7 +435,10 @@ fn veredito_agente(leitura: Sonda) -> AgentInfo {
                 "o ssh-add {motivo} e a leitura do agente foi abandonada."
             )),
         },
-        Sonda::Respondeu { code: Some(0), stdout } => AgentInfo {
+        Sonda::Respondeu {
+            code: Some(0),
+            stdout,
+        } => AgentInfo {
             available: true,
             keys: stdout.lines().filter_map(parse_agent_line).collect(),
             note: None,
@@ -456,7 +479,11 @@ fn parse_agent_line(line: &str) -> Option<AgentKey> {
     Some(AgentKey {
         fingerprint,
         key_type,
-        comment: if comment.is_empty() { None } else { Some(comment) },
+        comment: if comment.is_empty() {
+            None
+        } else {
+            Some(comment)
+        },
     })
 }
 
@@ -476,9 +503,9 @@ pub fn discover() -> SshDiscoveryReport {
             if cfg.is_file() {
                 parse_config_file(cfg, &mut state, 0);
             } else {
-                state
-                    .warnings
-                    .push("Nenhum arquivo ~/.ssh/config encontrado — cadastro manual disponível.".into());
+                state.warnings.push(
+                    "Nenhum arquivo ~/.ssh/config encontrado — cadastro manual disponível.".into(),
+                );
             }
         }
         _ => {
@@ -548,7 +575,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ddt-w-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let cfg = dir.join("config");
-        fs::write(&cfg, "Host *\n  User fallback\n\nHost web1\n  HostName 1.2.3.4\n").unwrap();
+        fs::write(
+            &cfg,
+            "Host *\n  User fallback\n\nHost web1\n  HostName 1.2.3.4\n",
+        )
+        .unwrap();
 
         let mut state = ParserState {
             hosts: Vec::new(),
@@ -567,7 +598,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ddt-i-{}", std::process::id()));
         fs::create_dir_all(dir.join("conf.d")).unwrap();
         fs::write(dir.join("config"), "Include conf.d/*.conf\n").unwrap();
-        fs::write(dir.join("conf.d/a.conf"), "Host incluido\n  HostName 5.6.7.8\n").unwrap();
+        fs::write(
+            dir.join("conf.d/a.conf"),
+            "Host incluido\n  HostName 5.6.7.8\n",
+        )
+        .unwrap();
 
         let mut state = ParserState {
             hosts: Vec::new(),
@@ -600,7 +635,10 @@ mod tests {
         };
         parse_config_file(&cfg, &mut state, 0);
         assert_eq!(state.hosts.len(), 1);
-        assert_eq!(state.hosts[0].host_name.as_deref(), Some("primeiro.example"));
+        assert_eq!(
+            state.hosts[0].host_name.as_deref(),
+            Some("primeiro.example")
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -635,16 +673,28 @@ mod tests {
         // quem respondeu com chaves: quatro telas diferentes, e nenhuma é a outra.
         let ausente = veredito_agente(Sonda::Ausente);
         assert!(!ausente.available);
-        assert!(ausente.note.as_deref().unwrap_or("").contains("não encontrado no PATH"));
+        assert!(ausente
+            .note
+            .as_deref()
+            .unwrap_or("")
+            .contains("não encontrado no PATH"));
 
-        let mudo = veredito_agente(Sonda::SemResposta { motivo: "não respondeu em 5 s".into() });
+        let mudo = veredito_agente(Sonda::SemResposta {
+            motivo: "não respondeu em 5 s".into(),
+        });
         assert!(!mudo.available);
         let nota = mudo.note.expect("a tela precisa dizer por que parou");
         assert!(nota.contains("não respondeu em 5 s"), "{nota}");
         assert!(!nota.contains("não encontrado"), "{nota}");
 
-        let vazio = veredito_agente(Sonda::Respondeu { code: Some(1), stdout: String::new() });
-        assert!(vazio.available, "o agente respondeu que está vivo, sem chaves");
+        let vazio = veredito_agente(Sonda::Respondeu {
+            code: Some(1),
+            stdout: String::new(),
+        });
+        assert!(
+            vazio.available,
+            "o agente respondeu que está vivo, sem chaves"
+        );
         assert!(vazio.keys.is_empty());
 
         let cheio = veredito_agente(Sonda::Respondeu {
@@ -655,9 +705,16 @@ mod tests {
         assert_eq!(cheio.keys.len(), 1);
         assert!(cheio.note.is_none());
 
-        let recusa = veredito_agente(Sonda::Respondeu { code: Some(2), stdout: String::new() });
+        let recusa = veredito_agente(Sonda::Respondeu {
+            code: Some(2),
+            stdout: String::new(),
+        });
         assert!(!recusa.available);
-        assert!(recusa.note.as_deref().unwrap_or("").contains("não está em execução"));
+        assert!(recusa
+            .note
+            .as_deref()
+            .unwrap_or("")
+            .contains("não está em execução"));
     }
 
     #[test]
@@ -673,7 +730,10 @@ mod tests {
         let inicio = std::time::Instant::now();
         let info = veredito_agente(sonda(programa, args, Duration::from_secs(1)));
         let decorrido = inicio.elapsed();
-        assert!(decorrido < Duration::from_secs(10), "esperou o programa inteiro: {decorrido:?}");
+        assert!(
+            decorrido < Duration::from_secs(10),
+            "esperou o programa inteiro: {decorrido:?}"
+        );
         assert!(!info.available);
         let nota = info.note.expect("sem resposta tem de dizer o motivo");
         assert!(nota.contains("não respondeu em 1 s"), "{nota}");
@@ -687,9 +747,15 @@ mod tests {
         let inicio = std::time::Instant::now();
         let info = read_agent();
         let decorrido = inicio.elapsed();
-        assert!(decorrido < Duration::from_secs(20), "a leitura esperou sem prazo: {decorrido:?}");
+        assert!(
+            decorrido < Duration::from_secs(20),
+            "a leitura esperou sem prazo: {decorrido:?}"
+        );
         if !info.available {
-            assert!(info.note.is_some(), "agente indisponível sem dizer o motivo");
+            assert!(
+                info.note.is_some(),
+                "agente indisponível sem dizer o motivo"
+            );
         }
         assert!(
             !info.note.as_deref().unwrap_or("").contains("não existe"),

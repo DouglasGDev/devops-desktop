@@ -1,0 +1,2 @@
+# Fixtures de teste com credenciais falsas de propósito
+src-tauri/src/security/security_test_fixtures.rs

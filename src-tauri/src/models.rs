@@ -293,7 +293,10 @@ impl RoutineInput {
             return Err("o comando da rotina excede 5000 caracteres".into());
         }
         if !["read", "write"].contains(&self.danger.as_str()) {
-            return Err(format!("classificação de comando inválida: {}", self.danger));
+            return Err(format!(
+                "classificação de comando inválida: {}",
+                self.danger
+            ));
         }
         if self.params.len() > 10 {
             return Err("uma rotina aceita no máximo 10 parâmetros".into());
@@ -304,8 +307,13 @@ impl RoutineInput {
             if pname.is_empty() || pname.len() > 60 {
                 return Err("nome de parâmetro vazio ou longo demais".into());
             }
-            if !pname.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-                return Err(format!("nome de parâmetro inválido: {pname} (use letras, números, _ ou -)"));
+            if !pname
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err(format!(
+                    "nome de parâmetro inválido: {pname} (use letras, números, _ ou -)"
+                ));
             }
             if names.contains(&pname) {
                 return Err(format!("parâmetro duplicado: {pname}"));
@@ -314,7 +322,9 @@ impl RoutineInput {
         }
         for ph in command_placeholders(command) {
             if !names.contains(&ph.as_str()) {
-                return Err(format!("o comando usa o parâmetro {{{{{ph}}}}} mas ele não está definido"));
+                return Err(format!(
+                    "o comando usa o parâmetro {{{{{ph}}}}} mas ele não está definido"
+                ));
             }
         }
         Ok(())
@@ -429,7 +439,9 @@ fn is_safe_local_path(path: &str) -> bool {
     }
     let mut chars = unificado.chars();
     match (chars.next(), chars.next(), chars.next()) {
-        (Some(letra), Some(':'), Some('/')) => letra.is_ascii_alphabetic() && !chars.as_str().trim_matches('/').is_empty(),
+        (Some(letra), Some(':'), Some('/')) => {
+            letra.is_ascii_alphabetic() && !chars.as_str().trim_matches('/').is_empty()
+        }
         _ => false,
     }
 }
@@ -689,7 +701,8 @@ impl DeployProfileInput {
                 }
             }
             "docker" => {
-                let tem_comando = !self.build_commands.is_empty() || !self.restart_commands.is_empty();
+                let tem_comando =
+                    !self.build_commands.is_empty() || !self.restart_commands.is_empty();
                 if !tem_comando && self.runtime.as_deref().unwrap_or("").trim().is_empty() {
                     // Com um executor de runtime declarado, a imagem desta corrida é
                     // construída e subida pelo próprio executor: não pedir comando.
@@ -925,11 +938,7 @@ impl PipelineNodeInput {
     /// A operação declarada por um nó `git`, já normalizada. Os nós que não são
     /// `git` guardam isto vazio, e é assim que `checar_grafo` distingue um do outro.
     pub fn git_op(&self) -> String {
-        self.git_op
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .to_lowercase()
+        self.git_op.as_deref().unwrap_or("").trim().to_lowercase()
     }
 
     pub fn depends_on(&self) -> Vec<String> {
@@ -976,14 +985,18 @@ impl PipelineNodeInput {
             format!("nó “{}”", self.node_key.trim())
         };
         if self.node_key.trim().is_empty() || self.node_key.len() > 40 {
-            return Err(format!("{rotulo}: o identificador do nó deve ter de 1 a 40 caracteres"));
+            return Err(format!(
+                "{rotulo}: o identificador do nó deve ter de 1 a 40 caracteres"
+            ));
         }
         if !self
             .node_key
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         {
-            return Err(format!("{rotulo}: o identificador aceita letra, número, hífen e sublinhado"));
+            return Err(format!(
+                "{rotulo}: o identificador aceita letra, número, hífen e sublinhado"
+            ));
         }
         let title = self.title.trim();
         if title.is_empty() || title.chars().count() > 120 {
@@ -998,7 +1011,9 @@ impl PipelineNodeInput {
         match kind.as_str() {
             "motor" => {
                 let Some(step) = self.engine_step else {
-                    return Err(format!("{rotulo}: escolha qual das quinze etapas do motor ele roda"));
+                    return Err(format!(
+                        "{rotulo}: escolha qual das quinze etapas do motor ele roda"
+                    ));
                 };
                 if !(1..=15).contains(&step) {
                     return Err(format!("{rotulo}: a etapa do motor vai de 1 a 15"));
@@ -1007,11 +1022,15 @@ impl PipelineNodeInput {
             "comando" => {
                 let executor = self.executor();
                 if !NODE_EXECUTORS.contains(&executor.as_str()) {
-                    return Err(format!("{rotulo}: executor inválido “{executor}”; use local ou ssh"));
+                    return Err(format!(
+                        "{rotulo}: executor inválido “{executor}”; use local ou ssh"
+                    ));
                 }
                 let commands = self.commands();
                 if commands.iter().all(|c| c.trim().is_empty()) {
-                    return Err(format!("{rotulo}: um nó de comando precisa de pelo menos um comando"));
+                    return Err(format!(
+                        "{rotulo}: um nó de comando precisa de pelo menos um comando"
+                    ));
                 }
                 validate_list(&commands, &rotulo, 20)?;
                 let dir = self.working_dir.as_deref().unwrap_or("").trim();
@@ -1044,10 +1063,7 @@ impl PipelineNodeInput {
                 }
                 // O nó git roda nesta máquina, na pasta do projeto: a mesma contenção
                 // de caminho do nó de comando local, porque é o mesmo risco.
-                conferir_pasta_local(
-                    self.working_dir.as_deref().unwrap_or("").trim(),
-                    &rotulo,
-                )?;
+                conferir_pasta_local(self.working_dir.as_deref().unwrap_or("").trim(), &rotulo)?;
                 match op.as_str() {
                     // O pull trabalha no ramo que a pasta já está: sem branch e sem
                     // remoto para escolher, e o git responde pelo nó.
@@ -1079,7 +1095,9 @@ impl PipelineNodeInput {
                             || referencia.contains(char::is_whitespace)
                             || referencia.contains('\0')
                         {
-                            return Err(format!("{rotulo}: referência de git inválida “{referencia}”"));
+                            return Err(format!(
+                                "{rotulo}: referência de git inválida “{referencia}”"
+                            ));
                         }
                     }
                 }
@@ -1111,10 +1129,7 @@ impl PipelineNodeInput {
                         "{rotulo}: a análise de código lê a pasta do projeto nesta máquina — escolha o executor local"
                     ));
                 }
-                conferir_pasta_local(
-                    self.working_dir.as_deref().unwrap_or("").trim(),
-                    &rotulo,
-                )?;
+                conferir_pasta_local(self.working_dir.as_deref().unwrap_or("").trim(), &rotulo)?;
                 // O prazo do nó é o prazo da varredura, e a varredura tem o teto
                 // dela: um nó desenhado com 21600 segundos falharia ao executar.
                 let prazo = self.timeout_secs.unwrap_or(0);
@@ -1128,24 +1143,30 @@ impl PipelineNodeInput {
         }
         let prazo = self.timeout_secs.unwrap_or(0);
         if !(0..=21_600).contains(&prazo) {
-            return Err(format!("{rotulo}: o prazo do nó vai de 0 (herdar o do modelo) a 21600 segundos"));
+            return Err(format!(
+                "{rotulo}: o prazo do nó vai de 0 (herdar o do modelo) a 21600 segundos"
+            ));
         }
         let retry = self.retry_limit.unwrap_or(0);
         if !(0..=3).contains(&retry) {
-            return Err(format!("{rotulo}: a política de repetição aceita de 0 a 3 novas tentativas"));
+            return Err(format!(
+                "{rotulo}: a política de repetição aceita de 0 a 3 novas tentativas"
+            ));
         }
         if let Some(raw) = self.condition.as_deref().map(str::trim) {
             if !raw.is_empty() {
-                let (chave, valor) = raw
-                    .split_once('=')
-                    .ok_or_else(|| format!("{rotulo}: a condição deve ser ramo=<nome> ou ambiente=<nome>"))?;
+                let (chave, valor) = raw.split_once('=').ok_or_else(|| {
+                    format!("{rotulo}: a condição deve ser ramo=<nome> ou ambiente=<nome>")
+                })?;
                 if !["ramo", "ambiente"].contains(&chave.trim()) {
                     return Err(format!(
                         "{rotulo}: condição “{chave}” não existe; o motor conhece ramo e ambiente"
                     ));
                 }
                 if valor.trim().is_empty() || valor.contains('\n') || valor.len() > 120 {
-                    return Err(format!("{rotulo}: a condição precisa de um valor entre 1 e 120 caracteres"));
+                    return Err(format!(
+                        "{rotulo}: a condição precisa de um valor entre 1 e 120 caracteres"
+                    ));
                 }
             }
         }
@@ -1157,7 +1178,6 @@ impl PipelineNodeInput {
         Ok(())
     }
 }
-
 
 // ---------- análise de código-fonte (plano CI/CD, etapa 5) ----------
 
@@ -1242,6 +1262,91 @@ pub struct AnalysisFinding {
     pub message: String,
     pub cwe: Option<String>,
     pub snippet: Option<String>,
+    /// A identidade do achado entre corridas: regra, arquivo, mensagem e trecho,
+    /// sem a linha. A linha muda quando o arquivo cresce; o defeito continua o
+    /// mesmo, e é isso que permite dizer "novo", "persistente" e "corrigido".
+    pub fingerprint: String,
+}
+
+/// O que a tela pede ao listar os achados de uma corrida. Todo campo é opcional:
+/// vazio é "não filtra". A busca textual olha arquivo, regra, mensagem e trecho.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AchadosFiltro {
+    pub severidade: Option<String>,
+    pub origem: Option<String>,
+    pub regra: Option<String>,
+    pub busca: Option<String>,
+    /// `novo` ou `persistente`, quando há corrida anterior comparável.
+    pub estado: Option<String>,
+    pub limite: Option<i64>,
+    pub deslocamento: Option<i64>,
+}
+
+/// Um achado com o estado em relação à corrida anterior. `baseline` é `None`
+/// quando não existe corrida comparável — e "sem base" não é "novo".
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisFindingView {
+    #[serde(flatten)]
+    pub achado: AnalysisFinding,
+    pub baseline: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Faceta {
+    pub valor: String,
+    pub quantidade: i64,
+}
+
+/// As contagens da corrida inteira, antes de qualquer filtro. A tela usa isto
+/// para oferecer os filtros com número, em vez de uma lista de valores sem peso.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingsFacets {
+    pub severidades: Vec<Faceta>,
+    pub origens: Vec<Faceta>,
+    pub regras: Vec<Faceta>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingsPage {
+    pub itens: Vec<AnalysisFindingView>,
+    /// Quantos achados atendem ao filtro, não só aos que cabem nesta página.
+    pub total: i64,
+    /// O total da corrida sem filtro, para a tela não confundir "filtrado" com "tudo".
+    pub total_geral: i64,
+    pub deslocamento: i64,
+    pub limite: i64,
+    pub facetas: FindingsFacets,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BaselineRun {
+    pub id: i64,
+    pub started_at: String,
+    pub tool: String,
+    pub tool_version: Option<String>,
+}
+
+/// A comparação com a última corrida concluída do mesmo projeto e instrumento.
+/// Só entra na conta uma corrida que leu arquivos: uma varredura interrompida
+/// não é base para dizer que algo foi corrigido.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisComparison {
+    pub baseline: Option<BaselineRun>,
+    pub novos: i64,
+    pub persistentes: i64,
+    pub corrigidos: i64,
+    /// Só uma corrida concluída e com leitura efetiva pode dizer que a ausência
+    /// de um achado é correção; nas outras, `corrigidos` é zero e isto é falso.
+    pub corrigidos_conclusivos: bool,
+    /// Uma amostra dos corrigidos, para a revisão saber o que sumiu.
+    pub corrigidos_itens: Vec<AnalysisFinding>,
 }
 
 /// O que a tela pede como varredura. `path` é um subdiretório opcional dentro do
@@ -1305,7 +1410,6 @@ impl AnalysisInput {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1367,7 +1471,11 @@ mod tests {
         }
     }
 
-    fn no_analise(chave: &str, instrumento: Option<&str>, corte: Option<&str>) -> PipelineNodeInput {
+    fn no_analise(
+        chave: &str,
+        instrumento: Option<&str>,
+        corte: Option<&str>,
+    ) -> PipelineNodeInput {
         let mut no = no_git(chave, "pull", None);
         no.kind = "analise".into();
         no.git_op = None;
@@ -1383,19 +1491,30 @@ mod tests {
         assert!(no_git("marca", "tag", Some("v1.2.0")).validate().is_ok());
         assert!(no_git("muda", "checkout", Some("main")).validate().is_ok());
         // um tipo que o motor não roda não entra no grafo
-        let inventado = no_git("deplod", "deploy", Some("producao")).validate().unwrap_err();
+        let inventado = no_git("deplod", "deploy", Some("producao"))
+            .validate()
+            .unwrap_err();
         assert!(inventado.contains("não “deploy”"), "{inventado}");
         // alternar e marcar sem referência não têm o que fazer
-        assert!(no_git("marca", "tag", None).validate().unwrap_err().contains("referência"));
+        assert!(no_git("marca", "tag", None)
+            .validate()
+            .unwrap_err()
+            .contains("referência"));
         let sem_operacao = no_git("perdido", "", Some("main")).validate().unwrap_err();
-        assert!(sem_operacao.contains("precisa de uma operação"), "{sem_operacao}");
+        assert!(
+            sem_operacao.contains("precisa de uma operação"),
+            "{sem_operacao}"
+        );
         // o pull trabalha no ramo da pasta: referência sobrando é recusada
         let puxa_com_ramo = no_git("puxa", "pull", Some("main")).validate().unwrap_err();
         assert!(puxa_com_ramo.contains("ramo atual"), "{puxa_com_ramo}");
         // e um nó git não leva comandos: quem executa é a operação
         let mut com_comando = no_git("puxa", "pull", None);
         com_comando.commands = Some(vec!["git pull".into()]);
-        assert!(com_comando.validate().unwrap_err().contains("comandos soltos"));
+        assert!(com_comando
+            .validate()
+            .unwrap_err()
+            .contains("comandos soltos"));
         // referência com o que o git não aceita nunca viria para cá
         for ruim in ["-t", "a..b", "dois ramos", "muito".repeat(50).as_str()] {
             let erro = no_git("marca", "tag", Some(ruim)).validate().unwrap_err();
@@ -1407,7 +1526,10 @@ mod tests {
             let mut no = no_git("puxa", "pull", None);
             no.working_dir = Some(fora.into());
             let erro = no.validate().unwrap_err();
-            assert!(erro.contains("relativo dentro do projeto"), "{fora} passou: {erro}");
+            assert!(
+                erro.contains("relativo dentro do projeto"),
+                "{fora} passou: {erro}"
+            );
         }
         let mut ramal = no_git("puxa", "pull", None);
         ramal.working_dir = Some("apps/api".into());
@@ -1420,12 +1542,17 @@ mod tests {
     fn o_no_de_analise_e_desenhado_so_com_o_que_o_motor_varre() {
         // sem instrumento e sem corte é a varredura padrão: embutido, informativa
         no_analise("varre", None, None).validate().unwrap();
-        no_analise("varre", Some("Ambos"), Some("warning")).validate().unwrap();
+        no_analise("varre", Some("Ambos"), Some("warning"))
+            .validate()
+            .unwrap();
         // um instrumento que não existe varreria nada e o nó aprovaria tudo
         let inventado = no_analise("varre", Some("bandit"), None)
             .validate()
             .unwrap_err();
-        assert!(inventado.contains("embutido, semgrep, ambos"), "{inventado}");
+        assert!(
+            inventado.contains("embutido, semgrep, ambos"),
+            "{inventado}"
+        );
         // um corte inventado barraria a publicação para sempre
         let corte = no_analise("varre", None, Some("CRITICO"))
             .validate()
@@ -1434,7 +1561,10 @@ mod tests {
         // o nó varre o código; comandos soltos não são o que ele executa
         let mut com_comando = no_analise("varre", None, None);
         com_comando.commands = Some(vec!["npm audit".into()]);
-        assert!(com_comando.validate().unwrap_err().contains("comandos soltos"));
+        assert!(com_comando
+            .validate()
+            .unwrap_err()
+            .contains("comandos soltos"));
         // ele lê a pasta do projeto nesta máquina — um executor ssh leria o servidor
         let mut remoto = no_analise("varre", None, None);
         remoto.executor = Some("ssh".into());
@@ -1444,7 +1574,10 @@ mod tests {
             let mut no = no_analise("varre", None, None);
             no.working_dir = Some(fora.into());
             let erro = no.validate().unwrap_err();
-            assert!(erro.contains("relativo dentro do projeto"), "{fora} passou: {erro}");
+            assert!(
+                erro.contains("relativo dentro do projeto"),
+                "{fora} passou: {erro}"
+            );
         }
         // o prazo do nó é o prazo da varredura: acima do teto a varredura falharia
         let mut longo = no_analise("varre", None, None);
@@ -1477,7 +1610,10 @@ mod tests {
         c.validate().unwrap(); // o arquivo tem default, o diretório é o destino
         let mut com_porta = c.clone();
         com_porta.publish_ports = Some(vec!["8080:80".into()]);
-        assert!(com_porta.validate().unwrap_err().contains("arquivo do compose"));
+        assert!(com_porta
+            .validate()
+            .unwrap_err()
+            .contains("arquivo do compose"));
 
         let mut p = entrada(Some(3), "artifacts", "/srv/api");
         p.runtime = Some("pm2".into());
@@ -1499,7 +1635,10 @@ mod tests {
         // tela não pode recusar o que o motor executa.
         let mut sem_comando = entrada(Some(3), "docker", "/srv/api");
         sem_comando.build_commands = vec![];
-        assert!(sem_comando.validate().unwrap_err().contains("comandos de build"));
+        assert!(sem_comando
+            .validate()
+            .unwrap_err()
+            .contains("comandos de build"));
         sem_comando.runtime = Some("docker".into());
         sem_comando.image_name = Some("meuapp".into());
         sem_comando.validate().unwrap();
@@ -1564,7 +1703,10 @@ mod tests {
         // um script local precisa de pelo menos um comando
         let mut sem_comando = entrada(None, "script", "/srv/site");
         sem_comando.build_commands = vec![];
-        assert!(sem_comando.validate().unwrap_err().contains("pelo menos um comando"));
+        assert!(sem_comando
+            .validate()
+            .unwrap_err()
+            .contains("pelo menos um comando"));
 
         assert!(entrada(None, "sftp", "/srv/site")
             .validate()
@@ -1587,7 +1729,9 @@ mod tests {
             .contains("modo sem servidor"));
 
         // com servidor, o caminho continua sendo o POSIX do servidor
-        assert!(entrada(Some(3), "artifacts", "/var/www/site").validate().is_ok());
+        assert!(entrada(Some(3), "artifacts", "/var/www/site")
+            .validate()
+            .is_ok());
         assert!(entrada(Some(3), "artifacts", "C:/publicados/site")
             .validate()
             .unwrap_err()

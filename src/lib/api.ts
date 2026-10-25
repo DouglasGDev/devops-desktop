@@ -1,13 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  AchadosFiltro,
   AnalysisCheck,
-  AnalysisFinding,
+  AnalysisComparison,
   AnalysisInput,
   AnalysisPackage,
   AnalysisRule,
   AnalysisRun,
   AnalysisTool,
+  FindingsPage,
   AuditEntry,
   AuthRequest,
   BranchInfo,
@@ -218,12 +220,10 @@ export const api = {
   analysisVarrendo: () => invoke<number[]>("analysis_varrendo"),
   analysisCorridas: (projectId: number | null, limit?: number | null) =>
     invoke<AnalysisRun[]>("analysis_corridas", { projectId, limit: limit ?? null }),
-  analysisAchados: (runId: number, severidade?: string | null, limit?: number | null) =>
-    invoke<AnalysisFinding[]>("analysis_achados", {
-      runId,
-      severidade: severidade ?? null,
-      limit: limit ?? null,
-    }),
+  analysisAchados: (runId: number, filtro?: AchadosFiltro | null) =>
+    invoke<FindingsPage>("analysis_achados", { runId, filtro: filtro ?? null }),
+  analysisComparar: (runId: number) =>
+    invoke<AnalysisComparison>("analysis_comparar", { runId }),
   analysisPacote: (runId: number, limite?: number | null) =>
     invoke<AnalysisPackage>("analysis_pacote", { runId, limite: limite ?? null }),
   analysisExportar: (runId: number, formato: "pacote" | "sarif", destino: string, limite?: number | null) =>

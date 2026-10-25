@@ -153,7 +153,16 @@ pub fn store_client_id(conn: &Connection, value: &str) -> Result<(), String> {
     if value.is_empty() {
         conn.execute("DELETE FROM settings WHERE key = ?1", [SETTINGS_KEY])
             .map_err(|e| format!("falha ao limpar o Client ID: {e}"))?;
-        return audit::log(conn, "info", "github", "Client ID removido", None, None, None, None);
+        return audit::log(
+            conn,
+            "info",
+            "github",
+            "Client ID removido",
+            None,
+            None,
+            None,
+            None,
+        );
     }
     if !valid_client_id(value) {
         return Err(
@@ -205,7 +214,9 @@ pub fn status(conn: &Connection, state: &GitHubState) -> Result<GitHubStatus, St
 fn error_for(code: u16) -> &'static str {
     match code {
         401 => "a sessão do GitHub expirou ou o token foi revogado; reconecte a conta",
-        403 => "o GitHub recusou a chamada (limite de requisições estourado ou escopo insuficiente)",
+        403 => {
+            "o GitHub recusou a chamada (limite de requisições estourado ou escopo insuficiente)"
+        }
         404 => "o GitHub não reconhece o que foi enviado",
         422 => "o GitHub validou os dados e recusou (nome de repositório inválido ou já em uso)",
         _ => "a API do GitHub respondeu com erro",
@@ -327,8 +338,11 @@ fn dica_do_client_id(erro: &str, id: &str) -> String {
 
 pub fn connect_start(conn: &Connection, state: &GitHubState) -> Result<DeviceFlow, String> {
     let id = client_id(conn)?;
-    let body = post_json(DEVICE_ENDPOINT, json!({ "client_id": id.clone(), "scope": OAUTH_SCOPE }))
-        .map_err(|e| dica_do_client_id(&e, &id))?;
+    let body = post_json(
+        DEVICE_ENDPOINT,
+        json!({ "client_id": id.clone(), "scope": OAUTH_SCOPE }),
+    )
+    .map_err(|e| dica_do_client_id(&e, &id))?;
     if let Some(err) = str_field(&body, "error") {
         return Err(format!("o GitHub recusou a iniciação do fluxo: {err}"));
     }
@@ -336,9 +350,17 @@ pub fn connect_start(conn: &Connection, state: &GitHubState) -> Result<DeviceFlo
         .ok_or_else(|| "a resposta do GitHub não trouxe o código de dispositivo".to_string())?;
     let user_code = str_field(&body, "user_code")
         .ok_or_else(|| "a resposta do GitHub não trouxe o código de verificação".to_string())?;
-    let verification_uri = str_field(&body, "verification_uri").unwrap_or_else(|| "https://github.com/login/device".to_string());
-    let expires_in = body.get("expires_in").and_then(Value::as_i64).unwrap_or(900);
-    let interval = body.get("interval").and_then(Value::as_i64).unwrap_or(5).clamp(1, 60);
+    let verification_uri = str_field(&body, "verification_uri")
+        .unwrap_or_else(|| "https://github.com/login/device".to_string());
+    let expires_in = body
+        .get("expires_in")
+        .and_then(Value::as_i64)
+        .unwrap_or(900);
+    let interval = body
+        .get("interval")
+        .and_then(Value::as_i64)
+        .unwrap_or(5)
+        .clamp(1, 60);
 
     let now = Instant::now();
     if let Ok(mut guard) = state.device.lock() {
@@ -387,7 +409,10 @@ pub fn connect_poll(conn: &Connection, state: &GitHubState) -> Result<ConnectRes
         &[
             ("client_id", id.clone()),
             ("device_code", pending.device_code.clone()),
-            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code".to_string()),
+            (
+                "grant_type",
+                "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+            ),
         ],
     )
     .map_err(|e| dica_do_client_id(&e, &id))?;
@@ -407,7 +432,10 @@ pub fn connect_poll(conn: &Connection, state: &GitHubState) -> Result<ConnectRes
         let (login, aviso) = match get_json(&format!("{API_BASE}/user"), &token) {
             Ok(user) => match str_field(&user, "login") {
                 Some(l) => (Some(l), None),
-                None => (None, Some("o GitHub respondeu sem o login da conta".to_string())),
+                None => (
+                    None,
+                    Some("o GitHub respondeu sem o login da conta".to_string()),
+                ),
             },
             Err(e) => (None, Some(e)),
         };
@@ -425,7 +453,11 @@ pub fn connect_poll(conn: &Connection, state: &GitHubState) -> Result<ConnectRes
             conn,
             if login.is_some() { "info" } else { "warning" },
             "github",
-            if login.is_some() { "Conta GitHub conectada" } else { "Conta autorizada, login não lido" },
+            if login.is_some() {
+                "Conta GitHub conectada"
+            } else {
+                "Conta autorizada, login não lido"
+            },
             None,
             None,
             None,
@@ -454,7 +486,9 @@ pub fn connect_poll(conn: &Connection, state: &GitHubState) -> Result<ConnectRes
         }
         Some("access_denied") => {
             state.clear_device();
-            Ok(ConnectResult::error("você negou a autorização no navegador"))
+            Ok(ConnectResult::error(
+                "você negou a autorização no navegador",
+            ))
         }
         Some(code) => {
             state.clear_device();
@@ -473,7 +507,16 @@ pub fn connect_poll(conn: &Connection, state: &GitHubState) -> Result<ConnectRes
 
 pub fn disconnect(conn: &Connection, state: &GitHubState) -> Result<(), String> {
     state.clear();
-    audit::log(conn, "info", "github", "Conta GitHub desconectada", None, None, None, None)
+    audit::log(
+        conn,
+        "info",
+        "github",
+        "Conta GitHub desconectada",
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 // ------------------------------------------------------------------- dados
@@ -523,7 +566,10 @@ pub fn repos(state: &GitHubState) -> Result<Vec<GitHubRepo>, String> {
 /// é codificado antes de virar URL.
 pub fn parse_slug(input: &str) -> Result<(String, String), String> {
     let trimmed = input.trim();
-    if trimmed.is_empty() || trimmed.len() > 200 || trimmed.chars().any(|c| c <= ' ' || c == '\u{7f}') {
+    if trimmed.is_empty()
+        || trimmed.len() > 200
+        || trimmed.chars().any(|c| c <= ' ' || c == '\u{7f}')
+    {
         return Err("informe o repositório como dono/nome".into());
     }
     let Some((owner, name)) = trimmed.split_once('/') else {
@@ -557,8 +603,14 @@ pub fn pulls(state: &GitHubState, slug: &str) -> Result<Vec<GitHubPull>, String>
         .iter()
         .filter_map(|v| {
             let number = v.get("number").and_then(Value::as_i64)?;
-            let head = v.get("head").and_then(|h| h.get("ref")).and_then(Value::as_str);
-            let base = v.get("base").and_then(|b| b.get("ref")).and_then(Value::as_str);
+            let head = v
+                .get("head")
+                .and_then(|h| h.get("ref"))
+                .and_then(Value::as_str);
+            let base = v
+                .get("base")
+                .and_then(|b| b.get("ref"))
+                .and_then(Value::as_str);
             Some(GitHubPull {
                 number,
                 title: str_field(v, "title").unwrap_or_else(|| "(sem título)".to_string()),
@@ -578,12 +630,13 @@ pub fn pulls(state: &GitHubState, slug: &str) -> Result<Vec<GitHubPull>, String>
 /// controle).
 fn valid_repo_name(name: &str) -> bool {
     let mut chars = name.chars();
-    let Some(first) = chars.next() else { return false };
+    let Some(first) = chars.next() else {
+        return false;
+    };
     if !first.is_ascii_alphanumeric() {
         return false;
     }
-    name.len() <= 100
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    name.len() <= 100 && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 pub fn create_repo(
@@ -714,7 +767,9 @@ pub struct GitHubSearchItem {
 
 fn parse_search_item(v: &Value) -> Option<GitHubSearchItem> {
     let number = v.get("number").and_then(Value::as_i64)?;
-    let repo = v.get("repository").and_then(|r| str_field(r, "full_name"))?;
+    let repo = v
+        .get("repository")
+        .and_then(|r| str_field(r, "full_name"))?;
     Some(GitHubSearchItem {
         number,
         title: str_field(v, "title").unwrap_or_else(|| "(sem título)".to_string()),
@@ -797,9 +852,18 @@ fn parse_pull_detail(v: &Value) -> Result<PullDetail, String> {
         title: str_field(v, "title").unwrap_or_else(|| "(sem título)".to_string()),
         state: str_field(v, "state").unwrap_or_else(|| "open".to_string()),
         author: v.get("user").and_then(|u| str_field(u, "login")),
-        head_ref: v.get("head").and_then(|h| str_field(h, "ref")).unwrap_or_default(),
-        base_ref: v.get("base").and_then(|b| str_field(b, "ref")).unwrap_or_default(),
-        head_sha: v.get("head").and_then(|h| str_field(h, "sha")).unwrap_or_default(),
+        head_ref: v
+            .get("head")
+            .and_then(|h| str_field(h, "ref"))
+            .unwrap_or_default(),
+        base_ref: v
+            .get("base")
+            .and_then(|b| str_field(b, "ref"))
+            .unwrap_or_default(),
+        head_sha: v
+            .get("head")
+            .and_then(|h| str_field(h, "sha"))
+            .unwrap_or_default(),
         draft: v.get("draft").and_then(Value::as_bool).unwrap_or(false),
         mergeable: v.get("mergeable").and_then(Value::as_bool),
         mergeable_state: str_field(v, "mergeable_state"),
@@ -857,16 +921,20 @@ pub fn diff_de_arquivo_de_pr(item: &Value) -> Option<Vec<crate::git::FileDiff>> 
     Some(arquivos)
 }
 
-pub fn pull_files(state: &GitHubState, slug: &str, number: i64) -> Result<Vec<crate::git::FileDiff>, String> {
+pub fn pull_files(
+    state: &GitHubState,
+    slug: &str,
+    number: i64,
+) -> Result<Vec<crate::git::FileDiff>, String> {
     let token = require_token(state)?;
     let url = format!(
         "{}?per_page=100",
         repo_url(slug, &format!("/pulls/{number}/files"))?
     );
     let body = get_json(&url, &token)?;
-    let itens = body
-        .as_array()
-        .ok_or_else(|| "a lista de arquivos do pull request veio em formato inesperado".to_string())?;
+    let itens = body.as_array().ok_or_else(|| {
+        "a lista de arquivos do pull request veio em formato inesperado".to_string()
+    })?;
     let mut out = Vec::new();
     for item in itens {
         if let Some(mut partes) = diff_de_arquivo_de_pr(item) {
@@ -982,7 +1050,8 @@ pub fn create_issue(
             "body": body.map(str::trim).filter(|b| !b.is_empty()),
         })),
     )?;
-    let issue = parse_issue(&resposta).ok_or_else(|| "a issue criada não veio completa na resposta".to_string())?;
+    let issue = parse_issue(&resposta)
+        .ok_or_else(|| "a issue criada não veio completa na resposta".to_string())?;
     audit::log(
         conn,
         "warning",
@@ -1021,7 +1090,12 @@ pub fn comment(
     )
 }
 
-pub fn close_issue(conn: &Connection, state: &GitHubState, slug: &str, number: i64) -> Result<(), String> {
+pub fn close_issue(
+    conn: &Connection,
+    state: &GitHubState,
+    slug: &str,
+    number: i64,
+) -> Result<(), String> {
     let token = require_token(state)?;
     let url = repo_url(slug, &format!("/issues/{number}"))?;
     api_json("PATCH", &url, &token, Some(json!({ "state": "closed" })))?;
@@ -1106,7 +1180,9 @@ pub fn merge_pull(
     let token = require_token(state)?;
     let method = valid_metodo_merge(method)?;
     if !sha_suficiente(sha) {
-        return Err("o commit que seria mergido não foi lido do GitHub; atualize o pull request".into());
+        return Err(
+            "o commit que seria mergido não foi lido do GitHub; atualize o pull request".into(),
+        );
     }
     let url = repo_url(slug, &format!("/pulls/{number}/merge"))?;
     let resposta = api_json(
@@ -1175,7 +1251,12 @@ pub fn runs(state: &GitHubState, slug: &str) -> Result<Vec<GitHubRun>, String> {
     Ok(itens.iter().filter_map(parse_run).collect())
 }
 
-pub fn rerun(conn: &Connection, state: &GitHubState, slug: &str, run_id: i64) -> Result<(), String> {
+pub fn rerun(
+    conn: &Connection,
+    state: &GitHubState,
+    slug: &str,
+    run_id: i64,
+) -> Result<(), String> {
     let token = require_token(state)?;
     let url = repo_url(slug, &format!("/actions/runs/{run_id}/reruns"))?;
     api_json("POST", &url, &token, None)?;
@@ -1228,7 +1309,11 @@ fn parse_comment(v: &Value) -> Option<GitHubComment> {
 
 /// O fio de comentários. A mesma rota atende issue e pull request, porque na API
 /// do GitHub um pull request também é uma issue.
-pub fn comentarios(state: &GitHubState, slug: &str, number: i64) -> Result<Vec<GitHubComment>, String> {
+pub fn comentarios(
+    state: &GitHubState,
+    slug: &str,
+    number: i64,
+) -> Result<Vec<GitHubComment>, String> {
     if number <= 0 {
         return Err("número de issue ou pull request inválido".to_string());
     }
@@ -1263,7 +1348,11 @@ fn nome_de_ramo(nome: &str, o_que: &str) -> Result<String, String> {
     if trimmed.is_empty() || trimmed.len() > 250 {
         return Err(format!("{o_que} precisa de um nome de ramo"));
     }
-    if trimmed.starts_with('-') || trimmed.contains("..") || trimmed.contains(' ') || trimmed.contains('\0') {
+    if trimmed.starts_with('-')
+        || trimmed.contains("..")
+        || trimmed.contains(' ')
+        || trimmed.contains('\0')
+    {
         return Err(format!("{o_que} não é um nome de ramo válido"));
     }
     Ok(trimmed.to_string())
@@ -1271,7 +1360,11 @@ fn nome_de_ramo(nome: &str, o_que: &str) -> Result<String, String> {
 
 /// Abrir pull request entre ramos que já existem no remoto. Nada é empurrado
 /// aqui: escrever no remoto continua sendo a seção Git.
-pub fn create_pull(conn: &Connection, state: &GitHubState, input: &NewPullInput) -> Result<PullDetail, String> {
+pub fn create_pull(
+    conn: &Connection,
+    state: &GitHubState,
+    input: &NewPullInput,
+) -> Result<PullDetail, String> {
     let title = corpo_texto(&input.title, 256, "o título do pull request")?;
     let head = nome_de_ramo(&input.head, "o ramo de origem")?;
     let base = nome_de_ramo(&input.base, "o ramo de destino")?;
@@ -1311,7 +1404,11 @@ pub fn create_pull(conn: &Connection, state: &GitHubState, input: &NewPullInput)
         None,
         None,
         None,
-        Some(&format!("#{} · {}", pull.number, slug_para_log(&input.repo))),
+        Some(&format!(
+            "#{} · {}",
+            pull.number,
+            slug_para_log(&input.repo)
+        )),
     )?;
     Ok(pull)
 }
@@ -1506,7 +1603,9 @@ mod tests {
         crate::db::migrate(&conn).unwrap();
         let state = GitHubState::new();
         assert!(repos(&state).unwrap_err().contains("conecte a conta"));
-        assert!(pulls(&state, "a/b").unwrap_err().contains("conecte a conta"));
+        assert!(pulls(&state, "a/b")
+            .unwrap_err()
+            .contains("conecte a conta"));
         assert!(create_repo(&conn, &state, "repo", false, None)
             .unwrap_err()
             .contains("conecte a conta"));
@@ -1514,9 +1613,21 @@ mod tests {
 
     #[test]
     fn slug_de_repositorio_e_validado_antes_de_virar_url() {
-        assert_eq!(parse_slug("DouglasGDev/devops-desktop").unwrap().1, "devops-desktop");
+        assert_eq!(
+            parse_slug("DouglasGDev/devops-desktop").unwrap().1,
+            "devops-desktop"
+        );
         assert_eq!(parse_slug(" acme/app.git ").unwrap().0, "acme");
-        for caso in ["", "sem-barra", "a/b/c", "a/b c", "a/b\nrm -rf", "a//b", "a/", "/b"] {
+        for caso in [
+            "",
+            "sem-barra",
+            "a/b/c",
+            "a/b c",
+            "a/b\nrm -rf",
+            "a//b",
+            "a/",
+            "/b",
+        ] {
             assert!(parse_slug(caso).is_err(), "aceitou {caso}");
         }
     }
@@ -1526,7 +1637,14 @@ mod tests {
         for ok in ["a", "devops-desktop", "app_1.2", "X9"] {
             assert!(valid_repo_name(ok), "rejeitou {ok}");
         }
-        for ruim in ["", "-inicio", ".inicio", "com espaço", "a\nb", &"a".repeat(101)] {
+        for ruim in [
+            "",
+            "-inicio",
+            ".inicio",
+            "com espaço",
+            "a\nb",
+            &"a".repeat(101),
+        ] {
             assert!(!valid_repo_name(ruim), "aceitou {ruim}");
         }
     }
@@ -1657,7 +1775,8 @@ mod tests {
 
         // corpo em branco não vira texto para mostrar
         let sem_corpo: Value =
-            serde_json::from_str(r#"{"number":4,"title":"t","body":"   ","head":{},"base":{}}"#).unwrap();
+            serde_json::from_str(r#"{"number":4,"title":"t","body":"   ","head":{},"base":{}}"#)
+                .unwrap();
         assert_eq!(parse_pull_detail(&sem_corpo).unwrap().body, None);
     }
 
@@ -1685,19 +1804,29 @@ mod tests {
 
         // sem patch (binário ou grande demais) o arquivo aparece, mas sem hunks
         // inventados.
-        let binario: Value = serde_json::from_str(r#"{"filename":"logo.png","status":"added"}"#).unwrap();
+        let binario: Value =
+            serde_json::from_str(r#"{"filename":"logo.png","status":"added"}"#).unwrap();
         let arquivos = diff_de_arquivo_de_pr(&binario).unwrap();
-        assert!(arquivos[0].hunks.is_empty(), "sem patch não há linhas para mostrar");
+        assert!(
+            arquivos[0].hunks.is_empty(),
+            "sem patch não há linhas para mostrar"
+        );
         assert!(arquivos[0].binary);
 
-        let removido: Value =
-            serde_json::from_str(r#"{"filename":"x.ts","status":"removed","patch":"@@ -1 +0,0 @@\n-y"}"#).unwrap();
-        assert_eq!(diff_de_arquivo_de_pr(&removido).unwrap()[0].status_char, 'D');
+        let removido: Value = serde_json::from_str(
+            r#"{"filename":"x.ts","status":"removed","patch":"@@ -1 +0,0 @@\n-y"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            diff_de_arquivo_de_pr(&removido).unwrap()[0].status_char,
+            'D'
+        );
     }
 
     #[test]
     fn issue_e_pull_request_se_distinguem_pelo_que_o_github_manda() {
-        let pr: Value = serde_json::from_str(r#"{"number":9,"title":"t","pull_request":{"url":"x"}}"#).unwrap();
+        let pr: Value =
+            serde_json::from_str(r#"{"number":9,"title":"t","pull_request":{"url":"x"}}"#).unwrap();
         let issue: Value = serde_json::from_str(
             r#"{"number":10,"title":"t","state":"open","labels":[{"name":"bug"},{"name":"good first issue"}],"comments":2}"#,
         )
@@ -1705,20 +1834,39 @@ mod tests {
         assert!(e_pull_request(&pr));
         assert!(!e_pull_request(&issue));
         let lida = parse_issue(&issue).unwrap();
-        assert_eq!(lida.labels, vec!["bug".to_string(), "good first issue".to_string()]);
+        assert_eq!(
+            lida.labels,
+            vec!["bug".to_string(), "good first issue".to_string()]
+        );
         assert_eq!(lida.comments, 2);
-        assert_eq!(lida.body, None, "sem body na resposta não pode virar linha vazia");
+        assert_eq!(
+            lida.body, None,
+            "sem body na resposta não pode virar linha vazia"
+        );
         // a rota /issues devolve PR também; a tela de issues usa este filtro.
-        assert!(parse_issue(&pr).is_some(), "PR é um objeto issue válido para a API");
+        assert!(
+            parse_issue(&pr).is_some(),
+            "PR é um objeto issue válido para a API"
+        );
 
         let com_corpo: Value =
-            serde_json::from_str(r#"{"number":11,"title":"t","body":"  texto da  issue  "}"#).unwrap();
-        assert_eq!(parse_issue(&com_corpo).unwrap().body.as_deref(), Some("texto da  issue"));
-        let gigante: Value =
-            serde_json::from_str(&format!(r#"{{"number":12,"title":"t","body":"{}"}}"#, "aé".repeat(3000))).unwrap();
+            serde_json::from_str(r#"{"number":11,"title":"t","body":"  texto da  issue  "}"#)
+                .unwrap();
+        assert_eq!(
+            parse_issue(&com_corpo).unwrap().body.as_deref(),
+            Some("texto da  issue")
+        );
+        let gigante: Value = serde_json::from_str(&format!(
+            r#"{{"number":12,"title":"t","body":"{}"}}"#,
+            "aé".repeat(3000)
+        ))
+        .unwrap();
         let cortada = parse_issue(&gigante).unwrap().body.unwrap();
         assert!(cortada.ends_with("(descrição cortada; abra no site para ler inteira)"));
-        assert!(cortada.chars().count() < 4100, "corte não respeitou o limite");
+        assert!(
+            cortada.chars().count() < 4100,
+            "corte não respeitou o limite"
+        );
     }
 
     #[test]
@@ -1731,9 +1879,13 @@ mod tests {
         assert_eq!(lido.body.as_deref(), Some("vi o erro"));
         assert_eq!(lido.created_at.as_deref(), Some("2026-10-10T00:00:00Z"));
 
-        let sem_corpo: Value = serde_json::from_str(r#"{"html_url":"https://x/2","body":"   "}"#).unwrap();
+        let sem_corpo: Value =
+            serde_json::from_str(r#"{"html_url":"https://x/2","body":"   "}"#).unwrap();
         let lido = parse_comment(&sem_corpo).unwrap();
-        assert_eq!(lido.body, None, "comentário vazio não pode virar linha com texto inventado");
+        assert_eq!(
+            lido.body, None,
+            "comentário vazio não pode virar linha com texto inventado"
+        );
         assert_eq!(lido.author, None);
 
         // Sem endereço não é comentário: nada de linha sem link no fio.
@@ -1744,19 +1896,37 @@ mod tests {
     #[test]
     fn o_ramo_do_pull_request_e_o_que_o_github_endereca() {
         assert_eq!(nome_de_ramo(" main ", "ramo").unwrap(), "main");
-        assert_eq!(nome_de_ramo("outra-pessoa:feature-x", "ramo").unwrap(), "outra-pessoa:feature-x");
-        for invalido in ["", "a b", "a..b", "-comeca-com-traco", &format!("r{}", "o".repeat(250))] {
-            assert!(nome_de_ramo(invalido, "ramo").is_err(), "aceitou {invalido:?}");
+        assert_eq!(
+            nome_de_ramo("outra-pessoa:feature-x", "ramo").unwrap(),
+            "outra-pessoa:feature-x"
+        );
+        for invalido in [
+            "",
+            "a b",
+            "a..b",
+            "-comeca-com-traco",
+            &format!("r{}", "o".repeat(250)),
+        ] {
+            assert!(
+                nome_de_ramo(invalido, "ramo").is_err(),
+                "aceitou {invalido:?}"
+            );
         }
     }
 
     #[test]
     fn revisar_e_mergear_so_aceitam_o_que_o_github_conhece() {
         assert_eq!(valid_event_review("APPROVE").unwrap(), "APPROVE");
-        assert_eq!(valid_event_review("REQUEST_CHANGES").unwrap(), "REQUEST_CHANGES");
+        assert_eq!(
+            valid_event_review("REQUEST_CHANGES").unwrap(),
+            "REQUEST_CHANGES"
+        );
         assert_eq!(valid_event_review("COMMENT").unwrap(), "COMMENT");
         for inventado in ["approve ", "MERGE", "REJECT", ""] {
-            assert!(valid_event_review(inventado).is_err(), "aceitou {inventado:?}");
+            assert!(
+                valid_event_review(inventado).is_err(),
+                "aceitou {inventado:?}"
+            );
         }
         for metodo in ["merge", "squash", "rebase"] {
             assert_eq!(valid_metodo_merge(metodo).unwrap(), metodo);
@@ -1767,17 +1937,23 @@ mod tests {
     #[test]
     fn o_commit_do_merge_vem_lido_e_nao_chutado() {
         assert!(sha_suficiente("abc1234"));
-        assert!(sha_suficiente(
-            "0e3f5a7b9c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f"
-        ));
-        assert!(!sha_suficiente("abc12"), "curto demais para identificar o commit");
+        assert!(sha_suficiente("0e3f5a7b9c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f"));
+        assert!(
+            !sha_suficiente("abc12"),
+            "curto demais para identificar o commit"
+        );
         assert!(!sha_suficiente("main"), "nome de ramo não é commit");
-        assert!(!sha_suficiente("abc123456789012345678901234567890123456789g"));
+        assert!(!sha_suficiente(
+            "abc123456789012345678901234567890123456789g"
+        ));
     }
 
     #[test]
     fn o_log_do_repositorio_nao_leva_o_que_digitaram() {
-        assert_eq!(slug_para_log("DouglasGDev/devops-desktop"), "DouglasGDev/devops-desktop");
+        assert_eq!(
+            slug_para_log("DouglasGDev/devops-desktop"),
+            "DouglasGDev/devops-desktop"
+        );
         // texto que não é `dono/repo` nunca chega ao histórico
         assert_eq!(slug_para_log("máquina/../caminho livre"), "repositório?");
     }
@@ -1787,7 +1963,9 @@ mod tests {
         let url = repo_url("a/b", "/pulls/12").unwrap();
         assert_eq!(url, "https://api.github.com/repos/a/b/pulls/12");
         assert!(repo_url("qualquer coisa solta", "/issues").is_err());
-        assert!(repo_url("a/b", "/issues").unwrap().ends_with("/repos/a/b/issues"));
+        assert!(repo_url("a/b", "/issues")
+            .unwrap()
+            .ends_with("/repos/a/b/issues"));
     }
 
     #[test]

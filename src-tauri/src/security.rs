@@ -1,8 +1,10 @@
-use std::{fs, path::Path};
+use std::{collections::BTreeSet, fs, path::Path};
 
 use serde::Serialize;
 
 use crate::git;
+
+mod security_test_fixtures;
 
 /// Limite de leitura para a checagem de conteúdo. Arquivos maiores são
 /// julgados apenas pelo nome. É público porque a análise de código lê exatamente
@@ -51,13 +53,24 @@ const BLOCK_NAMES: [&str; 22] = [
 /// de commit lêem esta mesma lista: o que sai da tela como «valor mascarado» é o
 /// mesmo que bloqueia um commit.
 const PREFIXOS_TOKEN: [&str; 13] = [
-    "github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "xoxb-", "xoxp-", "AKIA", "sk_live_", "sk_test_", "sk-ant-",
-    "sk-proj-", "glpat-",
+    "github_pat_",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "xoxb-",
+    "xoxp-",
+    "AKIA",
+    "sk_live_",
+    "sk_test_",
+    "sk-ant-",
+    "sk-proj-",
+    "glpat-",
 ];
 
 const BLOCK_EXTENSIONS: [&str; 17] = [
-    "key", "pem", "p8", "p12", "pfx", "jks", "keystore", "ks", "ppk", "kdbx", "pwd", "crt.bak", "kdb", "asc", "gpg",
-    "snk", "pypirc",
+    "key", "pem", "p8", "p12", "pfx", "jks", "keystore", "ks", "ppk", "kdbx", "pwd", "crt.bak",
+    "kdb", "asc", "gpg", "snk", "pypirc",
 ];
 
 /// Pastas de cache, dependências e build: não devem estar no índice do Git.
@@ -115,10 +128,11 @@ fn finding(rel: &str, kind: &str, reason: String, suggestion: &str) -> Finding {
 
 fn name_finding(rel: &str, extra: &[String]) -> Option<Finding> {
     let file = lower(basename(rel));
-    if let Some(name) = BLOCK_NAMES
-        .iter()
-        .find(|name| file == **name || file.starts_with(&format!("{name}.")) || file.ends_with(&format!(".{name}")))
-    {
+    if let Some(name) = BLOCK_NAMES.iter().find(|name| {
+        file == **name
+            || file.starts_with(&format!("{name}."))
+            || file.ends_with(&format!(".{name}"))
+    }) {
         return Some(finding(
             rel,
             "nome",
@@ -180,7 +194,8 @@ fn ocorrencia(bytes: &[u8], chave: &[u8], de: usize) -> Option<usize> {
     if chave.is_empty() || bytes.len() < de + chave.len() {
         return None;
     }
-    (de..=bytes.len() - chave.len()).find(|i| bytes[*i..*i + chave.len()].eq_ignore_ascii_case(chave))
+    (de..=bytes.len() - chave.len())
+        .find(|i| bytes[*i..*i + chave.len()].eq_ignore_ascii_case(chave))
 }
 
 /// Todas as posições de `chave` na linha.
@@ -212,7 +227,10 @@ fn fim_do_valor(linha: &str, de: usize) -> usize {
         .char_indices()
         .find(|(_, c)| {
             c.is_whitespace()
-                || matches!(c, '"' | '\'' | ',' | ';' | '#' | '(' | ')' | '[' | ']' | '{' | '}')
+                || matches!(
+                    c,
+                    '"' | '\'' | ',' | ';' | '#' | '(' | ')' | '[' | ']' | '{' | '}'
+                )
         })
         .map(|(i, _)| de + i)
         .unwrap_or(linha.len())
@@ -426,7 +444,10 @@ fn content_findings(rel: &str, bytes: &[u8]) -> Vec<Finding> {
     }
     for line in text.lines().take(4000) {
         for at in ocorrencias(line, b"AKIA") {
-            let tail: String = line[at + 4..].chars().take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit()).collect();
+            let tail: String = line[at + 4..]
+                .chars()
+                .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                .collect();
             if tail.len() >= 16 {
                 push(
                     "conteudo",
@@ -454,7 +475,8 @@ fn content_findings(rel: &str, bytes: &[u8]) -> Vec<Finding> {
                 push(
                     "conteudo",
                     "traz uma credencial no cabeçalho Bearer".into(),
-                    "revogue a credencial e monte o cabeçalho a partir de um segredo de ambiente".into(),
+                    "revogue a credencial e monte o cabeçalho a partir de um segredo de ambiente"
+                        .into(),
                 );
             }
         }
@@ -525,18 +547,37 @@ pub fn inspect_file(abs: &Path, rel: &str, extra: &[String]) -> Vec<Finding> {
         out.push(f);
         // nome já bloqueia; a leitura do conteúdo ainda é útil quando o arquivo é pequeno
     }
-    let Some(data) = texto_do_arquivo(abs) else { return out };
+    let Some(data) = texto_do_arquivo(abs) else {
+        return out;
+    };
     push_content(&mut out, rel, &data);
     out
 }
 
 /// Varre uma árvore local, pulando dependências, caches e o próprio .git.
-pub fn scan_tree(root: &Path, extra: &[String], max_entries: usize) -> Result<Vec<Finding>, String> {
+///
+/// Link simbólico não amplia o alcance: só é seguido quando o alvo continua
+/// dentro da raiz, e cada pasta é visitada uma vez — um link em ciclo não trava
+/// a varredura nem faz o mesmo arquivo ser lido duas vezes. Quando o limite de
+/// entradas é atingido, o resultado diz que parou; antes ele parecia completo.
+pub fn scan_tree(
+    root: &Path,
+    extra: &[String],
+    max_entries: usize,
+) -> Result<Vec<Finding>, String> {
+    let raiz = root
+        .canonicalize()
+        .map_err(|e| format!("não foi possível abrir a pasta {}: {e}", root.display()))?;
     let mut findings = Vec::new();
     let mut stack = vec![root.to_path_buf()];
+    let mut visitadas = BTreeSet::new();
+    visitadas.insert(raiz.clone());
     let mut visited = 0usize;
-    while let Some(dir) = stack.pop() {
-        let Ok(read) = fs::read_dir(&dir) else { continue };
+    let mut truncada = false;
+    'arvore: while let Some(dir) = stack.pop() {
+        let Ok(read) = fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in read.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
@@ -544,20 +585,61 @@ pub fn scan_tree(root: &Path, extra: &[String], max_entries: usize) -> Result<Ve
                 Ok(r) => r.to_string_lossy().replace('\\', "/"),
                 Err(_) => name.clone(),
             };
-            let is_dir = path.is_dir();
+            let tipo = entry.file_type();
+            if tipo.as_ref().map(|t| t.is_symlink()).unwrap_or(false) {
+                let Ok(alvo) = path.canonicalize() else {
+                    continue;
+                };
+                if !alvo.starts_with(&raiz) {
+                    continue;
+                }
+                if alvo.is_dir() {
+                    if !pular_dir(&name) && visitadas.insert(alvo.clone()) {
+                        stack.push(alvo);
+                    }
+                } else {
+                    visited += 1;
+                    if visited > max_entries {
+                        truncada = true;
+                        break 'arvore;
+                    }
+                    findings.extend(inspect_file(&alvo, &rel, extra));
+                }
+                continue;
+            }
+            let is_dir = tipo.map(|t| t.is_dir()).unwrap_or_else(|_| path.is_dir());
             if is_dir {
                 if pular_dir(&name) {
                     continue;
+                }
+                // A pasta canônica é a identidade: duas rotas para o mesmo lugar
+                // não são duas leituras.
+                if let Ok(canonica) = path.canonicalize() {
+                    if !canonica.starts_with(&raiz) || !visitadas.insert(canonica) {
+                        continue;
+                    }
                 }
                 stack.push(path);
                 continue;
             }
             visited += 1;
             if visited > max_entries {
-                return Ok(findings);
+                truncada = true;
+                break 'arvore;
             }
             findings.extend(inspect_file(&path, &rel, extra));
         }
+    }
+    if truncada {
+        findings.push(Finding {
+            path: ".".into(),
+            kind: "cobertura".into(),
+            reason: format!(
+                "a varredura de segurança parou em {max_entries} arquivos; o restante da árvore não foi inspecionado"
+            ),
+            severity: "warn".into(),
+            suggestion: "reduza os caminhos incluídos ou confira o projeto em partes".into(),
+        });
     }
     Ok(findings)
 }
@@ -570,7 +652,10 @@ pub fn check_paths(root: &Path, rels: &[String], extra: &[String]) -> Vec<Findin
         if abs.is_dir() {
             if let Ok(found) = scan_tree(&abs, extra, 4000) {
                 out.extend(found.into_iter().map(|mut f| {
-                    f.path = format!("{rel}/{}", f.path);
+                    // O aviso de cobertura fala da árvore inteira, não de um arquivo.
+                    if f.path != "." {
+                        f.path = format!("{rel}/{}", f.path);
+                    }
                     f
                 }));
             }
@@ -607,7 +692,11 @@ pub fn tracked_findings(tracked: &[String], extra: &[String]) -> Vec<Finding> {
             });
             continue;
         }
-        let top = normalised.split('/').next().unwrap_or(&normalised).to_string();
+        let top = normalised
+            .split('/')
+            .next()
+            .unwrap_or(&normalised)
+            .to_string();
         if NOISE_DIRS.contains(&top.as_str()) {
             out.push(Finding {
                 path: normalised.clone(),
@@ -639,7 +728,11 @@ pub fn index_findings(dir: &Path, extra: &[String]) -> Result<Vec<Finding>, Stri
 /// revisão HEAD, que é a versão que seguiria para o remoto. Err aqui quer dizer
 /// que o git não respondeu — quem chama interrompe a operação em vez de assumir
 /// que não havia nada para checar.
-pub fn head_findings(dir: &Path, rels: &[String], extra: &[String]) -> Result<Vec<Finding>, String> {
+pub fn head_findings(
+    dir: &Path,
+    rels: &[String],
+    extra: &[String],
+) -> Result<Vec<Finding>, String> {
     let mut out = Vec::new();
     for rel in rels {
         if let Some(blob) = git::blob_at(dir, "HEAD", rel)? {
@@ -687,7 +780,10 @@ mod tests {
     #[test]
     fn extensoes_de_chave_sao_pegadas() {
         let extra: Vec<String> = Vec::new();
-        assert_eq!(name_finding("certs/server.pem", &extra).unwrap().kind, "extensao");
+        assert_eq!(
+            name_finding("certs/server.pem", &extra).unwrap().kind,
+            "extensao"
+        );
         assert!(name_finding("backup/site.p12", &extra).is_some());
         assert!(name_finding("src/app.perf", &extra).is_none());
     }
@@ -710,13 +806,18 @@ mod tests {
         )
         .unwrap();
         let found = content_findings("id_ed25519_fake", &fs::read(&path).unwrap());
-        assert!(found.iter().any(|f| f.reason.contains("chave privada")), "{found:?}");
+        assert!(
+            found.iter().any(|f| f.reason.contains("chave privada")),
+            "{found:?}"
+        );
 
-        let token = "APP_GITHUB=ghp_AAAAAAAAAAAAAAAABBBBBBBBBBBB\n".as_bytes();
+        let token = security_test_fixtures::GITHUB_TOKEN_FIXTURE;
         let found = content_findings("t.txt", token);
         assert!(found.iter().any(|f| f.reason.contains("ghp_")), "{found:?}");
 
-        let aws = "key = AKIAABCDEFGHIJKLMNOP\n".as_bytes();
+        // Fixture de teste: valor falso de propósito.
+        // O arquivo está em security_test_fixtures.rs e é ignorado pelo Semgrep.
+        let aws = security_test_fixtures::AWS_KEY_FIXTURE;
         let found = content_findings("t.txt", aws);
         assert!(found.iter().any(|f| f.reason.contains("AWS")), "{found:?}");
         let _ = fs::remove_dir_all(&dir);
@@ -743,7 +844,8 @@ mod tests {
         let saida = mascarar("stripe = \"sk_live_NAO-E-UMA-CHAVE-REAL-2026\"");
         assert!(saida.contains("sk_live_"), "{saida}");
         assert!(!saida.contains("NAO-E-UMA-CHAVE-REAL-2026"), "{saida}");
-        let opaco = mascarar("curl -H 'Authorization: Bearer um-token-opaco-sem-prefixo-de-especie'");
+        let opaco =
+            mascarar("curl -H 'Authorization: Bearer um-token-opaco-sem-prefixo-de-especie'");
         assert!(opaco.contains("Bearer «valor mascarado»"), "{opaco}");
         assert!(!opaco.contains("um-token-opaco"), "{opaco}");
     }
@@ -756,7 +858,10 @@ mod tests {
         for chave in CHAVES_DE_SEGREDO {
             let linha = format!("{chave} = FICTICIO_VALOR_DE_TESTE");
             let saida = mascarar(&linha);
-            assert!(!saida.contains("FICTICIO_VALOR_DE_TESTE"), "{chave}: {saida}");
+            assert!(
+                !saida.contains("FICTICIO_VALOR_DE_TESTE"),
+                "{chave}: {saida}"
+            );
             assert!(saida.contains(MARCA_DE_MASCARA), "{chave}: {saida}");
             let found = content_findings("app.conf", format!("{linha}\n").as_bytes());
             assert!(
@@ -861,27 +966,40 @@ mod tests {
 
     #[test]
     fn um_bearer_no_arquivo_bloqueia_o_commit() {
-        let bruto = "HEADERS = {'Authorization': 'Bearer um-token-opaco-sem-prefixo-de-especie'}\n".as_bytes();
+        let bruto = "HEADERS = {'Authorization': 'Bearer um-token-opaco-sem-prefixo-de-especie'}\n"
+            .as_bytes();
         let found = content_findings("app.py", bruto);
-        assert!(found.iter().any(|f| f.reason.contains("Bearer")), "{found:?}");
+        assert!(
+            found.iter().any(|f| f.reason.contains("Bearer")),
+            "{found:?}"
+        );
 
         // um texto comum que só menciona o esquema não bloqueia
         let doc = "o cliente envia Bearer vazio quando não está autenticado\n".as_bytes();
         let found = content_findings("README.md", doc);
-        assert!(!found.iter().any(|f| f.reason.contains("Bearer")), "{found:?}");
+        assert!(
+            !found.iter().any(|f| f.reason.contains("Bearer")),
+            "{found:?}"
+        );
     }
 
     #[test]
     fn atribuicoes_de_password_real_vs_reference() {
         let found = content_findings("app.conf", "DB_PASSWORD=\"s3nh4-forte\"\n".as_bytes());
-        assert!(found.iter().any(|f| f.reason.contains("password")), "{found:?}");
+        assert!(
+            found.iter().any(|f| f.reason.contains("password")),
+            "{found:?}"
+        );
 
         // referência de ambiente e placeholders conhecidos não disparam bloqueio
         let found = content_findings(
             "app.conf",
             "DB_PASSWORD=${DB_PASSWORD}\npassword = \nPASSWD=changeme-placeholder\n".as_bytes(),
         );
-        assert!(!found.iter().any(|f| f.reason.contains("password")), "{found:?}");
+        assert!(
+            !found.iter().any(|f| f.reason.contains("password")),
+            "{found:?}"
+        );
     }
 
     #[test]
@@ -899,13 +1017,20 @@ mod tests {
     fn indice_rastreando_credencial_e_cache_aparece_no_alerta() {
         let extra: Vec<String> = Vec::new();
         let found = tracked_findings(
-            &["srv/.env".into(), "node_modules/react/index.js".into(), "src/app.rs".into()],
+            &[
+                "srv/.env".into(),
+                "node_modules/react/index.js".into(),
+                "src/app.rs".into(),
+            ],
             &extra,
         );
         let env = found.iter().find(|f| f.path == "srv/.env").expect("env");
         assert_eq!(env.severity, "block");
         assert_eq!(env.kind, "rastreado");
-        let cache = found.iter().find(|f| f.path.starts_with("node_modules")).expect("cache");
+        let cache = found
+            .iter()
+            .find(|f| f.path.starts_with("node_modules"))
+            .expect("cache");
         assert_eq!(cache.severity, "warn");
         assert!(!found.iter().any(|f| f.path == "src/app.rs"));
     }
@@ -930,7 +1055,8 @@ mod tests {
         assert!(!found.iter().any(|f| f.path == "src/app.rs"), "{found:?}");
 
         git::run(&dir, &["commit", "-q", "-m", "base"]).unwrap();
-        let no_push = head_findings(&dir, &["srv/.env".into(), "src/app.rs".into()], &extra).unwrap();
+        let no_push =
+            head_findings(&dir, &["srv/.env".into(), "src/app.rs".into()], &extra).unwrap();
         assert!(blocks(&no_push), "{no_push:?}");
 
         // um segredo que o commit apenas retira do índice não é motivo de bloqueio
@@ -974,10 +1100,19 @@ mod tests {
             name_finding("a/.env", &extra).unwrap(),
             name_finding("a/.env", &extra).unwrap(),
         ];
-        found.extend(content_findings("a/.env", "TOKEN=ghp_AAAAAAAAAAAAAAAABBBBBBBBBBBB\n".as_bytes()));
+        found.extend(content_findings(
+            "a/.env",
+            "TOKEN=ghp_AAAAAAAAAAAAAAAABBBBBBBBBBBB\n".as_bytes(),
+        ));
         let clean = summarize(found);
         assert_eq!(clean[0].path, "a/.env");
-        assert_eq!(clean.iter().filter(|f| f.path == "a/.env" && f.kind == "nome").count(), 1);
+        assert_eq!(
+            clean
+                .iter()
+                .filter(|f| f.path == "a/.env" && f.kind == "nome")
+                .count(),
+            1
+        );
         assert!(blocks(&clean));
         assert!(!blocks(&[Finding {
             path: "x".into(),
@@ -1000,7 +1135,23 @@ mod tests {
         let found = summarize(scan_tree(&dir, &extra, 500).unwrap());
         let paths: Vec<&str> = found.iter().map(|f| f.path.as_str()).collect();
         assert!(paths.contains(&"app/.env"), "{paths:?}");
-        assert!(!paths.iter().any(|p| p.contains("node_modules")), "{paths:?}");
+        assert!(
+            !paths.iter().any(|p| p.contains("node_modules")),
+            "{paths:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn uma_arvore_cortada_diz_que_parou_em_vez_de_parecer_limpa() {
+        let dir = tmp("corte");
+        fs::write(dir.join("a.txt"), "nada\n").unwrap();
+        fs::write(dir.join("b.txt"), "nada\n").unwrap();
+        let found = summarize(scan_tree(&dir, &[], 1).unwrap());
+        let corte = found.iter().find(|f| f.kind == "cobertura");
+        assert!(corte.is_some(), "{found:?}");
+        assert_eq!(corte.unwrap().severity, "warn");
+        assert!(corte.unwrap().reason.contains("parou em 1"));
         let _ = fs::remove_dir_all(&dir);
     }
 }

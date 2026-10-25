@@ -16,8 +16,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 use tauri::{AppHandle, Emitter};
 
 use crate::{
-    audit,
-    db,
+    audit, db,
     models::{Server, TerminalSessionInfo},
     ssh_config,
 };
@@ -169,7 +168,10 @@ pub fn open_session(
             Some(&server.name),
             None,
             None,
-            Some(&format!("{}@{}:{}", server.username, server.host, server.port)),
+            Some(&format!(
+                "{}@{}:{}",
+                server.username, server.host, server.port
+            )),
         )?;
     }
     Ok(info)
@@ -246,7 +248,11 @@ fn watch_exit(
         if let Some(status) = done {
             break Some(status.exit_code() as i64);
         }
-        if !sessions.lock().map(|m| m.contains_key(&session_id)).unwrap_or(false) {
+        if !sessions
+            .lock()
+            .map(|m| m.contains_key(&session_id))
+            .unwrap_or(false)
+        {
             // close_session já removeu e encerrou; nada a fazer.
             break None;
         }
@@ -299,7 +305,12 @@ pub fn write_session(term: &TerminalState, session_id: i64, data: &str) -> Resul
         .map_err(|e| format!("falha ao enviar dados ao terminal: {e}"))
 }
 
-pub fn resize_session(term: &TerminalState, session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
+pub fn resize_session(
+    term: &TerminalState,
+    session_id: i64,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
     if !(2..=500).contains(&cols) || !(2..=300).contains(&rows) {
         return Err(format!("dimensões de terminal inválidas: {cols}x{rows}"));
     }
@@ -437,8 +448,8 @@ mod tests {
             drop(l);
             p
         };
-        let (master, writer, mut reader, child) =
-            spawn_pty(&server_inalcavel(porta), 80, 24).expect("não foi possível abrir o pseudo-terminal");
+        let (master, writer, mut reader, child) = spawn_pty(&server_inalcavel(porta), 80, 24)
+            .expect("não foi possível abrir o pseudo-terminal");
 
         // Drena o PTY em paralelo; quando o ssh morre, a leitura atinge EOF.
         let (tx, rx) = std::sync::mpsc::channel::<(Vec<u8>, bool)>();
@@ -484,10 +495,19 @@ mod tests {
             .expect("o leitor do PTY não chegou ao EOF em 5s após fechar o master");
         let texto = String::from_utf8_lossy(&out).to_lowercase();
 
-        assert_ne!(status.exit_code(), 0, "ssh deveria sair com erro na porta recusada");
-        assert!(eof, "a leitura do PTY deveria terminar após fechar o master");
+        assert_ne!(
+            status.exit_code(),
+            0,
+            "ssh deveria sair com erro na porta recusada"
+        );
         assert!(
-            texto.contains("127.0.0.1") || texto.contains("refused") || texto.contains("connection"),
+            eof,
+            "a leitura do PTY deveria terminar após fechar o master"
+        );
+        assert!(
+            texto.contains("127.0.0.1")
+                || texto.contains("refused")
+                || texto.contains("connection"),
             "a saída do ssh deveria chegar pelo PTY; recebemos: {texto:?}"
         );
     }

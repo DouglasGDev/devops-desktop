@@ -82,7 +82,9 @@ impl AuthBroker {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         {
-            let Ok(mut pending) = self.inner.pending.lock() else { return None };
+            let Ok(mut pending) = self.inner.pending.lock() else {
+                return None;
+            };
             pending.insert(id, tx);
         }
         emit(&AuthRequest {
@@ -107,7 +109,9 @@ impl AuthBroker {
             return Err("a senha não pode ser vazia".into());
         }
         if password.len() > MAX_PASSWORD_LEN {
-            return Err(format!("senha longa demais (máximo {MAX_PASSWORD_LEN} caracteres)"));
+            return Err(format!(
+                "senha longa demais (máximo {MAX_PASSWORD_LEN} caracteres)"
+            ));
         }
         let tx = self
             .inner
@@ -152,7 +156,9 @@ impl AskPass {
             return Err("a senha não pode ser vazia".into());
         }
         if password.len() > MAX_PASSWORD_LEN {
-            return Err(format!("senha longa demais (máximo {MAX_PASSWORD_LEN} caracteres)"));
+            return Err(format!(
+                "senha longa demais (máximo {MAX_PASSWORD_LEN} caracteres)"
+            ));
         }
         let seq = SCRIPT_SEQ.fetch_add(1, Ordering::Relaxed);
         let (prefix, content) = if cfg!(windows) {
@@ -352,10 +358,16 @@ mod tests {
             let path = ask.script_path().clone();
             assert!(path.exists());
             let content = std::fs::read_to_string(&path).unwrap();
-            assert!(!content.contains("senha-secret"), "o script não pode guardar a senha");
+            assert!(
+                !content.contains("senha-secret"),
+                "o script não pode guardar a senha"
+            );
             assert!(content.contains(PASSWORD_ENV));
             assert_eq!(ask.ssh_options()[0], "BatchMode=no");
-            assert_eq!(ask.ssh_options()[2], "PreferredAuthentications=password,keyboard-interactive");
+            assert_eq!(
+                ask.ssh_options()[2],
+                "PreferredAuthentications=password,keyboard-interactive"
+            );
             path
         };
         assert!(!script.exists(), "o auxiliar temporário é apagado no Drop");
@@ -368,10 +380,21 @@ mod tests {
         ask.apply(&mut cmd);
         let envs: HashMap<_, _> = cmd
             .get_envs()
-            .map(|(k, v)| (k.to_string_lossy().to_string(), v.map(|s| s.to_string_lossy().to_string())))
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().to_string(),
+                    v.map(|s| s.to_string_lossy().to_string()),
+                )
+            })
             .collect();
-        assert_eq!(envs.get("SSH_ASKPASS_REQUIRE").and_then(|v| v.as_deref()), Some("force"));
-        assert_eq!(envs.get(PASSWORD_ENV).and_then(|v| v.as_deref()), Some("senha-secret"));
+        assert_eq!(
+            envs.get("SSH_ASKPASS_REQUIRE").and_then(|v| v.as_deref()),
+            Some("force")
+        );
+        assert_eq!(
+            envs.get(PASSWORD_ENV).and_then(|v| v.as_deref()),
+            Some("senha-secret")
+        );
         assert!(envs.contains_key("SSH_ASKPASS"));
     }
 }

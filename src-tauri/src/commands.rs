@@ -14,16 +14,16 @@ use crate::{
     analysis, audit,
     auth::{self, AskPass, AuthBroker},
     db::{self, AppState},
-    deploy,
-    files,
+    deploy, files,
     files_transfer::{self, TransferInfo, TransferState},
     git, git_probe, github, infra,
     models::{
-        AnalysisFinding, AnalysisInput, AnalysisRun, AuditEntry, ConnectionTestResult,
-        DefinitionRevision, DeployProfile, DeployProfileInput, DeployRun, EditorInstalado,
-        ImportSshHost, Project, PipelineNode, PipelineNodeInput, RemoteEntry, Routine,
-        RoutineInput, SearchProjectRow, SearchResults, SearchServerRow, Server, ServerInput,
-        SshDiscoveryReport, StepLogLine, TerminalHistoryEntry, TerminalSessionInfo, ToolVersions,
+        AchadosFiltro, AnalysisComparison, AnalysisInput, AnalysisRun, AuditEntry,
+        ConnectionTestResult, DefinitionRevision, DeployProfile, DeployProfileInput, DeployRun,
+        EditorInstalado, FindingsPage, ImportSshHost, PipelineNode, PipelineNodeInput, Project,
+        RemoteEntry, Routine, RoutineInput, SearchProjectRow, SearchResults, SearchServerRow,
+        Server, ServerInput, SshDiscoveryReport, StepLogLine, TerminalHistoryEntry,
+        TerminalSessionInfo, ToolVersions,
     },
     pipeline, security, ssh_config, ssh_test, sshexec,
     terminal::{self, TerminalState},
@@ -117,7 +117,10 @@ async fn get_tool_versions(state: State<'_, AppState>) -> Result<ToolVersions, S
             None,
             None,
             None,
-            Some(&format!("ssh: {:?} · git: {:?}", versions.ssh, versions.git)),
+            Some(&format!(
+                "ssh: {:?} · git: {:?}",
+                versions.ssh, versions.git
+            )),
         )?;
     }
     Ok(versions)
@@ -142,13 +145,20 @@ async fn add_server(state: State<'_, AppState>, input: ServerInput) -> Result<Se
         Some(&server.name),
         None,
         None,
-        Some(&format!("{}@{}:{}", server.username, server.host, server.port)),
+        Some(&format!(
+            "{}@{}:{}",
+            server.username, server.host, server.port
+        )),
     )?;
     Ok(server)
 }
 
 #[tauri::command]
-async fn update_server(state: State<'_, AppState>, id: i64, input: ServerInput) -> Result<Server, String> {
+async fn update_server(
+    state: State<'_, AppState>,
+    id: i64,
+    input: ServerInput,
+) -> Result<Server, String> {
     input.validate()?;
     let conn = lock_db(&state.db)?;
     let old = db::get_server(&conn, id)?;
@@ -336,7 +346,10 @@ async fn discover_ssh(state: State<'_, AppState>) -> Result<SshDiscoveryReport, 
 }
 
 #[tauri::command]
-async fn import_ssh_hosts(state: State<'_, AppState>, entries: Vec<ImportSshHost>) -> Result<Vec<Server>, String> {
+async fn import_ssh_hosts(
+    state: State<'_, AppState>,
+    entries: Vec<ImportSshHost>,
+) -> Result<Vec<Server>, String> {
     if entries.is_empty() {
         return Err("nenhum host selecionado para importar".into());
     }
@@ -377,7 +390,11 @@ async fn import_ssh_hosts(state: State<'_, AppState>, entries: Vec<ImportSshHost
             host,
             port: entry.port,
             username: user,
-            auth_method: if entry.identity_file.is_some() { "key".into() } else { "unknown".into() },
+            auth_method: if entry.identity_file.is_some() {
+                "key".into()
+            } else {
+                "unknown".into()
+            },
             identity_file: entry.identity_file.clone(),
             ssh_alias: Some(alias),
             environment: entry.environment.clone(),
@@ -388,13 +405,21 @@ async fn import_ssh_hosts(state: State<'_, AppState>, entries: Vec<ImportSshHost
     }
     audit::log(
         &conn,
-        if created.is_empty() { "warning" } else { "success" },
+        if created.is_empty() {
+            "warning"
+        } else {
+            "success"
+        },
         "server",
         "Importação de ~/.ssh/config",
         None,
         None,
         None,
-        Some(&format!("{} importado(s), {} ignorado(s)", created.len(), skipped)),
+        Some(&format!(
+            "{} importado(s), {} ignorado(s)",
+            created.len(),
+            skipped
+        )),
     )?;
     Ok(created)
 }
@@ -406,7 +431,11 @@ async fn list_projects(state: State<'_, AppState>) -> Result<Vec<Project>, Strin
 }
 
 #[tauri::command]
-async fn add_project(state: State<'_, AppState>, path: String, name: Option<String>) -> Result<Project, String> {
+async fn add_project(
+    state: State<'_, AppState>,
+    path: String,
+    name: Option<String>,
+) -> Result<Project, String> {
     if path.trim().is_empty() {
         return Err("informe o caminho da pasta do projeto".into());
     }
@@ -527,7 +556,9 @@ async fn update_project(
         None,
         Some(&format!(
             "servidor padrão: {}",
-            default_server_id.map(|s| s.to_string()).unwrap_or_else(|| "nenhum".into())
+            default_server_id
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "nenhum".into())
         )),
     )?;
     Ok(project)
@@ -586,7 +617,11 @@ async fn save_deploy_profile(
         &conn,
         "info",
         "deploy",
-        if input.id.is_some() { "Modelo de deploy atualizado" } else { "Modelo de deploy criado" },
+        if input.id.is_some() {
+            "Modelo de deploy atualizado"
+        } else {
+            "Modelo de deploy criado"
+        },
         profile.server_name.as_deref(),
         Some(&project.name),
         None,
@@ -667,7 +702,10 @@ async fn deploy_preflight(
     profile_id: i64,
 ) -> Result<deploy::Preflight, String> {
     let db = state.db.clone();
-    spawn("deploy_preflight", move || deploy::preflight(&db, profile_id)).await
+    spawn("deploy_preflight", move || {
+        deploy::preflight(&db, profile_id)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -732,7 +770,9 @@ async fn deploy_cancel(
 }
 
 #[tauri::command]
-async fn deploy_active(deploys: State<'_, deploy::DeployState>) -> Result<Vec<deploy::ActiveInfo>, String> {
+async fn deploy_active(
+    deploys: State<'_, deploy::DeployState>,
+) -> Result<Vec<deploy::ActiveInfo>, String> {
     Ok(deploy::active(&deploys))
 }
 
@@ -778,9 +818,15 @@ async fn pipeline_revisions(
 /// que não responde prendia um worker do runtime assíncrono — que é o que as
 /// outras telas usam.
 #[tauri::command]
-async fn pipeline_validate(state: State<'_, AppState>, definition_id: i64) -> Result<String, String> {
+async fn pipeline_validate(
+    state: State<'_, AppState>,
+    definition_id: i64,
+) -> Result<String, String> {
     let db = state.db.clone();
-    spawn("pipeline_validate", move || pipeline::validate(&db, definition_id)).await
+    spawn("pipeline_validate", move || {
+        pipeline::validate(&db, definition_id)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -859,7 +905,9 @@ async fn pipeline_check_nodes(
         .collect::<Vec<_>>();
     let tem_servidor = {
         let conn = lock_db(&state.db)?;
-        db::get_deploy_profile(&conn, definition_id)?.server_id.is_some()
+        db::get_deploy_profile(&conn, definition_id)?
+            .server_id
+            .is_some()
     };
     pipeline::checar_grafo(&lista, tem_servidor)
 }
@@ -881,7 +929,9 @@ async fn pipeline_engine_steps(
 ) -> Result<Vec<EtapaDoMotor>, String> {
     let tem_servidor = {
         let conn = lock_db(&state.db)?;
-        db::get_deploy_profile(&conn, definition_id)?.server_id.is_some()
+        db::get_deploy_profile(&conn, definition_id)?
+            .server_id
+            .is_some()
     };
     Ok((1..=15)
         .map(|p| EtapaDoMotor {
@@ -1008,13 +1058,14 @@ where
     F: FnOnce(&Path) -> Result<T, String> + Send + 'static,
 {
     let bloqueio = db.clone();
-    let (name, result) =
-        tauri::async_runtime::spawn_blocking(move || -> Result<(String, Result<T, String>), String> {
+    let (name, result) = tauri::async_runtime::spawn_blocking(
+        move || -> Result<(String, Result<T, String>), String> {
             let (name, dir) = project_repo(&bloqueio, project_id)?;
             Ok((name, op(&dir)))
-        })
-        .await
-        .map_err(|e| format!("falha interna na operação do Git: {e}"))??;
+        },
+    )
+    .await
+    .map_err(|e| format!("falha interna na operação do Git: {e}"))??;
     let conn = lock_db(&db)?;
     let message = match &result {
         Ok(_) => detail,
@@ -1179,10 +1230,8 @@ fn extra_secret_patterns(db: &DbHandle) -> Result<Vec<String>, String> {
 /// Mensagem de bloqueio. Nunca repete o conteúdo do arquivo — só o caminho e o
 /// motivo, para não levar um segredo para a tela ou para o log.
 fn secret_block_message(operacao: &str, findings: &[security::Finding]) -> String {
-    let blocked: Vec<&security::Finding> = findings
-        .iter()
-        .filter(|f| f.severity == "block")
-        .collect();
+    let blocked: Vec<&security::Finding> =
+        findings.iter().filter(|f| f.severity == "block").collect();
     let nomes: Vec<String> = blocked
         .iter()
         .take(5)
@@ -1263,7 +1312,11 @@ async fn git_untrack_file(
     let ignore = gitignore.unwrap_or(true);
     let detail = format!(
         "{path} saiu do índice (o arquivo local foi mantido){}",
-        if ignore { " e foi listado no .gitignore" } else { "" }
+        if ignore {
+            " e foi listado no .gitignore"
+        } else {
+            ""
+        }
     );
     git_write(db, project_id, "git_untrack_file", detail, move |dir| {
         git::untrack(dir, &path)?;
@@ -1276,7 +1329,10 @@ async fn git_untrack_file(
 }
 
 #[tauri::command]
-async fn git_status(state: State<'_, AppState>, project_id: i64) -> Result<git::RepoStatus, String> {
+async fn git_status(
+    state: State<'_, AppState>,
+    project_id: i64,
+) -> Result<git::RepoStatus, String> {
     let db = state.db.clone();
     git_read(db, project_id, git::status).await
 }
@@ -1286,7 +1342,10 @@ async fn git_identity(state: State<'_, AppState>, project_id: i64) -> Result<Git
     let db = state.db.clone();
     git_read(db, project_id, |dir| {
         let (user_name, user_email) = git::identity(dir)?;
-        Ok(GitIdentity { user_name, user_email })
+        Ok(GitIdentity {
+            user_name,
+            user_email,
+        })
     })
     .await
 }
@@ -1405,16 +1464,22 @@ async fn git_commit(
     let amend = amend.unwrap_or(false);
     let allow_secrets = allow_secrets.unwrap_or(false);
     let extra = extra_secret_patterns(&db)?;
-    git_write(db, project_id, "git_commit", format!("commit: {detail}"), move |dir| {
-        // §8: nada é commitado enquanto houver candidato a segredo no índice.
-        if !allow_secrets {
-            let found = security::index_findings(dir, &extra)?;
-            if security::blocks(&found) {
-                return Err(secret_block_message("commit", &found));
+    git_write(
+        db,
+        project_id,
+        "git_commit",
+        format!("commit: {detail}"),
+        move |dir| {
+            // §8: nada é commitado enquanto houver candidato a segredo no índice.
+            if !allow_secrets {
+                let found = security::index_findings(dir, &extra)?;
+                if security::blocks(&found) {
+                    return Err(secret_block_message("commit", &found));
+                }
             }
-        }
-        git::commit(dir, &message, amend)
-    })
+            git::commit(dir, &message, amend)
+        },
+    )
     .await
 }
 
@@ -1461,10 +1526,7 @@ async fn git_checkout(
     let db = state.db.clone();
     let create = create.unwrap_or(false);
     let start_point = trim_opt(start_point);
-    let detail = format!(
-        "{} para {name}",
-        if create { "criação" } else { "troca" }
-    );
+    let detail = format!("{} para {name}", if create { "criação" } else { "troca" });
     git_write(db, project_id, "git_checkout", detail, move |dir| {
         git::checkout(dir, &name, create, start_point.as_deref())?;
         git::status(dir)
@@ -1616,7 +1678,9 @@ async fn git_revert(
     let db = state.db.clone();
     let detail = format!(
         "reversão do commit {commit}{}",
-        mainline.map(|m| format!(" (pai {m} do merge)")).unwrap_or_default()
+        mainline
+            .map(|m| format!(" (pai {m} do merge)"))
+            .unwrap_or_default()
     );
     git_write(db, project_id, "git_revert", detail, move |dir| {
         git::revert(dir, &commit, mainline).map(outcome)
@@ -1636,7 +1700,9 @@ async fn git_cherry_pick(
     let db = state.db.clone();
     let detail = format!(
         "reprodução do commit {commit}{}",
-        mainline.map(|m| format!(" (pai {m} do merge)")).unwrap_or_default()
+        mainline
+            .map(|m| format!(" (pai {m} do merge)"))
+            .unwrap_or_default()
     );
     git_write(db, project_id, "git_cherry_pick", detail, move |dir| {
         git::cherry_pick(dir, &commit, mainline).map(outcome)
@@ -1666,7 +1732,10 @@ async fn git_stash_push(
     // A auditoria guarda só o assunto, nunca o texto inteiro digitado.
     let detail = format!(
         "guardar trabalho{}",
-        recado.as_deref().map(|m| format!(": {}", subject_line(m))).unwrap_or_default()
+        recado
+            .as_deref()
+            .map(|m| format!(": {}", subject_line(m)))
+            .unwrap_or_default()
     );
     let nota = if inclui { " (com não rastreados)" } else { "" };
     git_write(
@@ -1696,7 +1765,11 @@ async fn git_stash_apply(
     let db = state.db.clone();
     let detail = format!(
         "{} do guardado {indice}",
-        if aplicar { "aplicar e retirar" } else { "aplicar" }
+        if aplicar {
+            "aplicar e retirar"
+        } else {
+            "aplicar"
+        }
     );
     git_write(db, project_id, "git_stash_apply", detail, move |dir| {
         git::stash_apply(dir, indice, aplicar).map(outcome)
@@ -1707,7 +1780,11 @@ async fn git_stash_apply(
 /// Excluir um guardado descarta aquele trabalho — a interface confirma antes e
 /// nada aqui apaga sozinho.
 #[tauri::command]
-async fn git_stash_drop(state: State<'_, AppState>, project_id: i64, index: i64) -> Result<GitActionOutcome, String> {
+async fn git_stash_drop(
+    state: State<'_, AppState>,
+    project_id: i64,
+    index: i64,
+) -> Result<GitActionOutcome, String> {
     if index < 0 {
         return Err("índice de guardado inválido".into());
     }
@@ -1873,15 +1950,14 @@ async fn git_publish(
         }
     }
     let extra = extra_secret_patterns(&db)?;
-    let rotulo = remote.clone().unwrap_or_else(|| "o remoto padrão".to_string());
+    let rotulo = remote
+        .clone()
+        .unwrap_or_else(|| "o remoto padrão".to_string());
     let mut detail = format!("publicação para {rotulo}");
     if let Some(t) = &tag {
         detail.push_str(&format!(" com a tag {t}"));
     }
-    let locais = commands
-        .iter()
-        .filter(|c| !c.trim().is_empty())
-        .count();
+    let locais = commands.iter().filter(|c| !c.trim().is_empty()).count();
     if locais > 0 {
         detail.push_str(&format!(" ({locais} comando(s) locais antes do envio)"));
     }
@@ -1977,7 +2053,9 @@ async fn git_unpublish_tag(
 ) -> Result<GitActionOutcome, String> {
     let db = state.db.clone();
     let remote = trim_opt(remote);
-    let rotulo = remote.clone().unwrap_or_else(|| "o remoto padrão".to_string());
+    let rotulo = remote
+        .clone()
+        .unwrap_or_else(|| "o remoto padrão".to_string());
     let detail = format!("tag {name} retirada de {rotulo}");
     git_write(db, project_id, "git_unpublish_tag", detail, move |dir| {
         let escolhido = match remote.as_deref() {
@@ -2015,7 +2093,10 @@ async fn git_check_remote(
 }
 
 #[tauri::command]
-async fn git_tags(state: State<'_, AppState>, project_id: i64) -> Result<Vec<git::TagInfo>, String> {
+async fn git_tags(
+    state: State<'_, AppState>,
+    project_id: i64,
+) -> Result<Vec<git::TagInfo>, String> {
     let db = state.db.clone();
     git_read(db, project_id, git::tags).await
 }
@@ -2185,7 +2266,10 @@ async fn open_in_editor(
     path: Option<String>,
 ) -> Result<(), String> {
     let db = state.db.clone();
-    spawn("open_in_editor", move || abrir_no_editor(&db, project_id, path)).await
+    spawn("open_in_editor", move || {
+        abrir_no_editor(&db, project_id, path)
+    })
+    .await
 }
 
 /// Resolver a pasta, sondar o caminho e chamar o executável — tudo em thread
@@ -2234,11 +2318,12 @@ fn abrir_no_editor(db: &DbHandle, project_id: i64, path: Option<String>) -> Resu
             },
             None => Err("nenhum arquivo para abrir".to_string()),
         },
-        RotaEditor::Link(link) => {
-            open_url(link.as_str(), None::<&str>).map_err(|e| format!("falha ao abrir o editor: {e}"))
-        }
+        RotaEditor::Link(link) => open_url(link.as_str(), None::<&str>)
+            .map_err(|e| format!("falha ao abrir o editor: {e}")),
         RotaEditor::Sistema => match target.as_deref() {
-            Some(file) => open_path(file, None::<&str>).map_err(|e| format!("falha ao abrir o editor: {e}")),
+            Some(file) => {
+                open_path(file, None::<&str>).map_err(|e| format!("falha ao abrir o editor: {e}"))
+            }
             None => Err("nenhum arquivo para abrir".to_string()),
         },
     };
@@ -2308,7 +2393,10 @@ async fn query_audit_log(
         .query(refs.as_slice())
         .map_err(|e| format!("falha ao consultar histórico: {e}"))?;
     let mut out = Vec::new();
-    while let Some(row) = rows.next().map_err(|e| format!("falha ao consultar histórico: {e}"))? {
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("falha ao consultar histórico: {e}"))?
+    {
         out.push(db::row_to_audit(row).map_err(|e| format!("falha ao ler registro: {e}"))?);
     }
     Ok(out)
@@ -2334,7 +2422,11 @@ async fn search_all(state: State<'_, AppState>, query: String) -> Result<SearchR
             .map_err(|e| format!("falha na busca: {e}"))?;
         let rows = stmt
             .query_map([&pattern], |r| {
-                Ok(SearchServerRow { id: r.get(0)?, name: r.get(1)?, host: r.get(2)? })
+                Ok(SearchServerRow {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    host: r.get(2)?,
+                })
             })
             .map_err(|e| format!("falha na busca: {e}"))?;
         for row in rows {
@@ -2349,7 +2441,11 @@ async fn search_all(state: State<'_, AppState>, query: String) -> Result<SearchR
             .map_err(|e| format!("falha na busca: {e}"))?;
         let rows = stmt
             .query_map([&pattern], |r| {
-                Ok(SearchProjectRow { id: r.get(0)?, name: r.get(1)?, local_path: r.get(2)? })
+                Ok(SearchProjectRow {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    local_path: r.get(2)?,
+                })
             })
             .map_err(|e| format!("falha na busca: {e}"))?;
         for row in rows {
@@ -2372,7 +2468,11 @@ async fn search_all(state: State<'_, AppState>, query: String) -> Result<SearchR
         }
     }
 
-    Ok(SearchResults { servers, projects, history })
+    Ok(SearchResults {
+        servers,
+        projects,
+        history,
+    })
 }
 
 #[tauri::command]
@@ -2391,7 +2491,11 @@ async fn open_terminal_session(
 }
 
 #[tauri::command]
-fn write_terminal_session(term: State<'_, TerminalState>, session_id: i64, data: String) -> Result<(), String> {
+fn write_terminal_session(
+    term: State<'_, TerminalState>,
+    session_id: i64,
+    data: String,
+) -> Result<(), String> {
     if data.len() > 100_000 {
         return Err("bloco de dados grande demais para o terminal".into());
     }
@@ -2399,7 +2503,12 @@ fn write_terminal_session(term: State<'_, TerminalState>, session_id: i64, data:
 }
 
 #[tauri::command]
-fn resize_terminal_session(term: State<'_, TerminalState>, session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
+fn resize_terminal_session(
+    term: State<'_, TerminalState>,
+    session_id: i64,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
     terminal::resize_session(&term, session_id, cols, rows)
 }
 
@@ -2413,7 +2522,9 @@ async fn close_terminal_session(
 }
 
 #[tauri::command]
-fn list_terminal_sessions(term: State<'_, TerminalState>) -> Result<Vec<TerminalSessionInfo>, String> {
+fn list_terminal_sessions(
+    term: State<'_, TerminalState>,
+) -> Result<Vec<TerminalSessionInfo>, String> {
     terminal::list_sessions(&term)
 }
 
@@ -2432,7 +2543,10 @@ async fn save_routine(state: State<'_, AppState>, input: RoutineInput) -> Result
         Some(id) => {
             let existing = db::get_routine(&conn, id)?;
             if existing.is_builtin {
-                return Err(format!("a rotina \"{}\" é pré-instalada e não pode ser alterada", existing.name));
+                return Err(format!(
+                    "a rotina \"{}\" é pré-instalada e não pode ser alterada",
+                    existing.name
+                ));
             }
             db::update_routine_row(&conn, id, &input)?
         }
@@ -2441,14 +2555,22 @@ async fn save_routine(state: State<'_, AppState>, input: RoutineInput) -> Result
         &conn,
         "success",
         "terminal",
-        if input.id.is_some() { "Rotina atualizada" } else { "Rotina criada" },
+        if input.id.is_some() {
+            "Rotina atualizada"
+        } else {
+            "Rotina criada"
+        },
         None,
         None,
         None,
         Some(&format!(
             "{} · classificação: {}",
             routine.name,
-            if routine.danger == "read" { "leitura" } else { "altera o servidor" }
+            if routine.danger == "read" {
+                "leitura"
+            } else {
+                "altera o servidor"
+            }
         )),
     )?;
     Ok(routine)
@@ -2459,7 +2581,10 @@ async fn delete_routine(state: State<'_, AppState>, id: i64) -> Result<(), Strin
     let conn = lock_db(&state.db)?;
     let existing = db::get_routine(&conn, id)?;
     if existing.is_builtin {
-        return Err(format!("a rotina \"{}\" é pré-instalada e não pode ser removida", existing.name));
+        return Err(format!(
+            "a rotina \"{}\" é pré-instalada e não pode ser removida",
+            existing.name
+        ));
     }
     db::delete_routine_row(&conn, id)?;
     audit::log(
@@ -2501,7 +2626,10 @@ async fn record_terminal_command(
 }
 
 #[tauri::command]
-async fn list_terminal_history(state: State<'_, AppState>, limit: Option<i64>) -> Result<Vec<TerminalHistoryEntry>, String> {
+async fn list_terminal_history(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+) -> Result<Vec<TerminalHistoryEntry>, String> {
     let conn = lock_db(&state.db)?;
     db::list_terminal_history(&conn, limit.unwrap_or(100).clamp(1, 500))
 }
@@ -2599,9 +2727,13 @@ async fn sftp_list(
     }
     let name = server.name.clone();
     let display = path.clone();
-    let entries = with_askpass(app, (*passwords).clone(), server, "Arquivos remotos (SFTP)", move |server, pass| {
-        files::list_dir(server, &path, pass)
-    })
+    let entries = with_askpass(
+        app,
+        (*passwords).clone(),
+        server,
+        "Arquivos remotos (SFTP)",
+        move |server, pass| files::list_dir(server, &path, pass),
+    )
     .await?;
     let conn = lock_db(&db)?;
     audit::log(
@@ -2630,9 +2762,16 @@ async fn sftp_mkdir(
         return Err("informe o caminho do novo diretório".into());
     }
     let detail = format!("mkdir {path}");
-    sftp_mutation(app, state.db.clone(), (*passwords).clone(), server_id, move |s, pass| {
-        files::make_dir(s, &path, pass)
-    }, "Diretório criado", detail).await
+    sftp_mutation(
+        app,
+        state.db.clone(),
+        (*passwords).clone(),
+        server_id,
+        move |s, pass| files::make_dir(s, &path, pass),
+        "Diretório criado",
+        detail,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -2675,9 +2814,16 @@ async fn sftp_remove(
         return Err("informe o arquivo a remover".into());
     }
     let detail = format!("rm {path}");
-    sftp_mutation(app, state.db.clone(), (*passwords).clone(), server_id, move |s, pass| {
-        files::remove_file(s, &path, pass)
-    }, "Arquivo removido", detail).await
+    sftp_mutation(
+        app,
+        state.db.clone(),
+        (*passwords).clone(),
+        server_id,
+        move |s, pass| files::remove_file(s, &path, pass),
+        "Arquivo removido",
+        detail,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -2693,9 +2839,16 @@ async fn sftp_remove_dir(
         return Err("informe o diretório a remover".into());
     }
     let detail = format!("rmdir {path}");
-    sftp_mutation(app, state.db.clone(), (*passwords).clone(), server_id, move |s, pass| {
-        files::remove_dir(s, &path, pass)
-    }, "Diretório removido", detail).await
+    sftp_mutation(
+        app,
+        state.db.clone(),
+        (*passwords).clone(),
+        server_id,
+        move |s, pass| files::remove_dir(s, &path, pass),
+        "Diretório removido",
+        detail,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -2712,9 +2865,16 @@ async fn sftp_chmod(
         return Err("informe o caminho".into());
     }
     let detail = format!("chmod {mode} {path}");
-    sftp_mutation(app, state.db.clone(), (*passwords).clone(), server_id, move |s, pass| {
-        files::set_perms(s, &path, &mode, pass)
-    }, "Permissão alterada", detail).await
+    sftp_mutation(
+        app,
+        state.db.clone(),
+        (*passwords).clone(),
+        server_id,
+        move |s, pass| files::set_perms(s, &path, &mode, pass),
+        "Permissão alterada",
+        detail,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -2733,9 +2893,13 @@ async fn sftp_read_text(
     }
     let name = server.name.clone();
     let display = path.clone();
-    let content = with_askpass(app, (*passwords).clone(), server, "Arquivos remotos (SFTP)", move |server, pass| {
-        files::read_text(server, &path, pass)
-    })
+    let content = with_askpass(
+        app,
+        (*passwords).clone(),
+        server,
+        "Arquivos remotos (SFTP)",
+        move |server, pass| files::read_text(server, &path, pass),
+    )
     .await?;
     let conn = lock_db(&db)?;
     audit::log(
@@ -2804,7 +2968,11 @@ async fn transfer_start(
     }
     let db = state.db.clone();
     let server = server_snapshot(&db, input.server_id)?;
-    let kind_static: &'static str = if input.kind == "upload" { "upload" } else { "download" };
+    let kind_static: &'static str = if input.kind == "upload" {
+        "upload"
+    } else {
+        "download"
+    };
     let broker = (*passwords).clone();
     let transfers_db = db.clone();
     let app_for_prepare = app.clone();
@@ -2812,7 +2980,12 @@ async fn transfer_start(
     // A senha é solicitada fora da runtime async para não bloquear outros
     // comandos enquanto o usuário digita.
     let pass = tauri::async_runtime::spawn_blocking(move || {
-        auth::prepare(&broker, &app_for_prepare, &server_for_prepare, "Transferência de arquivos")
+        auth::prepare(
+            &broker,
+            &app_for_prepare,
+            &server_for_prepare,
+            "Transferência de arquivos",
+        )
     })
     .await
     .map_err(|e| format!("falha interna ao preparar a transferência: {e}"))??;
@@ -2835,7 +3008,11 @@ async fn transfer_start(
         &conn,
         "info",
         "files",
-        if kind_static == "upload" { "Upload iniciado" } else { "Download iniciado" },
+        if kind_static == "upload" {
+            "Upload iniciado"
+        } else {
+            "Download iniciado"
+        },
         Some(&server.name),
         None,
         Some(id),
@@ -2848,7 +3025,10 @@ async fn transfer_start(
 }
 
 #[tauri::command]
-async fn transfer_cancel(transfers: State<'_, TransferState>, transfer_id: i64) -> Result<(), String> {
+async fn transfer_cancel(
+    transfers: State<'_, TransferState>,
+    transfer_id: i64,
+) -> Result<(), String> {
     files_transfer::cancel(&transfers, transfer_id)
 }
 
@@ -2976,7 +3156,13 @@ async fn github_create_repo(
     let gh = (*gh).clone();
     spawn("github_create_repo", move || {
         let conn = lock_db(&db)?;
-        github::create_repo(&conn, &gh, &input.name, input.private, input.description.as_deref())
+        github::create_repo(
+            &conn,
+            &gh,
+            &input.name,
+            input.private,
+            input.description.as_deref(),
+        )
     })
     .await
 }
@@ -3041,13 +3227,7 @@ async fn github_create_issue(
     let gh = (*gh).clone();
     spawn("github_create_issue", move || {
         let conn = lock_db(&db)?;
-        github::create_issue(
-            &conn,
-            &gh,
-            &input.repo,
-            &input.title,
-            input.body.as_deref(),
-        )
+        github::create_issue(&conn, &gh, &input.repo, &input.title, input.body.as_deref())
     })
     .await
 }
@@ -3221,7 +3401,16 @@ fn registrar_verificacao<T>(
         Err(mensagem) => ("error", format!("{categoria} · falhou"), mensagem.clone()),
     };
     if let Ok(conn) = lock_db(db) {
-        let _ = audit::log(&conn, nivel, categoria, &operacao, None, None, None, Some(&detalhe));
+        let _ = audit::log(
+            &conn,
+            nivel,
+            categoria,
+            &operacao,
+            None,
+            None,
+            None,
+            Some(&detalhe),
+        );
     }
 }
 
@@ -3263,7 +3452,12 @@ async fn analysis_conferir(
         analysis::conferir_regras(&conn, &dados)
     })
     .await;
-    registrar_verificacao(&state.db, "análise", &resultado, analysis::linha_da_conferencia);
+    registrar_verificacao(
+        &state.db,
+        "análise",
+        &resultado,
+        analysis::linha_da_conferencia,
+    );
     resultado
 }
 
@@ -3351,16 +3545,21 @@ async fn analysis_corridas(
 async fn analysis_achados(
     state: State<'_, AppState>,
     run_id: i64,
-    severidade: Option<String>,
-    limit: Option<i64>,
-) -> Result<Vec<AnalysisFinding>, String> {
+    filtro: Option<AchadosFiltro>,
+) -> Result<FindingsPage, String> {
     let conn = lock_db(&state.db)?;
-    db::listar_achados(
-        &conn,
-        run_id,
-        severidade.as_deref().map(str::trim).filter(|s| !s.is_empty()),
-        limit.unwrap_or(500).clamp(1, 5000),
-    )
+    db::listar_achados_pagina(&conn, run_id, &filtro.unwrap_or_default())
+}
+
+/// O que mudou desde a última corrida comparável do mesmo projeto e instrumento.
+/// A tela pede isto ao abrir a corrida; a comparação não é recalculada no cliente.
+#[tauri::command]
+async fn analysis_comparar(
+    state: State<'_, AppState>,
+    run_id: i64,
+) -> Result<AnalysisComparison, String> {
+    let conn = lock_db(&state.db)?;
+    db::comparar_analises(&conn, run_id)
 }
 
 /// O pacote que uma IA lê para decidir. É a mesma corrida da tela, em texto
@@ -3543,6 +3742,7 @@ pub fn register_all(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri
         analysis_varrendo,
         analysis_corridas,
         analysis_achados,
+        analysis_comparar,
         analysis_pacote,
         analysis_exportar,
         analysis_remover,
@@ -3639,7 +3839,10 @@ mod git_helpers_tests {
 
     #[test]
     fn assunto_do_commit_cabe_na_auditoria() {
-        assert_eq!(subject_line("  corrige o login\n\ne mais corpo"), "corrige o login");
+        assert_eq!(
+            subject_line("  corrige o login\n\ne mais corpo"),
+            "corrige o login"
+        );
         assert_eq!(subject_line("\no corpo sozinho"), "(sem mensagem)");
         let longa = "x".repeat(200);
         let cortada = subject_line(&longa);
@@ -3681,10 +3884,19 @@ mod git_helpers_tests {
             RotaEditor::Link("cursor://file/C:/Users/dougl/app".into())
         );
         // o padrão do sistema e um id desconhecido vão para o manipulador nativo
-        assert_eq!(rota_do_editor("system", Some(dir), &instalados), RotaEditor::Sistema);
-        assert_eq!(rota_do_editor("gedit", Some(dir), &instalados), RotaEditor::Sistema);
+        assert_eq!(
+            rota_do_editor("system", Some(dir), &instalados),
+            RotaEditor::Sistema
+        );
+        assert_eq!(
+            rota_do_editor("gedit", Some(dir), &instalados),
+            RotaEditor::Sistema
+        );
         // sem arquivo alvo não há o que entregar ao editor
-        assert_eq!(rota_do_editor("vscode", None, &instalados), RotaEditor::Sistema);
+        assert_eq!(
+            rota_do_editor("vscode", None, &instalados),
+            RotaEditor::Sistema
+        );
     }
 
     #[test]

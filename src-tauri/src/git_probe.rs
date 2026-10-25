@@ -27,7 +27,11 @@ pub struct GitProbe {
 pub fn probe(path: &Path) -> Result<GitProbe, String> {
     let dentro = crate::git::sonde(path, &["rev-parse", "--is-inside-work-tree"], PRAZO_SONDA)?;
     if dentro.as_deref() != Some("true") {
-        return Ok(GitProbe { is_git_repo: false, branch: None, remote: None });
+        return Ok(GitProbe {
+            is_git_repo: false,
+            branch: None,
+            remote: None,
+        });
     }
     Ok(GitProbe {
         is_git_repo: true,
@@ -37,7 +41,11 @@ pub fn probe(path: &Path) -> Result<GitProbe, String> {
 }
 
 /// Roda a sondagem com prazo, devolvendo o motivo quando ela não volta.
-pub(crate) fn com_prazo<T>(alvo: &str, prazo: Duration, f: impl FnOnce() -> T + Send + 'static) -> Result<T, String>
+pub(crate) fn com_prazo<T>(
+    alvo: &str,
+    prazo: Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String>
 where
     T: Send + 'static,
 {
@@ -52,9 +60,9 @@ where
              com a letra trocada",
             crate::sshexec::texto_duracao(prazo)
         )),
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Err(format!("a sondagem da pasta {alvo} foi interrompida antes de responder"))
-        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(format!(
+            "a sondagem da pasta {alvo} foi interrompida antes de responder"
+        )),
     }
 }
 
@@ -172,12 +180,18 @@ mod tests {
 
     #[test]
     fn desaz_o_caminho_verbatim_do_windows() {
-        assert_eq!(simple(Path::new(r"\\?\C:\repos\app")), PathBuf::from(r"C:\repos\app"));
+        assert_eq!(
+            simple(Path::new(r"\\?\C:\repos\app")),
+            PathBuf::from(r"C:\repos\app")
+        );
         assert_eq!(
             simple(Path::new(r"\\?\UNC\servidor\share\app")),
             PathBuf::from(r"\\servidor\share\app")
         );
-        assert_eq!(simple(Path::new("/home/deploy/app")), PathBuf::from("/home/deploy/app"));
+        assert_eq!(
+            simple(Path::new("/home/deploy/app")),
+            PathBuf::from("/home/deploy/app")
+        );
     }
 
     #[test]
@@ -199,7 +213,10 @@ mod tests {
         let erro = lento.expect_err("50 ms não é tempo de o disco acordar");
         assert!(erro.contains("não respondeu em 50 ms"), "{erro}");
         assert!(erro.contains("projeto"), "{erro}");
-        assert!(decorrido < Duration::from_millis(250), "abandonou tarde: {decorrido:?}");
+        assert!(
+            decorrido < Duration::from_millis(250),
+            "abandonou tarde: {decorrido:?}"
+        );
     }
 
     #[test]
@@ -247,7 +264,10 @@ mod tests {
             Canon::Resolveu(c) => panic!("0 ms não é resposta, é prazo: {c:?}"),
             Canon::Ausente(e) => panic!("prazo vencido não é ausência: {e}"),
         }
-        assert!(antes.elapsed() < Duration::from_millis(250), "abandonou tarde");
+        assert!(
+            antes.elapsed() < Duration::from_millis(250),
+            "abandonou tarde"
+        );
         let _ = std::fs::remove_dir_all(&pasta);
     }
 

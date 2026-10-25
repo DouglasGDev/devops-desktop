@@ -3,8 +3,22 @@ use rusqlite::Connection;
 use crate::db::now_rfc3339;
 
 const KNOWN_TOKEN_PREFIXES: &[&str] = &[
-    "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "sk_live_", "sk_test_", "rk_live_", "xoxb-", "xoxa-", "xoxp-", "xoxr-",
-    "xoxs-", "AKIA", "ASIA",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "sk_live_",
+    "sk_test_",
+    "rk_live_",
+    "xoxb-",
+    "xoxa-",
+    "xoxp-",
+    "xoxr-",
+    "xoxs-",
+    "AKIA",
+    "ASIA",
 ];
 
 /// Remove padrões comuns de segredo de qualquer texto antes de gravar no log.
@@ -18,7 +32,9 @@ pub fn scrub_secrets(text: &str) -> String {
             let start = search_from + pos;
             let mut end = start + prefix.len();
             let bytes = out.as_bytes();
-            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_' || bytes[end] == b'-') {
+            while end < bytes.len()
+                && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_' || bytes[end] == b'-')
+            {
                 end += 1;
             }
             if end > start + prefix.len() {
@@ -54,13 +70,26 @@ fn scrub_key_values(text: &str) -> String {
 }
 
 fn scrub_palavras(linha: &str) -> String {
-    let sensitive = ["password", "passwd", "secret", "token", "apikey", "api_key", "privatekey", "private_key"];
+    let sensitive = [
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "apikey",
+        "api_key",
+        "privatekey",
+        "private_key",
+    ];
     let mut result = String::with_capacity(linha.len());
     for chunk in linha.split_inclusive(char::is_whitespace) {
         let palavra = chunk.trim_end_matches(char::is_whitespace);
         let lower = palavra.to_lowercase();
-        let is_sensitive =
-            palavra.contains('=') && sensitive.iter().any(|s| lower.starts_with(s) || lower.contains(&format!("_{s}=")) || lower.contains(&format!("{s}=")));
+        let is_sensitive = palavra.contains('=')
+            && sensitive.iter().any(|s| {
+                lower.starts_with(s)
+                    || lower.contains(&format!("_{s}="))
+                    || lower.contains(&format!("{s}="))
+            });
         if is_sensitive {
             let (key, _) = palavra.split_once('=').unwrap_or((palavra, ""));
             result.push_str(key);
@@ -114,7 +143,9 @@ mod tests {
 
     #[test]
     fn remove_bloco_pem() {
-        let scrubbed = scrub_secrets("-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----");
+        let scrubbed = scrub_secrets(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----",
+        );
         assert!(scrubbed.contains("removido"));
     }
 
